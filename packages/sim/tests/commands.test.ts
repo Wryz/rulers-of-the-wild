@@ -64,10 +64,10 @@ describe('tick-tagged commands', () => {
       const press: (Button | 'pickup')[] = ['lpunch', 'rpunch', 'lkick', 'rkick', 'pickup'];
       return { x: Math.sin(a) * 0.8, z: Math.cos(a) * 0.8, press: i % 17 === 5 ? press[(i / 17) % 5 | 0] : undefined };
     };
-    // DungeonStyle's sim keeps state at module level (a process-wide fighter id counter
-    // that seeds each fighter's Rng, and more), so two fights in one process don't match.
-    // Each run gets fresh modules, as a fresh process would. (Milestone 1 moves that state
-    // into the world.)
+    // DungeonStyle hands out fighter ids from a process-wide counter (nextId in fighter.ts)
+    // and seeds each fighter's Rng from its id, so two fights in one process don't match.
+    // Each run gets fresh modules, as a fresh process would. (Milestone 1 moves ids into
+    // the world.)
     const run = async (viaCommands: boolean) => {
       vi.resetModules();
       const { CombatSim: Sim } = await import('../src/sim/combat');
