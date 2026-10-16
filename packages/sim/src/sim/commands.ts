@@ -54,7 +54,11 @@ export class CommandQueue {
     this.pending.push(c);
   }
 
-  /** Removes and returns every command due at or before `tick`, in queued order. */
+  /**
+   * Removes and returns every command due at or before `tick`, in queued order. (A command
+   * tagged for a tick that has already run is applied on the next one, not dropped; the
+   * game loop always tags input for the tick after the last one it ran.)
+   */
   take(tick: number): Command[] {
     if (this.pending.length === 0) return [];
     const due: Command[] = [];
@@ -62,6 +66,11 @@ export class CommandQueue {
     for (const c of this.pending) (c.tick <= tick ? due : later).push(c);
     this.pending = later;
     return due;
+  }
+
+  /** Drops a player's pending commands of one kind (a reset that clears their buffered presses). */
+  discard(player: number, kind: Command['kind']) {
+    this.pending = this.pending.filter((c) => c.player !== player || c.kind !== kind);
   }
 
   get length() {

@@ -59,3 +59,6 @@ Run everything from the repository root:
   `apps/client/dist`.
 - `npm run dev`: the dev server at http://localhost:5173 (developer mode is on: L opens the
   tuning panel). DungeonStyle's training ring is at http://localhost:5173/?mode=training.
+  To pick a port, pass it through both npm hops: `npm run dev -- -- --port 5180` (or
+  `npm run dev -w apps/client -- --port 5180`); with a single `--`, Vite takes the number
+  as its root folder.

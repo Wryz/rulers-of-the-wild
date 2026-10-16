@@ -42,10 +42,32 @@ describe('tick-tagged commands', () => {
     sim.step();
     expect(player.moveInput.length()).toBe(0);
     expect(sim.commands.length).toBe(1);
+    const x0 = player.pos.x;
     sim.step();
     expect(sim.frame).toBe(t + 3);
     expect(player.moveInput.x).toBeCloseTo(1, 9);
     expect(sim.commands.length).toBe(0);
+    // Applied as the tick starts, so the player already walks during that same tick.
+    expect(player.pos.x).toBeGreaterThan(x0);
+  });
+
+  it('a press starts its attack on the very tick it is due', () => {
+    const { sim, player } = setup();
+    for (let i = 0; i < 30; i++) sim.step();
+    sim.commands.push({ tick: sim.frame + 1, player: player.id, kind: 'button', button: 'lpunch' });
+    expect(player.state).not.toBe('attack');
+    sim.step();
+    expect(player.state).toBe('attack');
+    expect(player.stateFrame).toBeLessThanOrEqual(1);
+  });
+
+  it('discards a player\'s buffered presses but keeps their walk direction', () => {
+    const q = new CommandQueue();
+    q.push(moveCommand(5, 1, 1, 0));
+    q.push({ tick: 5, player: 1, kind: 'button', button: 'lpunch' });
+    q.push({ tick: 5, player: 2, kind: 'button', button: 'lpunch' });
+    q.discard(1, 'button');
+    expect(q.take(5).map((c) => [c.player, c.kind])).toEqual([[1, 'move'], [2, 'button']]);
   });
 
   it('keeps one move per tick while the loop is not stepping', () => {

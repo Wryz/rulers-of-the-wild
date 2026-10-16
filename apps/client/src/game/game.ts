@@ -451,6 +451,7 @@ export class Game {
     p.poise = p.stats.maxPoise;
     p.counter = null;
     p.buffer = null;
+    this.sim.commands.discard(p.id, 'button');
     // Patched up between rounds: wounds healed, everything reattached, empty-handed.
     p.wounds.length = 0;
     p.severed.clear();
