@@ -4,6 +4,7 @@ import type { PoseName } from '../body/poses';
 import { AIDirector, BrawlerAI, MAX_HEFT } from './ai';
 import { type Button, type Fighter } from './fighter';
 import { RectWalkable, type Walkable } from '../world/collision';
+import { CommandQueue, moveVector } from './commands';
 import { bodyCapsules, overlap as capsuleOverlap, segDist as segDistance, strikingLimbs } from './bodyShapes';
 import { angleDelta, approachAngle, DT, Rng } from './math';
 import { aimBallistic, centreOfMass, integrate, type Projectile, projectileDir, projectilePoints, pointVelocity, substeps } from './projectiles';
@@ -258,6 +259,8 @@ export class CombatSim {
   readonly rng: Rng;
   /** When set, knocked-down fighters' positions are driven externally (ragdoll). */
   externalKnockdown = false;
+  /** Player input, as tick-tagged commands applied at the start of their tick. */
+  readonly commands = new CommandQueue();
   private readonly speeds = new Map<Fighter, { speed: number; lx: number; lz: number; turn: number }>();
 
   constructor(seed = 7) {
@@ -288,6 +291,7 @@ export class CombatSim {
   step(): CombatEvent[] {
     this.events.length = 0;
     this.frame++;
+    this.applyCommands();
     this.director.frame = this.frame;
     const fs = this.fighters;
 
@@ -309,6 +313,24 @@ export class CombatSim {
     this.resolveHits();
     this.stepProjectiles();
     return this.events;
+  }
+
+  /** Applies the player commands due this tick, in the order they were queued. */
+  private applyCommands() {
+    for (const c of this.commands.take(this.frame)) {
+      const f = this.fighters.find((o) => o.id === c.player);
+      if (!f) continue;
+      switch (c.kind) {
+        case 'move':
+          moveVector(c, f.moveInput);
+          break;
+        case 'button':
+          if (!f.alive) break;
+          if (c.button !== 'pickup') f.press(c.button);
+          else if (f.state !== 'pickup') f.pickupRequest = 12;
+          break;
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------

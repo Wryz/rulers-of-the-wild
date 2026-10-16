@@ -27,6 +27,7 @@ import { Effects } from '../render/particles';
 import { FighterView, type GearLook, PLAYER_PALETTE, type Palette } from '../render/fighterView';
 import { lookFor } from '../render/looks';
 import { DEFAULT_AI, type AIConfig } from '@wild/sim';
+import { moveCommand } from '@wild/sim';
 import { buttonMove, type CombatEvent, CombatSim, type Fatal, PARRY_WINDOW, PERFECT_DODGE, type HurtZone, hurtSpheres, strikePoint, type Tear } from '@wild/sim';
 import { DEFENSES, type MoveDef, moveLength } from '@wild/sim';
 import { ARCHETYPES, coinDrop, createEnemy, type EnemyKind, type EnemyMods } from '@wild/sim';
@@ -900,17 +901,18 @@ export class Game {
     const fwd = this.camRig.groundForward;
     const right = this.camRig.groundRight;
     const blocked = this.phase === 'shop' || this.phase === 'down' || this.settings.isOpen || this.battleLog?.isOpen;
-    this.player.moveInput.set(
-      blocked ? 0 : right.x * inp.moveX + fwd.x * inp.moveY,
-      0,
-      blocked ? 0 : right.z * inp.moveX + fwd.z * inp.moveY,
+    // Input reaches the sim only as commands for its next tick (applied as that tick starts).
+    const tick = this.sim.frame + 1;
+    const id = this.player.id;
+    this.sim.commands.push(
+      moveCommand(tick, id, blocked ? 0 : right.x * inp.moveX + fwd.x * inp.moveY, blocked ? 0 : right.z * inp.moveX + fwd.z * inp.moveY),
     );
     for (const b of inp.presses) {
       if (!this.player.alive || blocked) continue;
-      this.player.press(b);
+      this.sim.commands.push({ tick, player: id, kind: 'button', button: b });
       if (++this.attacksThrown === 8) this.hud.fadeHint();
     }
-    if (inp.pickup && this.player.alive && !blocked && this.player.state !== 'pickup') this.player.pickupRequest = 12;
+    if (inp.pickup && this.player.alive && !blocked) this.sim.commands.push({ tick, player: id, kind: 'button', button: 'pickup' });
 
     // Timers in real time (stopped while paused).
     if (!GAME_TUNING.paused) this.tickTimers(realDt);

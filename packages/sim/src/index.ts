@@ -10,6 +10,7 @@ export * from './body/weaponEdge';
 export * from './sim/ai';
 export * from './sim/bodyShapes';
 export * from './sim/combat';
+export * from './sim/commands';
 export * from './sim/enemies';
 export * from './sim/fighter';
 export * from './sim/math';
