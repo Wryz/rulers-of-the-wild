@@ -1,4 +1,6 @@
 import { Vector3 } from 'three';
+import { MOVE_TUNING } from '../sim/rules';
+import type { GroundQuery } from '../world/types';
 import { ANKLE_HEIGHT, bonePoint, type Rig, SKELETON, type Side } from './skeleton';
 
 export interface FootworkStyle {
@@ -8,11 +10,17 @@ export interface FootworkStyle {
   stepFrames: number;
   /** Peak foot lift (m). Boxers glide low. */
   stepHeight: number;
+  /**
+   * A limp (a severe leg wound, docs/M1-DESIGN.md §6.4), `amount` 0..1: the bad leg bears the weight for less time
+   * (the good leg swings through quicker: its swing, the bad leg's time alone on the ground, × (1 −
+   * MOVE_TUNING.limpStanceMul × amount)) and is dragged low (its step height × MOVE_TUNING.limpStepHeightMul).
+   */
+  limp?: { side: Side; amount: number };
 }
 
 export interface Foot {
   side: Side;
-  /** Planted ankle position on the ground (world, y = 0). */
+  /** Planted ankle position on the ground (world; y is the ground's height there, 0 on a flat floor). */
   readonly pos: Vector3;
   readonly from: Vector3;
   readonly to: Vector3;
@@ -33,6 +41,19 @@ interface Body {
   walkVel: Vector3;
   /** Body scale: local (authored) space × scale = world metres. */
   scale?: number;
+  /** The ground the feet plant on (terrain, or what rests on it); absent or null: a flat floor at y = 0. */
+  ground?: GroundQuery | null;
+}
+
+/** Height of the ground a foot plants on at (x, z): what supports it below the body, else the terrain, else 0. */
+function groundY(body: Body, x: number, z: number): number {
+  return body.ground?.supportAt?.(x, z, body.pos.y) ?? body.ground?.heightAt(x, z) ?? 0;
+}
+
+/** Puts a foot target on the ground under it (only on uneven ground: a flat floor already has y = 0). */
+function plant(v: Vector3, body: Body): Vector3 {
+  if (body.ground) v.y = groundY(body, v.x, v.z);
+  return v;
 }
 
 /** Fighter-local stance home for each ankle (orthodox: left foot leads). */
@@ -56,7 +77,7 @@ function makeFoot(side: Side): Foot {
   return { side, pos: new Vector3(), from: new Vector3(), to: new Vector3(), stepping: false, t: 0, dur: 1, height: 0, lead: 0, gait: false };
 }
 
-/** World point → fighter-local (authored, unscaled) coordinates. */
+/** World point → fighter-local (authored, unscaled) coordinates; y is measured from the body's feet (pos.y). */
 export function toLocal(world: Vector3, body: Body, out: Vector3): Vector3 {
   const k = 1 / (body.scale ?? 1);
   const dx = world.x - body.pos.x;
@@ -64,15 +85,17 @@ export function toLocal(world: Vector3, body: Body, out: Vector3): Vector3 {
   const c = Math.cos(body.yaw);
   const s = Math.sin(body.yaw);
   // Inverse of the yaw rotation used by forwardKinematics.
-  return out.set((dx * c - dz * s) * k, world.y * k, (dx * s + dz * c) * k);
+  return out.set((dx * c - dz * s) * k, (world.y - body.pos.y) * k, (dx * s + dz * c) * k);
 }
 
-/** Fighter-local (authored) ground point → world. */
+/** Fighter-local (authored) ground point → world, on the ground there. */
 export function toWorld(lx: number, lz: number, body: Body, out: Vector3): Vector3 {
   const k = body.scale ?? 1;
   const c = Math.cos(body.yaw);
   const s = Math.sin(body.yaw);
-  return out.set(body.pos.x + (lx * c + lz * s) * k, 0, body.pos.z + (-lx * s + lz * c) * k);
+  const x = body.pos.x + (lx * c + lz * s) * k;
+  const z = body.pos.z + (-lx * s + lz * c) * k;
+  return out.set(x, groundY(body, x, z), z);
 }
 
 /**
@@ -122,12 +145,12 @@ export class Footwork {
     return [(bx * w) * (1 - g) + wx * g + offX, (bz * w) * (1 - g) + wz * g + offZ];
   }
 
-  /** Plant both feet where the current pose has them (after authored-leg animations). */
-  syncToRig(rig: Rig) {
+  /** Plant both feet where the current pose has them (after authored-leg animations), on `body`'s ground. */
+  syncToRig(rig: Rig, body?: Body) {
     for (const f of [this.L, this.R]) {
       const shin = f.side === 'L' ? 'shinL' : 'shinR';
       bonePoint(rig, shin, SKELETON[shin].length, _v);
-      f.pos.set(_v.x, 0, _v.z);
+      f.pos.set(_v.x, body ? groundY(body, _v.x, _v.z) : 0, _v.z);
       f.stepping = false;
     }
     this.initialized = true;
@@ -159,7 +182,7 @@ export class Footwork {
       const [hx, hz] = this.homeLocal(f.side, offX, offZ);
       toWorld(hx, hz, body, _home);
       // Homes lead the body a little when moving, so feet land ahead and stay planted.
-      _home.addScaledVector(body.walkVel, STEP_LEAD);
+      plant(_home.addScaledVector(body.walkVel, STEP_LEAD), body);
       homes[f.side].copy(_home);
       errors[f.side] = Math.hypot(_home.x - f.pos.x, _home.z - f.pos.z);
       errors[f.side] /= sc;
@@ -191,6 +214,7 @@ export class Footwork {
         f.to.x = homes[f.side].x + (hx / hl) * maxReach;
         f.to.z = homes[f.side].z + (hz / hl) * maxReach;
       }
+      plant(f.to, body);
       const u = f.t * f.t * (3 - 2 * f.t);
       f.pos.lerpVectors(f.from, f.to, u);
       // The swinging foot goes round the planted one, not through it (turning, stepping
@@ -285,8 +309,9 @@ export class Footwork {
       f.gait = false;
       f.dur = forced ? Math.max(4, dur - 2) : dur;
       f.height = this.style.stepHeight * this.mods.stepHeight * (retreat ? 0.6 : 1) * (0.6 + 0.6 * speedFrac) * Math.min(1, errors[side] / (0.15 * stride));
+      this.applyLimp(f);
       // Aim where the home will be when the foot lands.
-      f.to.copy(homes[side]).addScaledVector(body.walkVel, f.dur / 60);
+      plant(f.to.copy(homes[side]).addScaledVector(body.walkVel, f.dur / 60), body);
       f.stepping = true;
       if (this.steps === 0) this.firstStepper = side;
       this.steps++;
@@ -333,7 +358,8 @@ export class Footwork {
       f.lead = lead;
       f.gait = true;
       f.height = (0.045 + 0.02 * speed + 0.07 * run) * Math.min(1.4, this.mods.stepHeight);
-      f.to.copy(homes[side]).addScaledVector(body.walkVel, dur / 60 + lead);
+      this.applyLimp(f);
+      plant(f.to.copy(homes[side]).addScaledVector(body.walkVel, f.dur / 60 + lead), body);
       f.stepping = true;
       if (this.steps === 0) this.firstStepper = side;
       this.steps++;
@@ -364,6 +390,18 @@ export class Footwork {
     }
   }
 
+  /**
+   * A limp shapes a step as it starts: the bad leg is dragged low, the good one swings through quicker so the body
+   * spends less time on the bad one (FootworkStyle.limp).
+   */
+  private applyLimp(f: Foot) {
+    const limp = this.style.limp;
+    if (!limp || !(limp.amount > 0)) return;
+    const a = Math.min(1, limp.amount);
+    if (f.side === limp.side) f.height *= 1 - (1 - MOVE_TUNING.limpStepHeightMul) * a;
+    else f.dur = Math.max(4, Math.round(f.dur * (1 - MOVE_TUNING.limpStanceMul * a)));
+  }
+
   /** Are the feet on the wrong sides of each other (relative to where the body faces)? */
   legsCrossed(body: Body): boolean {
     const l = toLocal(this.L.pos, body, _v).x;
@@ -371,12 +409,15 @@ export class Footwork {
     return l - r < 0.04;
   }
 
-  /** Ankle IK target in fighter-local space, including step lift and an extra raise (toes). */
+  /**
+   * Ankle IK target in fighter-local space, including step lift and an extra raise (toes), and the height of the
+   * ground under the foot above the body's own feet (0 on a flat floor).
+   */
   localTarget(side: Side, body: Body, raise: number): [number, number, number] {
     const f = this.foot(side);
     toLocal(f.pos, body, _v);
     const lift = f.stepping ? Math.sin(Math.PI * f.t) * f.height : 0;
-    return [_v.x, ANKLE_HEIGHT + lift + raise, _v.z];
+    return [_v.x, ANKLE_HEIGHT + lift + raise + _v.y, _v.z];
   }
 
   /**

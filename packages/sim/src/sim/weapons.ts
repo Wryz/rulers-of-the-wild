@@ -44,6 +44,11 @@ export interface WeaponDef {
    * sledge is held choked up and the hand slides down the swing; a sword isn't.
    */
   choke: number;
+  /**
+   * How sharp what leads a thrown hit is, 0..1 (the damage rule's s, SPEC:281); absent = 0.8 for a blade, 0 for a
+   * blunt weapon (docs/M1-DESIGN.md §4.4, the world-mode thrown rule).
+   */
+  sharpness?: number;
   /** How it's used: quick strike (Q), committed strike (E), and what Q chains into. */
   light: string;
   heavy: string;

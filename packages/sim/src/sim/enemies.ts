@@ -1,6 +1,6 @@
 import { type WeaponId, WEAPONS } from './weapons';
 import { type AIConfig, type AIPlan, BRAWLER_PLAN, BrawlerAI, DEFAULT_AI } from './ai';
-import { Fighter, type FighterStats, type FighterStyle } from './fighter';
+import { Fighter, type FighterOpts, type FighterStats, type FighterStyle } from './fighter';
 import type { Rng } from './math';
 import { ENEMY_MOVES } from './moves';
 import { BRAWLER_STYLE } from './roster';
@@ -741,8 +741,17 @@ export interface EnemyMods {
   readMul?: number;
 }
 
-/** Builds an enemy; round modifiers make later rounds tougher. */
-export function createEnemy(kind: EnemyKind, rng: Rng, mods: EnemyMods = {}, baseAi: Partial<AIConfig> = {}): { fighter: Fighter; ai: BrawlerAI } {
+/**
+ * Builds an enemy; round modifiers make later rounds tougher. `opts`: a world's id counter and rng seed (default:
+ * the legacy counter and DungeonStyle's seed).
+ */
+export function createEnemy(
+  kind: EnemyKind,
+  rng: Rng,
+  mods: EnemyMods = {},
+  baseAi: Partial<AIConfig> = {},
+  opts?: FighterOpts,
+): { fighter: Fighter; ai: BrawlerAI } {
   const a = ARCHETYPES[kind];
   const sc = a.scale ?? 1;
   // (Everyone takes a good deal more than a few clean shots to put away.)
@@ -750,7 +759,7 @@ export function createEnemy(kind: EnemyKind, rng: Rng, mods: EnemyMods = {}, bas
   stats.damageMul = (stats.damageMul ?? 1) * (mods.dmgMul ?? 1);
   // Bigger bodies stride further per step.
   if (stats.walkSpeed) stats.walkSpeed *= Math.sqrt(sc);
-  const fighter = new Fighter('enemy', a.name, ENEMY_MOVES, stats, a.style);
+  const fighter = new Fighter('enemy', a.name, ENEMY_MOVES, stats, a.style, opts);
   fighter.scale = sc;
   if (a.weapon) fighter.weapon = WEAPONS[a.weapon];
   if (a.ammo) fighter.ammo = { weapon: WEAPONS[a.ammo.weapon], count: a.ammo.count };

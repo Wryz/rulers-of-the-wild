@@ -59,6 +59,11 @@ export class IdleBehavior {
   shuffles = 0;
   /** Live multipliers from the contextual motion profile. */
   readonly mods = { bounce: 1, bounceHz: 1, sway: 1, head: 1, feints: 1, paws: 1 };
+  /**
+   * Paused (the fighter's `idlePaused`, docs/M1-DESIGN.md §12.2 I16): idle life holds still where it is — no weight
+   * shift, look-around, bounce, feint, paw or re-stancing — so a paused body moves only when something moves it.
+   */
+  paused = false;
 
   constructor(
     public style: IdleStyle,
@@ -79,6 +84,9 @@ export class IdleBehavior {
    * @param still the fighter is idle and not walking
    */
   tick(engaged: boolean, still: boolean) {
+    // Paused: every clock, timer and offset stays where it is, so stanceOffset(), toeRaise() and apply() hold the
+    // same pose tick after tick (freezing rather than resetting, which would make the body jump once).
+    if (this.paused) return;
     const fps = 60;
     this.t += 1 / fps;
     this.engagedBlend += ((engaged ? 1 : 0) - this.engagedBlend) * 0.05;
