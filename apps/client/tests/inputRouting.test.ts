@@ -54,6 +54,34 @@ describe('client input routing', () => {
     ).toEqual([]);
   });
 
+  it("assigns no fighter field, moves no fighter's position, and edits no fighter's wounds (rule 6)", () => {
+    // A fighter as client code names it (DS game.ts's names included).
+    const F = String.raw`\b(?:f|fighter|player|victim|defender|attacker|killer|target|e\.f|e\.victim|e\.defender|e\.attacker|e\.killer|this\.player|world\.player|w\.player)`;
+    const FIELDS = String.raw`(?:weapon|hp|yaw|state|stateFrame|stamina|guard|poise|stats|minHp|counter|buffer|target|name|team|scale|massKg|inventory|load|drive|posture|work|moveFlags|jumpRequest|idlePaused|ruler|playerId|lastKnock|armour|toughnessJ|species|wounds|severed|limbDamage)`;
+    const VECTOR_WRITE = String.raw`(?:[xyz]\s*[-+*/]?=(?!=)|(?:set|copy|add|sub|addScaledVector|lerp|multiplyScalar|setX|setY|setZ|setScalar|applyQuaternion|normalize)\()`;
+    expect(
+      offences([
+        new RegExp(String.raw`${F}\.${FIELDS}\s*[-+*/]?=(?!=)`),
+        new RegExp(String.raw`${F}\.(?:pos|vel|walkVel|moveInput|rig)\.${VECTOR_WRITE}`),
+        new RegExp(String.raw`Object\.assign\(\s*${F}\b`),
+        /\.wounds\.(push|splice|pop|shift)\(|\.wounds\.length\s*=(?!=)|\.severed\.(add|delete|clear)\(/,
+      ]),
+    ).toEqual([]);
+    // Any `.pos.x = …` outside the particle pools (whose drops and sparks have their own `pos`).
+    expect(offences([/\.pos\.[xyz]\s*[-+*/]?=(?!=)/], ['../src/render/particles.ts', '../src/render/blood.ts', '../src/render/gibs.ts'])).toEqual([]);
+  });
+
+  it("consumes none of the sim's random streams and never reaches into its Rapier world (rule 7)", () => {
+    expect(offences([/\.(rng|rngs)\b/, /\bworld\.physics\b/, /\.physics\.rapier\b/])).toEqual([]);
+  });
+
+  it('changes sim tuning only through the setTuning dev command (applied at its tick, RR-17)', () => {
+    expect(offences([/\b(setTuningValue|restoreTuning|resetTuning)\(/])).toEqual([]);
+    expect(SOURCES[LOOP]).toMatch(/dev\(op: DevOp, args: number\[\], tuning\?: TuningEdit\)/);
+  });
+
+  it.todo('debug/panel.ts binds no sim table or fighter field (P37: edits go through loop.dev("setTuning", …))');
+
   it('calls no world, entity, joint, terrain or CombatSim mutator (dev ops are commands, RF-19)', () => {
     expect(
       offences([
