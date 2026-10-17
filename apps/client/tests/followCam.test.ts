@@ -204,7 +204,7 @@ describe('follow camera over the terrain', () => {
   });
 });
 
-describe('the spring arm: the boom comes in before it lifts, so the view turns where it is asked', () => {
+describe('the spring arm: the boom comes in before it tilts, so the view turns where it is asked', () => {
   /** The view's pitch (rad, positive looking down). */
   const viewPitch = (cam: FollowCam) => {
     const d = cam.camera.getWorldDirection(new Vector3());
@@ -245,7 +245,7 @@ describe('the spring arm: the boom comes in before it lifts, so the view turns w
     expect(after.angleTo(before) / DEG).toBeCloseTo(2, 6);
   });
 
-  it('when even minDistance is under the hill, the rest is lifted and the pitch becomes the one seen (no unseen pile-up)', () => {
+  it('when even minDistance is under the hill, the boom tilts up and the pitch becomes the one seen (no unseen pile-up)', () => {
     // Facing downhill on 30°: the camera is up the slope behind.
     const g = plane(30, 0);
     const p = standing(g, 0, 0, Math.PI);
@@ -254,10 +254,9 @@ describe('the spring arm: the boom comes in before it lifts, so the view turns w
     cam.snapBehind(p);
     for (let i = 0; i < 30; i++) cam.update(DT60, w, p, { dx: 0, dy: -mouseFor(1) });
     for (let i = 0; i < 120; i++) cam.update(DT60, w, p, NO_LOOK);
-    // In as far as it goes, then lifted: it looks down more steeply than minPitchDeg, and the pitch says so.
+    // In as far as it goes (minDistance), then tilted up: it looks down more steeply than minPitchDeg, and the pitch says so.
     const c = cam.camera.position;
-    expect(c.distanceTo(cam.lookPoint)).toBeGreaterThan(FOLLOW_TUNING.minDistance - 1e-9);
-    expect(c.distanceTo(cam.lookPoint)).toBeLessThan(FOLLOW_TUNING.minDistance + 0.5);
+    expect(c.distanceTo(cam.lookPoint)).toBeCloseTo(FOLLOW_TUNING.minDistance, 6);
     expect(cam.pitch).toBeGreaterThan(FOLLOW_TUNING.minPitchDeg * DEG + 5 * DEG);
     expect(viewPitch(cam)).toBeCloseTo(cam.pitch, 9);
     expect(c.y - g(c.x, c.z)).toBeGreaterThanOrEqual(FOLLOW_TUNING.clearance - EPS);
