@@ -67,12 +67,6 @@ export const TERRAIN_TUNING = defineTuning(
   },
 );
 
-/**
- * Height slack for "at the spoil cap": heights are float32, so a vertex raised to `original + spoilMaxRiseM` can sit a
- * few µm either side of it. Not a starting value: floating-point slack.
- */
-const CAP_SLACK_M = 1e-4;
-
 /** One stored height that differs from its generated value (a terrain edit, for the save). */
 export interface TerrainEdit {
   tile: number;
@@ -300,9 +294,9 @@ export class Terrain implements GroundQuery {
     this.forVerticesWithin(x, z, r, (gi, gj, d) => {
       if (this.nearDug[gj * this.vx + gi] > 0) return;
       const h = this.vertexHeight(this.heights, gi, gj);
-      const cap = this.vertexHeight(this.original, gi, gj) + T.spoilMaxRiseM - h;
-      if (cap <= CAP_SLACK_M) return;
-      cand.push({ gi, gj, w: 1 - d / r, cap, h });
+      const top = this.spoilCap(gi, gj);
+      if (h >= top) return;
+      cand.push({ gi, gj, w: 1 - d / r, cap: top - h, h });
     });
     if (cand.length === 0) return { tiles: [], raisedM3: 0 };
     // Find k with Σ min(k·w, cap) = volume / cellArea (vertices saturate in order of cap / w).
@@ -353,11 +347,19 @@ export class Terrain implements GroundQuery {
         if (gi < 0 || gj < 0 || gi >= this.vx || gj >= this.vz) continue;
         if (this.nearDug[gj * this.vx + gi] > 0) continue;
         const h = this.vertexHeight(this.heights, gi, gj);
-        if (h >= this.vertexHeight(this.original, gi, gj) + T.spoilMaxRiseM - CAP_SLACK_M) continue;
+        if (h >= this.spoilCap(gi, gj)) continue;
         return { x: this.minX + gi * this.spacing, z: this.minZ + gj * this.spacing };
       }
     }
     return null;
+  }
+
+  /**
+   * The highest height spoil may raise world vertex (gi, gj) to: original + spoilMaxRiseM as a float32 (the heights'
+   * own precision, so a vertex raised to its cap reads exactly as at its cap).
+   */
+  spoilCap(gi: number, gj: number): number {
+    return Math.fround(this.vertexHeight(this.original, gi, gj) + TERRAIN_TUNING.spoilMaxRiseM);
   }
 
   /** Whether a world vertex (by world indices) is ever-dug. */
