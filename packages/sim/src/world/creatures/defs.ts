@@ -308,6 +308,12 @@ export const NOISE_TUNING = defineTuning(
     apeShout: 30,
     giantRoar: 120,
     crouchNoiseMul: 0.3,
+    // Not §9.1 rows (P18): the gait a footstep is heard at (§6.2: "from each fighter's walkVel and moveFlags"). A foot set
+    // down at or above runMinSpeed × √scale is a running step, at or above sprintMinSpeed × √scale a sprinting one;
+    // crouched, a crouching step whatever the speed. √scale: a body `scale` times as long walks and runs √scale times as
+    // fast at the same gait (dynamic similarity), so the giant's 7 m/s charge is a run and its 1.8 m/s patrol a walk.
+    runMinSpeed: 2.9,
+    sprintMinSpeed: 4.5,
   },
   {
     stepCrouch: meta('m (× scale)', 'NEW: SPEC:755'),
@@ -330,5 +336,7 @@ export const NOISE_TUNING = defineTuning(
     apeShout: meta('m', 'NEW'),
     giantRoar: meta('m', 'NEW'),
     crouchNoiseMul: meta('×', 'NEW'),
+    runMinSpeed: meta('m/s × √scale', "NEW (P18): the middle of footwork's walk-to-run blend (2.2-3.6 m/s, footwork.ts)"),
+    sprintMinSpeed: meta('m/s × √scale', 'NEW (P18): between the 3.77 m/s run and the 5.28 m/s sprint (§5.5)'),
   },
 );
