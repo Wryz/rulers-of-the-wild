@@ -11,6 +11,8 @@ import { type FolderApi, Pane } from 'tweakpane';
 import {
   defineTuning,
   type DevOp,
+  GIVE_TOOLS,
+  type GiveTool,
   DT,
   type Entity,
   type Fighter,
@@ -44,11 +46,19 @@ export const PANEL_TUNING = defineTuning(
 );
 
 /**
- * The dev ops world/devOps.ts applies today. Every other op throws in phase 1c until P22 fills devOps.ts, which would
- * break the tick, so its button stays disabled. TODO(P22): add each op here as devOps.ts implements it (and check the
- * argument encodings below against it).
+ * The dev ops world/devOps.ts applies (P22: all of them). An op left out of this set gets a disabled button: a dev op
+ * devOps.ts can't apply would throw in phase 1c and break the tick.
  */
-export const DEV_OPS_READY: ReadonlySet<DevOp> = new Set<DevOp>(['setTuning']);
+export const DEV_OPS_READY: ReadonlySet<DevOp> = new Set<DevOp>([
+  'spawnApe',
+  'spawnGiant',
+  'giveTool',
+  'teleport',
+  'pauseMinds',
+  'killCreature',
+  'respawnPlayer',
+  'setTuning',
+]);
 
 /** What the panel needs of the game (game/game.ts's Game is one). */
 export interface PanelHost {
@@ -273,7 +283,7 @@ export class DevPanel implements PanelPort {
         if (a) this.host.loop?.dev(devOp, a);
       });
     };
-    // Argument encodings (TODO(P22): confirm against world/devOps.ts): points in whole cm, like verb commands.
+    // Argument encodings: world/devOps.ts's table (points in whole cm, like verb commands; giveTool indexes GIVE_TOOLS).
     op('Spawn an ape near', 'spawnApe', () => {
       const p = this.host.world.player;
       if (!p) return null;
@@ -281,7 +291,7 @@ export class DevPanel implements PanelPort {
       return cm([p.pos.x + Math.sin(p.yaw) * d, p.pos.z + Math.cos(p.yaw) * d]);
     });
     op('Spawn the giant at its lair', 'spawnGiant', () => []);
-    TOOLS.forEach((tool, i) => op(`Give: ${tool}`, 'giveTool', () => [i]));
+    GIVE_TOOLS.forEach((tool, i) => op(`Give: ${TOOL_LABELS[tool]}`, 'giveTool', () => [i]));
     op('Teleport: spawn', 'teleport', () => cm([Number(getTuningValue('WORLD_TUNING', 'spawnX')), Number(getTuningValue('WORLD_TUNING', 'spawnZ'))]));
     op('Teleport: home A', 'teleport', () => {
       const h = this.homeA();
@@ -612,8 +622,8 @@ export class DevPanel implements PanelPort {
 // Helpers
 // -----------------------------------------------------------------------------
 
-/** The tools "give a tool" offers (§10.10). TODO(P22): the index is giveTool's first argument. */
-const TOOLS = ['stone axe', 'digging stick', 'spear', '12 m vine'] as const;
+/** The labels of the tools "give a tool" offers (§10.10); giveTool's argument is the tool's index in GIVE_TOOLS. */
+const TOOL_LABELS: Record<GiveTool, string> = { stoneAxe: 'stone axe', diggingStick: 'digging stick', spear: 'spear', vine: 'vine (DEV_OPS_TUNING.vineM)' };
 
 /** A Tweakpane on `container`, as the panel's root folder. */
 function tweakpane(container: HTMLElement): PanelFolder {
