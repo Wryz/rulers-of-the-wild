@@ -112,9 +112,9 @@ const luminance = (c: Color) => 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
 // ---------------------------------------------------------------------------
 
 describe('terrain', () => {
-  it('draws every vertex exactly at the sim height (within 1e-5 m) at both levels of detail', () => {
+  it('draws every vertex exactly at the sim height (within 1e-5 m) at every level of detail', () => {
     const t = bumpy();
-    for (const spacing of [RENDER_TUNING.nearSpacing, RENDER_TUNING.farSpacing]) {
+    for (const spacing of [RENDER_TUNING.nearSpacing, RENDER_TUNING.farSpacing, RENDER_TUNING.terrain.distantSpacing]) {
       for (let tile = 0; tile < t.tileCount; tile++) {
         const g = tileGeometry(t, tile, spacing);
         const n = surfaceVertexCount(g);
@@ -207,11 +207,18 @@ describe('terrain', () => {
     const scene = new Scene();
     const view = new TerrainView(scene, { terrain: t, cover: NO_COVER });
     view.sync({ terrain: t, cover: NO_COVER }, new Vector3(0, 0, 0));
-    let near = 0;
-    for (let i = 0; i < t.tileCount; i++) if (view.tileSpacingOf(i) === T.nearSpacing) near++;
-    // From the centre: the 4 × 4 tiles within 40 m.
-    expect(near).toBe(16);
-    expect(view.tileSpacingOf(0)).toBe(T.farSpacing);
+    const count = (s: number) => [...Array(t.tileCount).keys()].filter((i) => view.tileSpacingOf(i) === s).length;
+    // From the centre: the 4 × 4 tiles within 40 m near; the 16 more within distantTileM (70 m) far; the rest distant.
+    expect(count(T.nearSpacing)).toBe(16);
+    expect(count(T.farSpacing)).toBe(16);
+    expect(count(T.terrain.distantSpacing)).toBe(32);
+    expect(view.tileSpacingOf(0)).toBe(T.terrain.distantSpacing);
+    // The distant level has hysteresis too.
+    expect(tileSpacing(T.terrain.distantTileM + T.lodHysteresisM - 0.1, T.farSpacing)).toBe(T.farSpacing);
+    expect(tileSpacing(T.terrain.distantTileM + T.lodHysteresisM + 0.1, T.farSpacing)).toBe(T.terrain.distantSpacing);
+    expect(tileSpacing(T.terrain.distantTileM - T.lodHysteresisM + 0.1, T.terrain.distantSpacing)).toBe(T.terrain.distantSpacing);
+    expect(tileSpacing(T.terrain.distantTileM - T.lodHysteresisM - 0.1, T.terrain.distantSpacing)).toBe(T.farSpacing);
+    expect(tileSpacing(1, T.terrain.distantSpacing)).toBe(T.nearSpacing);
     view.dispose();
   });
 
@@ -472,15 +479,25 @@ describe('entities', () => {
       return e.sharpPoints.map((sp) => ({ at: new Vector3(sp.local.x, sp.local.y, sp.local.z).applyQuaternion(q).add(new Vector3(e.pose.p.x, e.pose.p.y, e.pose.p.z)), s: sp.sharpness }));
     });
     const lens: number[] = [];
+    const reach = DAMAGE_TUNING.tipRadiusM;
     for (let i = 0; i < views.sharp.count; i++) {
       const m = views.sharp.matrixAt(i);
       // The cone's tip is its origin; its base centre 1 unit down its axis.
       const tip = new Vector3(0, 0, 0).applyMatrix4(m);
       const base = new Vector3(0, -1, 0).applyMatrix4(m);
-      expect(tips.some((t) => t.at.distanceTo(tip) < 1e-5)).toBe(true);
       const len = tip.distanceTo(base);
       lens.push(len);
-      expect(len).toBeLessThanOrEqual(DAMAGE_TUNING.tipRadiusM + 1e-9);
+      if (i < 2) {
+        // A shaped end (a hull): the tip exactly on the point, the cone inside the shape, no longer than tipRadiusM.
+        expect(tips.some((t) => t.at.distanceTo(tip) < 1e-5)).toBe(true);
+        expect(len).toBeLessThanOrEqual(reach + 1e-9);
+      } else {
+        // A snag's stub (no geometry of its own): out of the surface by snagStubOutM along the point's direction, never
+        // further from the point than tipRadiusM (what the sharp-point test scores).
+        const d = Math.min(...tips.map((t) => t.at.distanceTo(tip)));
+        expect(d).toBeCloseTo(Math.min(reach, RENDER_TUNING.entities.snagStubOutM), 5);
+        expect(d).toBeLessThanOrEqual(reach + 1e-9);
+      }
     }
     // Sharper points have bigger cones (the stake at 0.6 over the blunted end at 0.1).
     expect(lens[0]).toBeGreaterThan(lens[1]);

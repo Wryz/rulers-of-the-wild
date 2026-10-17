@@ -4,9 +4,10 @@
 // the Clearing's render, P32) lives here.
 //
 // Level of detail: tiles within RENDER_TUNING.nearTileM of the camera use every sim vertex (nearSpacing 0.25 m: exactly
-// the collider's surface); the others every second one (farSpacing 0.5 m), with lodHysteresisM of slack so a tile on the
-// boundary doesn't flip every frame. A skirt hangs from every tile edge so the T-junctions between a near and a far tile
-// never open a crack.
+// the collider's surface); the others every second one (farSpacing 0.5 m); and, P32's addition, tiles beyond
+// terrain.distantTileM (in the fog) every fourth (terrain.distantSpacing 1 m), which halves the terrain's cost on a slow
+// renderer. lodHysteresisM of slack keeps a tile on a boundary from flipping every frame. A skirt hangs from every tile
+// edge so the T-junctions between levels never open a crack.
 //
 // Readability (rule 3): vertex colours show what the ground is: grass green, paler where the ground cover is dense dry
 // grass (cover ≥ terrain.dryCoverFrom), fresh brown dirt where it has been dug or heaped (more than terrain.dugM off its
@@ -92,6 +93,8 @@ export const RENDER_TUNING = defineTuning(
     // P32's own looks below (not §9.1 rows: the design names the effects, these are their sizes and colours), so none
     // is a bare constant in the views.
     terrain: {
+      distantTileM: 70,
+      distantSpacing: 1,
       grass: '#5d7a3a',
       grassDry: '#a8a066',
       dirt: '#6b4a2d',
@@ -146,6 +149,8 @@ export const RENDER_TUNING = defineTuning(
       sharpColor: '#efe0bd',
       sharpConeLenM: 0.12,
       sharpConeRadiusM: 0.03,
+      snagStubOutM: 0.07,
+      snagStubRadiusM: 0.04,
       sagFrac: 0.03,
       sagMaxM: 0.1,
       strainBendFrac: 0.04,
@@ -159,8 +164,8 @@ export const RENDER_TUNING = defineTuning(
       frayJitterFrac: 0.9,
     },
     grass: {
-      heightM: 0.55,
-      widthM: 0.55,
+      heightM: 0.5,
+      widthM: 0.45,
       green: '#5f8a3a',
       dry: '#c4b878',
       rebuildMoveM: 4,
@@ -206,6 +211,14 @@ export const RENDER_TUNING = defineTuning(
       step: 0.01,
     },
     terrain: {
+      distantTileM: {
+        unit: 'm',
+        source: 'NEW: P32 (a third level beyond §10.4\'s two: tiles this far from the camera, past fogNear, are drawn coarser)',
+        min: 0,
+        max: 1000,
+        step: 1,
+      },
+      distantSpacing: { unit: 'm', source: 'NEW: P32 (the distant level\'s vertex spacing)', min: 0.25, max: 5, step: 0.25 },
       grass: colour('NEW: P32 (grass green, §10.4)'),
       grassDry: colour('NEW: P32 (dense dry grass is pale, §10.4, rule 3)'),
       dirt: colour('NEW: P32 (dug or heaped ground, §10.4)'),
@@ -266,6 +279,15 @@ export const RENDER_TUNING = defineTuning(
         step: 0.005,
       },
       sharpConeRadiusM: { unit: 'm at sharpness 1', source: 'NEW: §10.4', min: 0, max: 0.2, step: 0.005 },
+      snagStubOutM: {
+        unit: 'm',
+        source:
+          'NEW: P32 (a sharp point on a prism or box, a snag: drawn standing this far out of the surface, capped at DAMAGE_TUNING.tipRadiusM, so it reads; TODO "snag stub geometry (rule 3)")',
+        min: 0,
+        max: 0.15,
+        step: 0.005,
+      },
+      snagStubRadiusM: { unit: 'm at sharpness 1', source: 'NEW: P32 (a snag stub\'s base)', min: 0, max: 0.2, step: 0.005 },
       sagFrac: { unit: '× length', source: 'NEW: SPEC:362 (integrity < integritySag sags)', min: 0, max: 0.2, step: 0.005 },
       sagMaxM: { unit: 'm', source: 'NEW: SPEC:362', min: 0, max: 1, step: 0.01 },
       strainBendFrac: { unit: '× length at capacity', source: 'NEW: §10.4 (a load above strainShowFrac of capacity bends it)', min: 0, max: 0.3, step: 0.005 },
@@ -320,14 +342,24 @@ export function tileDistance(t: Terrain, tile: number, x: number, z: number): nu
 }
 
 /**
- * The vertex spacing a tile at `dist` m from the camera is drawn at: nearSpacing within nearTileM, farSpacing beyond,
- * with lodHysteresisM of slack around the boundary for a tile already drawn at one of them (`current`).
+ * The vertex spacing a tile at `dist` m from the camera is drawn at: nearSpacing within nearTileM, farSpacing within
+ * terrain.distantTileM, terrain.distantSpacing beyond; a tile already drawn at one of them (`current`) keeps it until
+ * it is lodHysteresisM past the boundary.
  */
 export function tileSpacing(dist: number, current: number | null): number {
   const T = RENDER_TUNING;
-  if (current === T.nearSpacing) return dist > T.nearTileM + T.lodHysteresisM ? T.farSpacing : T.nearSpacing;
-  if (current === T.farSpacing) return dist < T.nearTileM - T.lodHysteresisM ? T.nearSpacing : T.farSpacing;
-  return dist <= T.nearTileM ? T.nearSpacing : T.farSpacing;
+  const levels = [
+    { within: T.nearTileM, spacing: T.nearSpacing },
+    { within: Math.max(T.nearTileM, T.terrain.distantTileM), spacing: T.farSpacing },
+    { within: Infinity, spacing: T.terrain.distantSpacing },
+  ];
+  const natural = levels.findIndex((l) => dist <= l.within);
+  const cur = current === null ? -1 : levels.findIndex((l) => l.spacing === current);
+  if (cur < 0) return levels[natural].spacing;
+  // Coarser only once past the current level's boundary by the slack; finer only once inside the next finer one's.
+  if (natural > cur) return dist > levels[cur].within + T.lodHysteresisM ? levels[natural].spacing : current!;
+  if (natural < cur) return dist < levels[cur - 1].within - T.lodHysteresisM ? levels[natural].spacing : current!;
+  return current!;
 }
 
 interface TileView {

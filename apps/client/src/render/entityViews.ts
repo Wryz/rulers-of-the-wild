@@ -776,15 +776,11 @@ export class EntityViews {
     if (e.sharpPoints.length === 0) return;
     const E = RENDER_TUNING.entities;
     _sharp.set(E.sharpColor);
-    const maxLen = DAMAGE_TUNING.tipRadiusM;
     for (const sp of e.sharpPoints) {
-      const s = Math.min(1, Math.max(0, sp.sharpness));
-      const len = Math.min(maxLen, E.sharpConeLenM * (0.35 + 0.65 * s));
-      const rad = E.sharpConeRadiusM * (0.45 + 0.55 * s);
-      _dir.set(sp.dir.x, sp.dir.y, sp.dir.z);
-      if (_dir.lengthSq() < 1e-12) continue;
-      _q.setFromUnitVectors(_up, _dir.normalize());
-      _m.compose(_local.set(sp.local.x, sp.local.y, sp.local.z), _q, _s.set(rad, len, rad));
+      const c = sharpCone(e.shape, sp);
+      if (!c) continue;
+      _q.setFromUnitVectors(_up, _dir.set(sp.dir.x, sp.dir.y, sp.dir.z).normalize());
+      _m.compose(_local.set(c.tip.x, c.tip.y, c.tip.z), _q, _s.set(c.radius, c.length, c.radius));
       _m2.copy(M).multiply(_m);
       this.sharp.push(_m2, _sharp);
     }
@@ -811,6 +807,32 @@ export class EntityViews {
       this.cracks.push(_m2, _crack);
     }
   }
+}
+
+/**
+ * The pale cone drawn at a sharp point (entity frame): its tip, length and base radius, sized by sharpness. Where the
+ * shape has the point (a hull: a shaped end, a knapped edge) the tip is exactly the sharp point and the cone lies
+ * inside the shape. A point on a prism or a box (a snag's broken-branch stub, which has no geometry of its own) is drawn
+ * as a short stub standing out of the surface by entities.snagStubOutM, never more than DAMAGE_TUNING.tipRadiusM: the
+ * sharp-point test scores any contact within that of the point, so nothing drawn reaches past what it scores (TODO
+ * "snag stub geometry (rule 3)").
+ */
+export function sharpCone(shape: Shape, sp: { local: V3; dir: V3; sharpness: number }): { tip: V3; length: number; radius: number } | null {
+  const E = RENDER_TUNING.entities;
+  const d = Math.hypot(sp.dir.x, sp.dir.y, sp.dir.z);
+  if (!(d > 1e-9)) return null;
+  const s = Math.min(1, Math.max(0, sp.sharpness));
+  const reach = DAMAGE_TUNING.tipRadiusM;
+  if (shape.kind === 'hull') {
+    return { tip: { ...sp.local }, length: Math.min(reach, E.sharpConeLenM * (0.35 + 0.65 * s)), radius: E.sharpConeRadiusM * (0.45 + 0.55 * s) };
+  }
+  const out = Math.min(reach, E.snagStubOutM);
+  const k = out / d;
+  return {
+    tip: { x: sp.local.x + sp.dir.x * k, y: sp.local.y + sp.dir.y * k, z: sp.local.z + sp.dir.z * k },
+    length: out + Math.min(reach, E.sharpConeLenM),
+    radius: E.snagStubRadiusM * (0.6 + 0.4 * s),
+  };
 }
 
 /** A key that changes whenever the shape does. */

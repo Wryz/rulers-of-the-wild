@@ -4,7 +4,7 @@
 // (the meadows, cover ≥ terrain.dryCoverFrom), and dug ground is bare (a tuft is never laid where the ground is more
 // than terrain.dugM off its generated height, nor on rock too steep to climb). Re-laid when the camera has moved
 // grass.rebuildMoveM or the terrain changed (a dig also clears the cover cell, §4.13).
-import { BufferAttribute, BufferGeometry, Color, DoubleSide, Group, Matrix4, Quaternion, type Scene, Vector3 } from 'three';
+import { BufferAttribute, BufferGeometry, Color, Group, Matrix4, Quaternion, type Scene, Vector3 } from 'three';
 import { CLEARING_TUNING, type Terrain } from '@wild/sim';
 import { flatMaterial, Instancer } from './entityViews';
 import { hash2, RENDER_TUNING } from './terrainView';
@@ -15,25 +15,37 @@ export interface GrassSource {
   cover: { at(x: number, z: number): number };
 }
 
-/** Two crossed quads 1 m wide and 1 m tall standing on the origin, darker at the root (vertex colours). */
+/**
+ * A tuft 1 m wide and 1 m tall standing on the origin: two crossed rows of three pointed blades, leaning out, darker at
+ * the root (vertex colours), each blade faced both ways. Its normals point up, so a blade is lit like the ground it grows
+ * from, from either side.
+ */
 export function tuftGeometry(): BufferGeometry {
   const pos: number[] = [];
   const col: number[] = [];
-  const index: number[] = [];
   for (const a of [0, Math.PI / 2]) {
-    const cx = Math.cos(a) * 0.5;
-    const cz = Math.sin(a) * 0.5;
-    const base = pos.length / 3;
-    // Bottom left, bottom right, top right (leaning a little), top left.
-    pos.push(-cx, 0, -cz, cx, 0, cz, cx * 0.7, 1, cz * 0.7, -cx * 0.7, 1, -cz * 0.7);
-    col.push(0.55, 0.55, 0.55, 0.55, 0.55, 0.55, 1, 1, 1, 1, 1, 1);
-    index.push(base, base + 1, base + 2, base, base + 2, base + 3);
+    const ux = Math.cos(a);
+    const uz = Math.sin(a);
+    for (let b = 0; b < 3; b++) {
+      const c = (b - 1) / 3;
+      const w = 0.17 + 0.03 * b;
+      const lean = (b - 1) * 0.22;
+      const h = b === 1 ? 1 : 0.78;
+      // Root left, root right, tip (leaning out from the middle); then the same blade wound the other way, so it has a
+      // front face from both sides (a double-sided material would flip the back face's normal and draw it black).
+      const l = [(c - w) * ux, 0, (c - w) * uz];
+      const r = [(c + w) * ux, 0, (c + w) * uz];
+      const t = [(c + lean) * ux, h, (c + lean) * uz];
+      pos.push(...l, ...r, ...t, ...r, ...l, ...t);
+      col.push(0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 1, 1, 1, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 1, 1, 1);
+    }
   }
   const g = new BufferGeometry();
   g.setAttribute('position', new BufferAttribute(new Float32Array(pos), 3));
   g.setAttribute('color', new BufferAttribute(new Float32Array(col), 3));
-  g.setIndex(index);
-  g.computeVertexNormals();
+  const normals = new Float32Array(pos.length);
+  for (let i = 1; i < normals.length; i += 3) normals[i] = 1;
+  g.setAttribute('normal', new BufferAttribute(normals, 3));
   return g;
 }
 
@@ -62,7 +74,8 @@ export class GrassView {
     this.group.name = 'grass';
     scene.add(this.group);
     const mat = flatMaterial({ vertexColors: true, roughness: 1 });
-    mat.side = DoubleSide;
+    // (Smooth-shaded with the tuft's up normals: flat shading would light each blade by its own face, dark from behind.)
+    mat.flatShading = false;
     this.tufts = new Instancer(this.group, tuftGeometry(), mat, 1024, 'grass');
     this.tufts.mesh.castShadow = false;
   }
