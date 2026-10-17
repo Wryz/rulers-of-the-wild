@@ -44,9 +44,12 @@ beforeAll(async () => {
   await physicsReady();
 });
 
-afterEach(() => {
+afterEach(async () => {
   for (const w of live.splice(0)) w.dispose();
   resetTuning();
+  // Back to the event loop's I/O between tests: this file steps worlds for over a minute under load with no other turn
+  // of it, and the worker's progress messages to Vitest would time out (60 s) unanswered.
+  await new Promise<void>((resolve) => setImmediate(resolve));
 });
 
 // ---------------------------------------------------------------------------
