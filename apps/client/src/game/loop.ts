@@ -82,6 +82,7 @@ export class GameLoop<W extends LoopWorld = World> implements LoopPort {
   private stepOnce = false;
   private hidden = false;
   private running = false;
+  private stopped = false;
   private visibility: (() => void) | null = null;
 
   constructor(
@@ -109,8 +110,11 @@ export class GameLoop<W extends LoopWorld = World> implements LoopPort {
 
   /** One rendered frame of `realDt` real seconds. */
   frame(realDt: number): void {
+    if (this.stopped) return;
     const inp = this.input.poll();
     for (const k of inp.keys) this.metaKey(k);
+    // A key may have stopped the loop (dev Backspace disposes the world to rebuild it): nothing more this frame.
+    if (this.stopped) return;
     this.game.beginFrame(inp, this);
     // Input reaches the sim only as commands for its next tick (applied as that tick starts).
     if (!this.blocked) for (const c of this.game.verbInput.commands(inp, this.world.tick + 1)) this.world.commands.push(c);
@@ -120,15 +124,17 @@ export class GameLoop<W extends LoopWorld = World> implements LoopPort {
     if (!paused) this.tickTimers(realDt);
     let scale = GAME_TUNING.timeScale * (this.cine.active ? this.cine.timeScale : this.slowmo > 0 ? LOOP_TUNING.slowmoScale : 1);
     if (paused) scale = 0;
+    const max = LOOP_TUNING.maxStepsPerFrame;
+    let steps = 0;
     if (this.stepOnce) {
+      // (Counted toward the frame's cap: a requested step is never a 7th.)
       this.stepOnce = false;
       this.fixedStep();
+      steps++;
     }
     // (A camera cut is already the slow-motion beat: no hit-pause frozen on top of it.)
     if (this.cine.active && this.hitstop > 0) this.hitstop = 0;
     this.accum += realDt * scale;
-    const max = LOOP_TUNING.maxStepsPerFrame;
-    let steps = 0;
     while (this.accum >= DT && steps < max) {
       this.fixedStep();
       this.accum -= DT;
@@ -176,9 +182,11 @@ export class GameLoop<W extends LoopWorld = World> implements LoopPort {
 
   /** Starts the requestAnimationFrame loop (and the hidden-tab pause). */
   start(): void {
-    if (this.running) return;
+    if (this.running || this.stopped) return;
     this.running = true;
     if (typeof document !== 'undefined' && !this.visibility) {
+      // TODO open question SPEC:982 (world alive while closed?): default no — the hidden tab pauses, time away only
+      // reaches traplines (M3).
       const onChange = () => this.setHidden(document.hidden);
       document.addEventListener('visibilitychange', onChange);
       this.visibility = () => document.removeEventListener('visibilitychange', onChange);
@@ -195,8 +203,9 @@ export class GameLoop<W extends LoopWorld = World> implements LoopPort {
     requestAnimationFrame(loop);
   }
 
-  /** Stops the loop (a rebuild disposes the world after this). */
+  /** Stops the loop for good (a rebuild disposes the world after this): no frame runs from now on. */
   stop(): void {
+    this.stopped = true;
     this.running = false;
     this.visibility?.();
     this.visibility = null;

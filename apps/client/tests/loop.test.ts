@@ -1,11 +1,12 @@
 // The game loop (docs/M1-DESIGN.md §10.2, rule 8): every time effect only changes how many sim steps run in a frame.
-// Driven with a fake world (counts its steps) and a fake presenter; the last test drives a real World.
+// Driven with a fake world (counts its steps) and a fake presenter; one test drives a real World. Then the beats: the
+// time effects game.ts asks the loop for, event by event (beatOf, pure).
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { type Command, createWorld, DT, type StepResult, type World } from '@wild/sim';
+import { type Command, createPlayer, createWorld, DT, PLAYER_MOVES, type StepResult, type World } from '@wild/sim';
 import { bootParams, rebuildSearch } from '../src/dev';
-import { GAME_TUNING } from '../src/game/game';
+import { type Beat, type BeatContext, beatOf, GAME_TUNING } from '../src/game/game';
 import { GameLoop, type LoopGame, LOOP_TUNING, type LoopWorld } from '../src/game/loop';
-import type { LoopPort, VerbInputPort } from '../src/game/ports';
+import type { LoopPort, SimEvent, VerbInputPort } from '../src/game/ports';
 import type { InputFrame } from '../src/input/input';
 import { VerbInput } from '../src/input/verbInput';
 import { Vector3 } from 'three';
@@ -49,8 +50,11 @@ class FakeGame<W extends LoopWorld> implements LoopGame<W> {
   readonly presentation = { step: (_w: W) => void this.presentationSteps++ };
   constructor(readonly verbInput: VerbInputPort) {}
   beginFrame(_inp: InputFrame, _loop: LoopPort): void {}
+  /** Called on each key the loop hands on (a rebuild stopping the loop, say). */
+  onKey: ((code: string) => void) | null = null;
   metaKey(code: string): void {
     this.keys.push(code);
+    this.onKey?.(code);
   }
   present(r: StepResult, loop: LoopPort): void {
     this.presents++;
@@ -128,6 +132,28 @@ describe('GameLoop: stepping', () => {
     GAME_TUNING.timeScale = 1.5;
     loop.frame(1);
     expect(world.steps).toBe(13);
+  });
+
+  it('a requested step counts toward the cap: never a 7th step in a frame', () => {
+    const { world, loop } = rig();
+    loop.requestStep();
+    loop.frame(0.5);
+    expect(world.steps).toBe(LOOP_TUNING.maxStepsPerFrame);
+  });
+
+  it('a key that stops the loop (dev Backspace: rebuild) ends the frame: no step on a disposed world', () => {
+    const { world, game, input, loop } = rig();
+    game.onKey = (code) => {
+      if (code === 'Backspace') loop.stop();
+    };
+    input.queue.push(frameOf({ keys: ['Backspace'], moveY: 1 }));
+    loop.frame(DT);
+    expect(game.keys).toEqual(['Backspace']);
+    expect(world.steps).toBe(0);
+    expect(world.pushed).toEqual([]);
+    expect(game.renders).toHaveLength(0);
+    loop.frame(DT);
+    expect(world.steps).toBe(0);
   });
 
   it('presents each stepped tick, hands its save bytes on, and steps the presentation after the sim', () => {
@@ -366,5 +392,111 @@ describe('boot parameters', () => {
   it('a rebuild keeps the seed and the mode', () => {
     expect(bootParams(rebuildSearch('?mode=training', 77), true, never)).toEqual({ seed: 77, sparringApe: true });
     expect(rebuildSearch('?seed=5&dev', 6)).toBe('?seed=6&dev=');
+  });
+});
+
+describe('Game beats: what an event asks of the loop and the camera (beatOf)', () => {
+  const me = createPlayer();
+  const them = createPlayer();
+  const moves = Object.values(PLAYER_MOVES);
+  const light = moves.find((m) => m.weight === 'light' && m.hitstop > 0)!;
+  const heavy = moves.find((m) => m.weight === 'heavy' && m.hitstop > 0)!;
+  const ctx = (o: Partial<BeatContext> = {}): BeatContext => ({ player: me, cues: false, hitstop: 0, falling: new Set(), camera: { x: 0, y: 2, z: 0 }, ...o });
+  /** An event with only the fields a beat reads (the rest of the sim's event doesn't matter here). */
+  const ev = <T extends SimEvent['type']>(type: T, fields: Record<string, unknown>) => ({ type, ...fields }) as unknown as Extract<SimEvent, { type: T }>;
+  const hit = (o: Record<string, unknown> = {}) =>
+    ev('hit', { attacker: them, defender: me, move: light, weapon: null, counter: false, ko: false, armored: false, sever: null, fatal: null, ...o });
+  /** Applies a beat's time effects to a real loop, as Game.present does. */
+  const applyTo = (loop: GameLoop<FakeWorld>, b: Beat) => {
+    loop.hitstop = b.hitstop;
+    if (b.slow) loop.slowMotion(b.slow);
+    if (b.treeLanded) loop.treeLanded(b.treeLanded.distanceM);
+  };
+
+  it("a blow's hit-pause comes from its move, kept short without cues; the struck body shivers", () => {
+    const b = beatOf(hit(), ctx());
+    expect(b.hitstop).toBe(Math.min(Math.round(light.hitstop), Math.max(2, Math.round(light.hitstop * 0.45))));
+    expect(b.victim).toBe(me);
+    expect(b.shake).toBeCloseTo(light.shake * 0.6);
+    expect(b.slow).toBeNull();
+    const cued = beatOf(hit({ move: heavy, counter: true }), ctx({ cues: true }));
+    expect(cued.hitstop).toBe(Math.round(heavy.hitstop * 1.35));
+    expect(cued.punch).toBe(1);
+    // A longer pause already running is never shortened by a blow (with cues on).
+    expect(beatOf(hit(), ctx({ cues: true, hitstop: 50 })).hitstop).toBe(50);
+  });
+
+  it('a severed limb or a split skull: slow motion (dismember), a bigger jolt', () => {
+    const { loop } = rig();
+    const b = beatOf(hit({ sever: 'foreArmL' }), ctx());
+    expect(b.slow).toBe('dismember');
+    expect(b.punch).toBe(1.2);
+    applyTo(loop, b);
+    expect(loop.slowmo).toBe(LOOP_TUNING.dismemberSlowmoS);
+    expect(LOOP_TUNING.dismemberSlowmoS).toBe(0.6);
+    expect(beatOf(hit({ fatal: 'split' }), ctx()).slow).toBe('dismember');
+  });
+
+  it('a perfect parry or your perfect dodge: slow motion (0.35 s); a plain block: a 3-step pause, 8 on a guard break', () => {
+    const { loop } = rig();
+    const parry = beatOf(ev('block', { attacker: them, defender: me, move: light, guardBreak: false, parry: true, perfect: true }), ctx());
+    expect(parry.slow).toBe('parry');
+    applyTo(loop, parry);
+    expect(loop.slowmo).toBe(0.35);
+    expect(beatOf(ev('block', { attacker: them, defender: me, move: light, guardBreak: false, parry: false }), ctx()).hitstop).toBe(3);
+    expect(beatOf(ev('block', { attacker: them, defender: me, move: light, guardBreak: true, parry: false }), ctx()).hitstop).toBe(8);
+    expect(beatOf(ev('dodge', { attacker: them, defender: me, move: light, kind: 'slip', perfect: true }), ctx()).slow).toBe('parry');
+    expect(beatOf(ev('dodge', { attacker: me, defender: them, move: light, kind: 'slip', perfect: true }), ctx()).slow).toBeNull();
+  });
+
+  it("the player's KO: slow motion (1.5 s) and the colour drains; someone else's: a jolt only", () => {
+    const { loop } = rig();
+    const b = beatOf(ev('ko', { victim: me }), ctx());
+    expect(b.slow).toBe('playerKo');
+    expect(b.mood).toBe('death');
+    expect(b.shake).toBeCloseTo(0.5 * me.scale);
+    applyTo(loop, b);
+    expect(loop.slowmo).toBe(1.5);
+    const other = beatOf(ev('ko', { victim: them }), ctx());
+    expect([other.slow, other.mood]).toEqual([null, null]);
+    expect(other.shake).toBeGreaterThan(0);
+  });
+
+  it('a felled tree landing within 25 m of the camera is a 4-step hit-pause; farther, none', () => {
+    const fell = beatOf(ev('fell', { tree: 9, dir: { x: 1, y: 0, z: 0 } }), ctx());
+    expect(fell.treeFalling).toBe(9);
+    const falling = new Set([9]);
+    const near = beatOf(ev('land', { entity: 9, f: null, point: { x: 20, y: 2, z: 0 }, energy: 1e5, mass: 900 }), ctx({ falling }));
+    expect(near.treeLanded).toEqual({ tree: 9, distanceM: 20 });
+    const a = rig();
+    applyTo(a.loop, near);
+    expect(a.loop.hitstop).toBe(4);
+    const far = beatOf(ev('land', { entity: 9, f: null, point: { x: 30, y: 2, z: 0 }, energy: 1e5, mass: 900 }), ctx({ falling }));
+    const b = rig();
+    applyTo(b.loop, far);
+    expect(b.loop.hitstop).toBe(0);
+    // A log that wasn't a falling tree is no beat.
+    expect(beatOf(ev('land', { entity: 4, f: null, point: { x: 1, y: 0, z: 0 }, energy: 10, mass: 30 }), ctx({ falling })).treeLanded).toBeNull();
+  });
+
+  it("a world impact raises the sim's hit-pause hint and shakes the camera when it is yours", () => {
+    const b = beatOf(ev('impact', { defender: me, hitstop: 5, shake: 0.3 }), ctx({ hitstop: 2 }));
+    expect([b.hitstop, b.victim, b.shake]).toEqual([5, me, 0.3]);
+    const other = beatOf(ev('impact', { defender: them, hitstop: 0, shake: 0.3 }), ctx({ hitstop: 2 }));
+    expect([other.hitstop, other.shake]).toEqual([2, 0]);
+  });
+
+  it('death and respawn: the banner counts to the respawn tick, the respawn snaps the camera and the body back', () => {
+    expect(beatOf(ev('death', { f: me, respawnTick: 700 }), ctx()).respawnTick).toBe(700);
+    expect(beatOf(ev('death', { f: them, respawnTick: 700 }), ctx()).respawnTick).toBeUndefined();
+    const r = beatOf(ev('respawn', { f: me, at: { x: 0, y: 0, z: 0 } }), ctx());
+    expect([r.respawnTick, r.mood, r.snap]).toEqual([null, '', me]);
+    expect(beatOf(ev('respawn', { f: them, at: { x: 0, y: 0, z: 0 } }), ctx()).snap).toBeNull();
+  });
+
+  it('a refused verb of yours says why', () => {
+    expect(beatOf(ev('verb', { f: me, verb: 'take', ok: false, reason: 'tooHeavy' }), ctx()).popup).toBe('take: tooHeavy');
+    expect(beatOf(ev('verb', { f: me, verb: 'take', ok: true }), ctx()).popup).toBeNull();
+    expect(beatOf(ev('verb', { f: them, verb: 'take', ok: false }), ctx()).popup).toBeNull();
   });
 });
