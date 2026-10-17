@@ -1,5 +1,7 @@
 import { Vector3 } from 'three';
+import { numFromRecord, readV3, v3Record } from '../body/animator';
 import type { Walkable } from '../world/collision';
+import type { V3 } from '../world/types';
 import type { Drop } from './combat';
 import type { Fighter } from './fighter';
 import type { Rng } from './math';
@@ -101,7 +103,21 @@ export class AIDirector {
   claim() {
     this.lastAttack = this.frame;
   }
+
+  // Save record (docs/M1-DESIGN.md §8.3 `director`, P04; MAP gap-7 §3.2). `frame` is set from the sim at the start of
+  // every tick, and `gap` is a setting, not state.
+
+  toRecord(): AIDirectorRecord {
+    return { lastAttack: this.lastAttack };
+  }
+
+  restoreRecord(r: AIDirectorRecord) {
+    this.lastAttack = numFromRecord(r.lastAttack, 'director.lastAttack');
+  }
 }
+
+/** AIDirector's saved state (the save's `director`). */
+export type AIDirectorRecord = { lastAttack: number };
 
 /** A strike of theirs still on its way in (wind-up or active), not yet spent. */
 function incoming(t: Fighter): boolean {
@@ -654,4 +670,92 @@ export class BrawlerAI implements Brain {
     this.chain = next && this.rng.chance(this.cfg.stringChance) ? next : null;
     this.cooldown = this.rng.range(30, 70);
   }
+
+  // ---------------------------------------------------------------------------
+  // Save record (docs/M1-DESIGN.md §8.3, §6.8 `inner`, P04; MAP gap-7 §3.3)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * The 20 history fields (MAP gap-7 §3.3). Not saved: `cfg` and `plan` (settings its maker gives it), `rng` (the
+   * sim's own Rng, which the AI must share rather than copy: the loader passes the same object), `drops` and
+   * `director` (re-linked by CombatSim.add), `walkable` (set at the top of every think) and `armed` (a cache rebuilt
+   * from the weapon). `prevDist` starts at Infinity (no target yet): the canonical writer keeps it as '$inf'.
+   */
+  toRecord(): BrawlerAIRecord {
+    return {
+      cooldown: this.cooldown,
+      strafe: this.strafe,
+      strafeTimer: this.strafeTimer,
+      detourSide: this.detourSide,
+      detourFrames: this.detourFrames,
+      chain: this.chain,
+      decidedSerial: this.decidedSerial,
+      willBlock: this.willBlock,
+      punishDelay: this.punishDelay,
+      crowdedFor: this.crowdedFor,
+      circleSide: this.circleSide,
+      circleFrames: this.circleFrames,
+      winded: this.winded,
+      // Insertion order: the decrement loop walks them in it.
+      specialCool: Object.keys(this.specialCool).map((k): [string, number] => [k, this.specialCool[k]]),
+      sinceOwnAttack: this.sinceOwnAttack,
+      waited: this.waited,
+      retreatFor: this.retreatFor,
+      prevDist: this.prevDist,
+      pinned: this.pinned,
+      lastPos: v3Record(this.lastPos),
+    };
+  }
+
+  /** Puts back a toRecord() state. */
+  restoreRecord(r: BrawlerAIRecord) {
+    const n = numFromRecord;
+    this.cooldown = n(r.cooldown, 'ai.cooldown');
+    this.strafe = n(r.strafe, 'ai.strafe');
+    this.strafeTimer = n(r.strafeTimer, 'ai.strafeTimer');
+    this.detourSide = r.detourSide;
+    this.detourFrames = n(r.detourFrames, 'ai.detourFrames');
+    this.chain = r.chain;
+    this.decidedSerial = n(r.decidedSerial, 'ai.decidedSerial');
+    this.willBlock = r.willBlock;
+    this.punishDelay = n(r.punishDelay, 'ai.punishDelay');
+    this.crowdedFor = n(r.crowdedFor, 'ai.crowdedFor');
+    this.circleSide = r.circleSide;
+    this.circleFrames = n(r.circleFrames, 'ai.circleFrames');
+    this.winded = r.winded;
+    for (const k of Object.keys(this.specialCool)) delete this.specialCool[k];
+    for (const [k, v] of r.specialCool) this.specialCool[k] = n(v, `ai.specialCool.${k}`);
+    this.sinceOwnAttack = n(r.sinceOwnAttack, 'ai.sinceOwnAttack');
+    this.waited = n(r.waited, 'ai.waited');
+    this.retreatFor = n(r.retreatFor, 'ai.retreatFor');
+    this.prevDist = n(r.prevDist, 'ai.prevDist');
+    this.pinned = n(r.pinned, 'ai.pinned');
+    readV3(r.lastPos, this.lastPos, 'ai.lastPos');
+  }
 }
+
+/** BrawlerAI's saved state: its 20 history fields (BrawlerAI.toRecord; the save's BrawlerRecV1). */
+export type BrawlerAIRecord = {
+  cooldown: number;
+  strafe: number;
+  strafeTimer: number;
+  detourSide: 1 | -1;
+  detourFrames: number;
+  chain: string | null;
+  decidedSerial: number;
+  willBlock: boolean;
+  punishDelay: number;
+  crowdedFor: number;
+  circleSide: 1 | -1;
+  circleFrames: number;
+  winded: boolean;
+  /** [move id, frames] in insertion order. */
+  specialCool: [string, number][];
+  sinceOwnAttack: number;
+  waited: number;
+  retreatFor: number;
+  /** Infinity until the first think with a target. */
+  prevDist: number;
+  pinned: number;
+  lastPos: V3;
+};
