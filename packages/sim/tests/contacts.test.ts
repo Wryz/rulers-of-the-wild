@@ -1,0 +1,769 @@
+// The contact pipeline (docs/M1-DESIGN.md §4.3, §3 phase 9; package P09): the A lab's sensor normals and event timing
+// as tests, the AC-6 measured tick, one impact per episode and no score for a bounce (RF-12), the history-reset grace
+// (RF-1), self-motion and the attacking limb (RF-3), momentum only through the solver for solid pairs and standing
+// rulers (RF-4), released and thrown entities (RF-3, D-31), and the system's save record.
+//
+// No ruler exists before P11: the ruler cases build a stand-in ruler (a Fighter with `ruler` set and its own Rapier
+// colliders registered as owner part 'ruler'), and sim/ruler.ts's rule functions are stubbed here (P11 fills and
+// tests them).
+import RAPIER from '@dimforge/rapier3d-compat';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import type { BoneName } from '../src/body/skeleton';
+import { MOVE_SPRINT, moveCommand } from '../src/sim/commands';
+import { createEnemy } from '../src/sim/enemies';
+import type { Fighter } from '../src/sim/fighter';
+import { freeDv, IMPACT_TUNING } from '../src/sim/impact';
+import { DT, Rng } from '../src/sim/math';
+import * as ruler from '../src/sim/ruler';
+import { DAMAGE_TUNING } from '../src/sim/rules';
+import { SPECIES_BODY } from '../src/sim/species';
+import { restoreTuning, tuningSnapshot } from '../src/tuning/registry';
+import { castContact } from '../src/world/contacts';
+import { dot } from '../src/world/damage';
+import { spawnLog, spawnStick } from '../src/world/factory';
+import { COLLIDES_WITH, collisionGroups, G, GROUP, solverGroups } from '../src/world/groups';
+import { type ContactPair, ownerKey, PhysicsWorld, physicsReady } from '../src/world/physics';
+import type { Owner, RulerState, V3, WorldEvent } from '../src/world/types';
+import { createWorld, type World, type WorldOptions } from '../src/world/world';
+import { WORLD_TUNING } from '../src/world/worldTuning';
+
+vi.mock('../src/sim/ruler', async (importOriginal) => {
+  const m = await importOriginal<typeof import('../src/sim/ruler')>();
+  return {
+    ...m,
+    rulerTick: vi.fn(),
+    rulerDamage: vi.fn(() => null),
+    classifyRulerZone: vi.fn(() => 'leg'),
+    rulerToughness: vi.fn(() => 4000),
+    rulerVolumes: vi.fn(() => []),
+    rulerHit: vi.fn(),
+  };
+});
+
+type ImpactEv = Extract<WorldEvent, { type: 'impact' }>;
+
+const snapshot = tuningSnapshot();
+const live: World[] = [];
+beforeAll(async () => {
+  await physicsReady();
+});
+afterEach(() => {
+  for (const w of live.splice(0)) w.dispose();
+  restoreTuning(snapshot);
+  vi.mocked(ruler.rulerDamage).mockClear();
+});
+
+async function make(o: Partial<WorldOptions> = {}): Promise<World> {
+  const w = await createWorld({ seed: 1, scene: 'empty', nav: 'off', size: 50, ...o });
+  live.push(w);
+  return w;
+}
+
+function addApe(w: World, x: number, z: number, yaw = 0): Fighter {
+  const ids = w.ids.fighter;
+  const { fighter: f } = createEnemy('bruiser', new Rng(3), {}, {}, { ids, rngSeed: w.rngs.fighterSeed(ids.next) });
+  f.scale = SPECIES_BODY.ape.scale;
+  f.species = 'ape';
+  f.massKg = SPECIES_BODY.ape.massKg;
+  f.pos.set(x, w.terrain.heightAt(x, z), z);
+  f.yaw = yaw;
+  w.addFighter(f, null);
+  w.teleport(f, x, z, yaw);
+  return f;
+}
+
+function rulerState(): RulerState {
+  return {
+    maxHp: SPECIES_BODY.giantApe.maxHp,
+    unhealed: 0,
+    wounds: [],
+    pinned: false,
+    pinnedKg: 0,
+    unpinTicks: 0,
+    stuck: false,
+    burning: false,
+    inPit: false,
+    downWound: null,
+    downCause: null,
+    lastWorldTrip: null,
+    deflectedHeading: null,
+    pendingTrip: null,
+  };
+}
+
+/** A stand-in giant (P11 builds the real one): far off for CombatSim, its bones are colliders the test places. */
+function addFakeRuler(w: World): Fighter {
+  const ids = w.ids.fighter;
+  const { fighter: g } = createEnemy('bruiser', new Rng(4), {}, {}, { ids, rngSeed: w.rngs.fighterSeed(ids.next) });
+  g.scale = SPECIES_BODY.giantApe.scale;
+  g.massKg = SPECIES_BODY.giantApe.massKg;
+  g.species = 'giantApe';
+  g.ruler = rulerState();
+  g.pos.set(20, 0, 20);
+  w.addFighter(g, null);
+  return g;
+}
+
+function rulerCollider(w: World, g: Fighter, bone: BoneName, body: RAPIER.RigidBody, desc: RAPIER.ColliderDesc): RAPIER.Collider {
+  const c = w.physics.rapier.createCollider(desc.setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS), body);
+  w.physics.register(c, { kind: 'fighter', id: g.id, part: 'ruler', bone });
+  return c;
+}
+
+const sensorDesc = (d: RAPIER.ColliderDesc) => d.setSensor(true).setActiveCollisionTypes(RAPIER.ActiveCollisionTypes.ALL).setCollisionGroups(collisionGroups('RULER_ZONE')).setSolverGroups(solverGroups('RULER_ZONE'));
+
+/** Steps the world, collecting every world event. */
+function run(w: World, ticks: number, before?: (t: number) => boolean | void): WorldEvent[] {
+  const all: WorldEvent[] = [];
+  for (let t = 0; t < ticks; t++) {
+    if (before?.(t) === true) break;
+    w.step();
+    all.push(...w.events);
+  }
+  return all;
+}
+
+const impactsOn = (ev: readonly WorldEvent[], f: Fighter): ImpactEv[] => ev.filter((e): e is ImpactEv => e.type === 'impact' && e.defender === f);
+const ent = (id: number): Owner => ({ kind: 'entity', id });
+const zoneOf = (f: Fighter): Owner => ({ kind: 'fighter', id: f.id, part: 'zone' });
+/** An entity's collider that no character controller meets (the controller walks through it; the zones still do). */
+function noChar(w: World, id: number): void {
+  w.entities.get(id)!.collider!.setCollisionGroups(G(GROUP.ENTITY, COLLIDES_WITH.ENTITY & ~GROUP.CHAR));
+}
+const speed = (v: V3 | null | undefined) => (v ? Math.hypot(v.x, v.y, v.z) : 0);
+
+// ---------------------------------------------------------------------------
+// The A lab's measurements, as tests
+// ---------------------------------------------------------------------------
+
+describe('sensor normals: the cast between the start-of-previous-step poses (A lab normals.mjs (1), departure X4)', () => {
+  it('gives the outward normal and v_n = |v_rel| in all four of the lab’s cases', () => {
+    const I = { x: 0, y: 0, z: 0, w: 1 };
+    for (const [label, stoneV, zoneV, y0, want] of [
+      ['head-on', 12, -2, 0.1, 14],
+      ['oblique', 12, -2, 0.25, 14],
+      ['fast 30', 30, 0, 0, 30],
+      ['zone sweeping into a still stone', 0, -9, 0, 9],
+    ] as const) {
+      const w = new RAPIER.World({ x: 0, y: 0, z: 0 });
+      w.timestep = DT;
+      const eq = new RAPIER.EventQueue(true);
+      const zb = w.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(1, 0, 0));
+      const zc = w.createCollider(
+        RAPIER.ColliderDesc.cuboid(0.5, 0.3, 0.4).setSensor(true).setActiveCollisionTypes(RAPIER.ActiveCollisionTypes.ALL).setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS),
+        zb,
+      );
+      const sb = w.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(-1, y0, 0).setLinvel(stoneV, 0, 0));
+      const sc = w.createCollider(RAPIER.ColliderDesc.ball(0.05).setMass(0.5).setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS), sb);
+      let zx = 1;
+      let prevZx = 1;
+      const hist: { zone: V3; stone: V3; vZone: V3; vStone: V3 }[] = [];
+      let done = false;
+      for (let t = 1; t < 200 && !done; t++) {
+        const zp = zc.translation();
+        const sp = sc.translation();
+        const sv = sb.linvel();
+        hist.push({ zone: { x: zp.x, y: zp.y, z: zp.z }, stone: { x: sp.x, y: sp.y, z: sp.z }, vZone: { x: (zx - prevZx) / DT, y: 0, z: 0 }, vStone: { x: sv.x, y: sv.y, z: sv.z } });
+        prevZx = zx;
+        zx += zoneV * DT;
+        zb.setNextKinematicTranslation({ x: zx, y: 0, z: 0 });
+        w.step(eq);
+        let started = false;
+        eq.drainCollisionEvents((_a, _b, s) => {
+          if (s) started = true;
+        });
+        if (!started) continue;
+        const now = hist[hist.length - 1];
+        const prev = hist[hist.length - 2];
+        const hit = castContact(zc.shape, { p: prev.zone, q: I }, now.vZone, sc.shape, { p: prev.stone, q: I }, now.vStone);
+        expect(hit, label).not.toBeNull();
+        expect(hit!.n.x, label).toBeCloseTo(-1, 3);
+        expect(Math.abs(hit!.n.y) + Math.abs(hit!.n.z), label).toBeLessThan(1e-3);
+        // Closing speed (v_zone − v_stone)·n, n out of the zone.
+        const vn = dot({ x: now.vZone.x - now.vStone.x, y: now.vZone.y - now.vStone.y, z: now.vZone.z - now.vStone.z }, hit!.n);
+        expect(vn, label).toBeCloseTo(want, 2);
+        // The point lies on the zone's face (x = its centre − 0.5 at the time of impact).
+        expect(hit!.point.x, label).toBeCloseTo(prev.zone.x + now.vZone.x * hit!.toi - 0.5, 3);
+        done = true;
+      }
+      expect(done, label).toBe(true);
+      eq.free();
+      w.free();
+    }
+  });
+});
+
+describe('event timing (A lab timing.mjs): what the phase-5 store holds at the event step', () => {
+  const zoneOwner: Owner = { kind: 'fighter', id: 1, part: 'zone', bone: 'head' };
+
+  it('a kinematic zone starts when its start-of-step pose overlaps; carryV is the previous tick’s delta (a: 6 m/s; c: 48, not 96)', () => {
+    for (const [label, steps, eventTick, startX, carry] of [
+      ['constant 0.1 m/tick', Array(20).fill(0.1) as number[], 11, 1.0, 6],
+      ['accelerating', [0.05, 0.1, 0.2, 0.4, 0.8, 1.6], 6, 1.55, 48],
+    ] as const) {
+      const ph = new PhysicsWorld();
+      const box = ph.rapier.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(1.5, 0, 0));
+      ph.register(
+        ph.rapier.createCollider(RAPIER.ColliderDesc.cuboid(0.5, 0.5, 0.5).setActiveCollisionTypes(RAPIER.ActiveCollisionTypes.ALL).setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS), box),
+        { kind: 'entity', id: 1 },
+      );
+      const kb = ph.rapier.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(0, 0, 0));
+      ph.register(
+        ph.rapier.createCollider(RAPIER.ColliderDesc.ball(0.1).setSensor(true).setActiveCollisionTypes(RAPIER.ActiveCollisionTypes.ALL).setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS), kb),
+        zoneOwner,
+      );
+      let x = 0;
+      let at = -1;
+      for (let t = 1; t <= steps.length; t++) {
+        x += steps[t - 1];
+        kb.setNextKinematicTranslation({ x, y: 0, z: 0 }); // phase 4b
+        ph.storePreStep(); // phase 5
+        ph.step(); // phase 7
+        ph.snapshotPostStep();
+        const pairs = ph.drain(); // phase 8
+        if (!pairs.some((p) => p.started)) continue;
+        at = t;
+        const s = ph.pre(ownerKey(zoneOwner))!;
+        expect(s.p.x, label).toBeCloseTo(startX, 5);
+        expect(s.carryV.x, label).toBeCloseTo(carry, 3);
+        break;
+      }
+      expect(at, label).toBe(eventTick);
+      ph.free();
+    }
+  });
+
+  it('a falling body starts on the step whose start pose touches; its stored pre-step velocity is the arrival speed (b)', () => {
+    const ph = new PhysicsWorld();
+    ph.register(ph.rapier.createCollider(RAPIER.ColliderDesc.cuboid(5, 0.5, 5).setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS)), { kind: 'entity', id: 1 });
+    const b = ph.rapier.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(0, 2, 0));
+    ph.register(ph.rapier.createCollider(RAPIER.ColliderDesc.ball(0.1).setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS), b), { kind: 'entity', id: 2 });
+    let found = false;
+    for (let t = 1; t < 200 && !found; t++) {
+      ph.storePreStep();
+      ph.step();
+      ph.snapshotPostStep();
+      if (!ph.drain().some((p) => p.started)) continue;
+      found = true;
+      const s = ph.pre('entity:2')!;
+      expect(s.p.y).toBeLessThanOrEqual(0.6);
+      expect(s.v.y).toBeCloseTo(-5.232, 2);
+      expect(Math.abs(s.v.y / -Math.sqrt(2 * 9.81 * 1.4) - 1)).toBeLessThan(0.005);
+      expect(Math.abs(ph.post('entity:2')!.v.y)).toBeLessThan(0.05);
+    }
+    expect(found).toBe(true);
+    ph.free();
+  });
+});
+
+describe('solid pairs read the contact manifolds (A lab normals.mjs (2))', () => {
+  it('a box landing on bumpy terrain: the terrain normal, a point on the ground, the arrival velocity, a land event', async () => {
+    const w = await make({ seed: 2, player: false });
+    w.terrain.generate((x, z) => 0.2 * Math.sin(0.9 * x) + 0.15 * Math.cos(1.3 * z));
+    const id = w.addEntity({ material: 'stone', shape: { kind: 'box', hx: 0.3, hy: 0.1, hz: 0.2 }, p: { x: 3.3, y: 3, z: 2.2 }, lin: { x: 1, y: 0, z: 0 }, look: 'box' });
+    let seen: { n: V3; point: V3; vb: V3 } | null = null;
+    const orig = w.contacts.process.bind(w.contacts);
+    w.contacts.process = (ww, pairs) => {
+      const p = pairs.find((q: ContactPair) => q.started && q.a.kind === 'terrain' && q.b.kind === 'entity' && q.b.id === id);
+      if (p && !seen) seen = w.contacts.geometryOf(p);
+      orig(ww, pairs);
+    };
+    const ev: WorldEvent[] = [];
+    for (let t = 0; t < 120 && !seen; t++) {
+      w.step();
+      ev.push(...w.events);
+    }
+    expect(seen).not.toBeNull();
+    const g = seen as unknown as { n: V3; point: V3; vb: V3 };
+    const tn = w.terrain.normalAt(g.point.x, g.point.z, { x: 0, y: 0, z: 0 });
+    expect(dot(g.n, tn)).toBeGreaterThan(0.98);
+    expect(Math.abs(g.point.y - w.terrain.heightAt(g.point.x, g.point.z))).toBeLessThan(0.05);
+    expect(g.vb.y).toBeLessThan(-5);
+    const land = ev.find((e): e is Extract<WorldEvent, { type: 'land' }> => e.type === 'land' && e.entity === id);
+    expect(land).toBeDefined();
+    expect(land!.mass).toBeCloseTo(w.entities.get(id)!.mass, 9);
+    expect(land!.energy).toBeGreaterThan(IMPACT_TUNING.landMinJ);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Logs on players: the AC-6 measured tick, episodes, bounces
+// ---------------------------------------------------------------------------
+
+/** Per tick, around phase 9: the log's phase-5 and phase-8 velocities and the impact scored on `f` by it. */
+function watchLog(w: World, id: number, f: Fighter): { tick: number; pre: V3 | null; post: V3 | null; hit: ImpactEv | null }[] {
+  const rows: { tick: number; pre: V3 | null; post: V3 | null; hit: ImpactEv | null }[] = [];
+  const key = `entity:${id}`;
+  const orig = w.contacts.process.bind(w.contacts);
+  w.contacts.process = (ww, pairs) => {
+    const pre = w.physics.pre(key)?.v ?? null;
+    const post = w.physics.post(key)?.v ?? null;
+    const n = w.events.length;
+    orig(ww, pairs);
+    const hit = impactsOn(w.events.slice(n), f).find((e) => e.cause.entityId === id) ?? null;
+    rows.push({ tick: w.tick, pre: pre && { ...pre }, post: post && { ...post }, hit });
+  };
+  return rows;
+}
+
+describe('a log on a standing player', () => {
+  it('300 kg arriving at the lab’s 6.2 m/s: keeps ≥ 80 % of its speed over the measured tick (AC-6, D-23), hurts, rests on the terrain', async () => {
+    // The AC-6 recipe drops the log's centre from 4 m; the lab's player zone topped out at 1.81 m and the log met it at
+    // 6.21 m/s (Δv 4.99 m/s, the hitstun branch). The real rig's head ball tops out at 1.72 m, so from 4 m the log
+    // arrives at 6.38 m/s and presses the player (Δv 5.09 ≥ launchDv): see the next test. Here the centre starts at
+    // 3.75 m, so it meets the head at the lab's 5.9-6.1 m/s whatever the tick phase, in the lab's branch.
+    const w = await make({ seed: 3 });
+    const p = w.player!;
+    run(w, 10);
+    const id = spawnLog(w, { p: { x: p.pos.x, y: 3.75, z: p.pos.z }, length: 3, mass: 300 });
+    expect(w.entities.get(id)!.mass).toBeCloseTo(300, 6);
+    const rows = watchLog(w, id, p);
+    run(w, 80, () => rows.length > 1 && rows[rows.length - 2].hit !== null);
+    const i = rows.findIndex((r) => r.hit);
+    expect(i).toBeGreaterThan(0);
+    const before = speed(rows[i].pre);
+    const after = speed(rows[i + 1].post);
+    expect(before).toBeGreaterThan(5.5);
+    expect(before).toBeLessThan(6.22);
+    expect(rows[i + 1].post!.y).toBeLessThan(0); // still falling
+    expect(after).toBeGreaterThanOrEqual(0.8 * before);
+    const hit = rows[i].hit!;
+    expect(hit.damage).toBeGreaterThan(0);
+    expect(hit.cause).toMatchObject({ kind: 'entity', entityId: id, held: false });
+    // The branch by name (RF-27): all of Δv is downward and under launchDv: hitstun, neither launched nor pressed.
+    expect(hit.launched).toBe(freeDv(hit.dv) >= IMPACT_TUNING.launchDv);
+    expect(hit.launched).toBe(false);
+    expect(hit.dv.y).toBeGreaterThan(-IMPACT_TUNING.launchDv);
+    expect(hit.knockdown).toBe(false);
+    expect(p.state).toBe('hitstun');
+    // It falls on through and rests on the terrain, not on the capsule; no second impact (one episode).
+    const ev = run(w, 300);
+    const e = w.entities.get(id)!;
+    expect(e.pose.p.y).toBeLessThan(0.5);
+    expect(speed(e.vel.lin)).toBeLessThan(0.1);
+    expect(impactsOn(ev, p).filter((x) => x.cause.entityId === id)).toHaveLength(0);
+  });
+
+  it('300 kg from 4 m presses the player (Δv ≥ launchDv down): knockdown, no launch, the reaction −M·Δv and the slab’s Δv queued', async () => {
+    const w = await make({ seed: 3 });
+    const p = w.player!;
+    run(w, 10);
+    const id = spawnLog(w, { p: { x: p.pos.x, y: 4, z: p.pos.z }, length: 3, mass: 300 });
+    const queue = vi.spyOn(w.entities, 'queueImpulse');
+    const slab = vi.spyOn(w.downed, 'queueDv');
+    const rows = watchLog(w, id, p);
+    run(w, 80, () => rows.length > 0 && rows[rows.length - 1].hit !== null);
+    const hit = rows[rows.length - 1].hit!;
+    expect(hit).not.toBeNull();
+    expect(hit.dv.y).toBeLessThanOrEqual(-IMPACT_TUNING.launchDv);
+    expect(hit).toMatchObject({ knockdown: true, launched: false });
+    expect(p.state).toBe('knockdown');
+    const r = queue.mock.calls.find((c) => c[0] === id)!;
+    expect(r[1].y).toBeCloseTo(-p.mass * hit.dv.y, 6);
+    expect(slab).toHaveBeenCalledWith(p, hit.dv);
+    // TODO(P08-fix, reported): the slab is enabled upright inside the log in the next phase 4a and Rapier's
+    // depenetration throws the log up (measured +4.95 m/s): AC-6 part 2's ≥ 80 % holds only in the hitstun branch until
+    // DownedBodies.launch stops depenetrating a slab out of the body that pressed it.
+  });
+
+  it('a log falling through a standing body scores one impact for the whole episode (RF-12)', async () => {
+    const w = await make({ seed: 4 });
+    const p = w.player!;
+    run(w, 10);
+    const id = spawnLog(w, { p: { x: p.pos.x + 0.05, y: 3.2, z: p.pos.z }, length: 2, mass: 40 });
+    const before = { ...w.contacts.unscored };
+    const ev = run(w, 120);
+    const hits = impactsOn(ev, p).filter((e) => e.cause.entityId === id);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].damage).toBeGreaterThan(0);
+    expect(hits[0].knockdown).toBe(false);
+    // The rest of the body met it inside the same episode.
+    expect(w.contacts.unscored.continuing).toBeGreaterThan(before.continuing);
+    expect(w.entities.get(id)!.pose.p.y).toBeLessThan(0.5);
+  });
+
+  it('a re-contact within impactCooldownTicks of the episode’s end is a bounce and scores nothing; a later one scores (RF-12)', async () => {
+    const w = await make({ seed: 5 });
+    WORLD_TUNING.gravityY = 0;
+    const p = w.player!;
+    run(w, 5);
+    const id = w.addEntity({ material: 'dryWood', shape: { kind: 'box', hx: 0.15, hy: 0.15, hz: 0.15 }, p: { x: 0, y: 1.35, z: 1.4 }, look: 'box' });
+    const e = w.entities.get(id)!;
+    const touching = () => w.contacts.touching(ent(id), zoneOf(p));
+    const scored: number[] = [];
+    let phase: 'in' | 'out' | 'back' | 'away' | 'again' | 'done' = 'in';
+    let endTick = -1;
+    let backTick = -1;
+    let awayFor = 0;
+    let bounces0 = 0;
+    for (let t = 0; t < 400 && phase !== 'done'; t++) {
+      const vz = phase === 'out' || phase === 'away' ? 4 : -4;
+      e.body!.setLinvel({ x: 0, y: 0, z: vz }, true);
+      w.step();
+      const hits = impactsOn(w.events, p).filter((x) => x.cause.entityId === id);
+      if (hits.length) scored.push(w.tick);
+      const n = touching();
+      if (phase === 'in' && hits.length) phase = 'out';
+      else if (phase === 'out' && n === 0) {
+        endTick = w.tick;
+        bounces0 = w.contacts.unscored.bounce;
+        phase = 'back';
+      } else if (phase === 'back' && n > 0) {
+        backTick = w.tick;
+        phase = 'away';
+      } else if (phase === 'away' && n === 0 && ++awayFor > 25) phase = 'again';
+      else if (phase === 'again' && n > 0) phase = 'done';
+    }
+    expect(phase).toBe('done');
+    expect(backTick - endTick).toBeLessThanOrEqual(DAMAGE_TUNING.impactCooldownTicks);
+    expect(w.contacts.unscored.bounce).toBeGreaterThan(bounces0);
+    expect(scored.length).toBe(2);
+    expect(scored[0]).toBeLessThan(endTick);
+    expect(scored).not.toContain(backTick);
+    expect(scored[1]).toBe(w.tick);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// History resets and grace (RF-1)
+// ---------------------------------------------------------------------------
+
+describe('contact grace after a pose jump (RF-1)', () => {
+  /** A fixed, horizontal stake at chest height, its sharp tip at x = tipX pointing −x; the controller walks through it. */
+  function stake(w: World, tipX: number, z = 0): number {
+    const id = w.addEntity({
+      material: 'dryWood',
+      shape: { kind: 'box', hx: 0.3, hy: 0.03, hz: 0.03 },
+      p: { x: tipX + 0.3, y: 1.4, z },
+      state: 'fixed',
+      sharpPoints: [{ local: { x: -0.3, y: 0, z: 0 }, dir: { x: -1, y: 0, z: 0 }, sharpness: 0.6 }],
+      look: 'stake',
+    });
+    noChar(w, id);
+    return id;
+  }
+
+  it('teleported over a stake scores 0 J (recorded as touching); then sprinting into its tip scores as usual', async () => {
+    const w = await make({ seed: 6 });
+    const p = w.player!;
+    // Off the centre line, so the teleport's support probe at z = 0 doesn't stand the player on the stake.
+    const id = stake(w, 10, 0.06);
+    run(w, 5);
+    const g0 = w.contacts.unscored.grace;
+    w.teleport(p, 10.15, 0, Math.PI / 2);
+    const ev1 = run(w, 10);
+    expect(impactsOn(ev1, p)).toHaveLength(0);
+    expect(w.contacts.touching(ent(id), zoneOf(p))).toBeGreaterThan(0);
+    expect(w.contacts.unscored.grace).toBeGreaterThan(g0);
+    w.teleport(p, 6, 0, Math.PI / 2);
+    run(w, 5);
+    expect(w.contacts.touching(ent(id), zoneOf(p))).toBe(0);
+    let hit: ImpactEv | undefined;
+    for (let t = 0; t < 150 && !hit; t++) {
+      w.commands.push(moveCommand(w.tick + 1, 1, 1, 0, MOVE_SPRINT));
+      w.step();
+      hit = impactsOn(w.events, p).find((e) => e.cause.entityId === id);
+    }
+    expect(hit).toBeDefined();
+    expect(hit!.damage).toBeGreaterThan(0);
+    expect(hit!.cause.feature).toBe('sharpPoint');
+    expect(hit!.energy).toBeGreaterThan(50);
+  });
+
+  it('zones re-enabled over a stake score 0 J', async () => {
+    const w = await make({ seed: 7 });
+    const p = w.player!;
+    run(w, 5);
+    w.zones.setEnabled(p, false);
+    const id = stake(w, p.pos.x - 0.15, p.pos.z);
+    run(w, 3);
+    expect(w.contacts.touching(ent(id), zoneOf(p))).toBe(0);
+    const g0 = w.contacts.unscored.grace;
+    w.zones.setEnabled(p, true);
+    const ev = run(w, 10);
+    expect(impactsOn(ev, p)).toHaveLength(0);
+    expect(w.contacts.touching(ent(id), zoneOf(p))).toBeGreaterThan(0);
+    expect(w.contacts.unscored.grace).toBeGreaterThan(g0);
+  });
+
+  it('a body switched to sensors over a stake (the ruler’s get-up) scores 0 J inside its grace', async () => {
+    const w = await make({ seed: 8, player: false });
+    const g = addFakeRuler(w);
+    const id = stake(w, 2, 0);
+    const body = w.physics.rapier.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(-3, 0.6, 0));
+    const col = rulerCollider(
+      w,
+      g,
+      'chest',
+      body,
+      RAPIER.ColliderDesc.cuboid(0.5, 0.5, 0.5).setMass(2865).setCollisionGroups(collisionGroups('RULER_SOLID')).setSolverGroups(solverGroups('RULER_SOLID')),
+    );
+    g.setState('tripped');
+    run(w, 30);
+    // The get-up switch: kinematic, sensors, posed over the stake, history reset and a grace (as RulerBodies does).
+    body.setBodyType(RAPIER.RigidBodyType.KinematicPositionBased, true);
+    col.setSensor(true);
+    col.setActiveCollisionTypes(RAPIER.ActiveCollisionTypes.ALL);
+    col.setCollisionGroups(collisionGroups('RULER_ZONE'));
+    col.setSolverGroups(solverGroups('RULER_ZONE'));
+    body.setTranslation({ x: 2.3, y: 1.4, z: 0 }, true);
+    w.physics.resetHistory(ownerKey({ kind: 'fighter', id: g.id, part: 'ruler', bone: 'chest' }));
+    w.contacts.grace(g.id, w.tick + 1 + DAMAGE_TUNING.zoneGraceTicks);
+    g.setState('idle');
+    const ev = run(w, 10);
+    expect(w.contacts.touching(ent(id), { kind: 'fighter', id: g.id, part: 'ruler' })).toBeGreaterThan(0);
+    expect(impactsOn(ev, g)).toHaveLength(0);
+    expect(ruler.rulerDamage).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Self-motion and the attacking limb (RF-3)
+// ---------------------------------------------------------------------------
+
+describe('a creature’s own motion (RF-3)', () => {
+  it('a player walking into a log gets no damage or flinch', async () => {
+    const w = await make({ seed: 9 });
+    const p = w.player!;
+    const id = spawnLog(w, { p: { x: 3, y: 0.5, z: 0 }, q: { x: Math.SQRT1_2, y: 0, z: 0, w: Math.SQRT1_2 }, length: 2.2, r: 0.25 });
+    run(w, 90);
+    noChar(w, id);
+    w.teleport(p, 0, 0, Math.PI / 2);
+    run(w, 5);
+    let met = 0;
+    let fastest = 0;
+    const ev: WorldEvent[] = [];
+    for (let t = 0; t < 90; t++) {
+      w.commands.push(moveCommand(w.tick + 1, 1, 1, 0));
+      w.step();
+      ev.push(...w.events);
+      if (w.contacts.touching(ent(id), zoneOf(p)) > 0) met++;
+      fastest = Math.max(fastest, Math.hypot(p.walkVel.x, p.walkVel.z));
+      expect(['hitstun', 'knockdown']).not.toContain(p.state);
+    }
+    expect(met).toBeGreaterThan(3);
+    expect(fastest).toBeGreaterThan(3);
+    expect(impactsOn(ev, p)).toHaveLength(0);
+    expect(p.hp).toBe(100);
+  });
+
+  it('a player knocked onto a sharp snag does take damage; onto the same post without points, none', async () => {
+    for (const sharp of [true, false]) {
+      const w = await make({ seed: 10 });
+      const p = w.player!;
+      run(w, 5);
+      const points = [];
+      for (let y = -0.75; y <= 0.8; y += 0.15) for (let z = -0.2; z <= 0.21; z += 0.1) points.push({ local: { x: -0.1, y, z }, dir: { x: -1, y: 0, z: 0 }, sharpness: 0.45 });
+      const id = w.addEntity({
+        material: 'dryWood',
+        shape: { kind: 'box', hx: 0.1, hy: 1, hz: 0.3 },
+        p: { x: 1.0, y: 1, z: 0 },
+        state: 'fixed',
+        sharpPoints: sharp ? points : [],
+        look: 'snag',
+      });
+      run(w, 2);
+      p.vel.set(4, 0, 0);
+      p.enterKnockdown();
+      const ev = run(w, 90);
+      const hits = impactsOn(ev, p).filter((e) => e.cause.entityId === id);
+      if (sharp) {
+        expect(hits.length).toBeGreaterThan(0);
+        expect(hits[0].damage).toBeGreaterThan(0);
+        expect(hits[0].cause.feature).toBe('sharpPoint');
+        expect(hits[0].dv).toEqual({ x: 0, y: 0, z: 0 }); // a solid pair: the solver stopped it
+        expect(p.hp).toBeLessThan(100);
+      } else {
+        expect(hits).toHaveLength(0);
+        expect(p.hp).toBe(100);
+      }
+    }
+  });
+
+  it('a kicking shin against a ruler zone scores nothing; the same zone meeting the standing player’s shin does', async () => {
+    for (const kicking of [true, false]) {
+      const w = await make({ seed: 11 });
+      const p = w.player!;
+      const g = addFakeRuler(w);
+      run(w, 5);
+      const kick = Object.values(p.moves).find((m) => m.limb === 'footR')!;
+      expect(kick).toBeDefined();
+      const shin = w.zones.zonePose(p, 'shinR')!.p;
+      const start = { x: shin.x - 1, y: shin.y, z: shin.z };
+      const body = w.physics.rapier.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(start.x, start.y, start.z));
+      rulerCollider(w, g, 'shinL', body, sensorDesc(RAPIER.ColliderDesc.ball(0.06)));
+      const limb0 = w.contacts.unscored.limb;
+      const ev: WorldEvent[] = [];
+      // Homing on the shin from its right side at 0.1 m a tick (6 m/s), wherever the kick's chamber puts it.
+      let d = 1;
+      let met = false;
+      for (let t = 0; t < 40; t++) {
+        if (kicking) {
+          p.setState('attack');
+          p.move = kick;
+        }
+        if (!met) d = Math.max(0, d - 0.1);
+        const s = w.zones.zonePose(p, 'shinR')!.p;
+        body.setNextKinematicTranslation({ x: s.x - d, y: s.y, z: s.z });
+        w.step();
+        ev.push(...w.events);
+        if (w.contacts.touching({ kind: 'fighter', id: g.id, part: 'ruler' }, zoneOf(p)) > 0) met = true;
+      }
+      expect(met).toBe(true);
+      if (kicking) {
+        expect(ev.filter((e) => e.type === 'impact')).toHaveLength(0);
+        expect(w.contacts.unscored.limb).toBeGreaterThan(limb0);
+        expect(p.hp).toBe(100);
+      } else {
+        const hits = impactsOn(ev, p);
+        expect(hits.length).toBeGreaterThanOrEqual(1);
+        expect(hits[0].cause).toMatchObject({ kind: 'creature', fighterId: g.id });
+        expect(hits[0].bone).toBe('shinR');
+        expect(Math.hypot(hits[0].dv.x, hits[0].dv.z)).toBeGreaterThan(0);
+        // The ruler's side is its own motion: v_safe takes it all, so it scores nothing.
+        expect(impactsOn(ev, g)).toHaveLength(0);
+      }
+      expect(ruler.rulerDamage).not.toHaveBeenCalled();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Momentum through the solver (RF-4)
+// ---------------------------------------------------------------------------
+
+describe('momentum (RF-4)', () => {
+  it('a tripped ruler and a log exchange momentum only through the solver: no Δv, no queued reaction', async () => {
+    const w = await make({ seed: 12, player: false });
+    const g = addFakeRuler(w);
+    const body = w.physics.rapier.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(0, 0.6, 0));
+    rulerCollider(w, g, 'chest', body, RAPIER.ColliderDesc.cuboid(1.5, 0.5, 1).setMass(2865).setCollisionGroups(collisionGroups('RULER_SOLID')).setSolverGroups(solverGroups('RULER_SOLID')));
+    g.setState('tripped');
+    run(w, 20);
+    const id = spawnLog(w, { p: { x: 0, y: 4, z: 0 }, length: 2.5, mass: 300 });
+    const queue = vi.spyOn(w.entities, 'queueImpulse');
+    const dv = vi.spyOn(w.downed, 'queueDv');
+    const ev = run(w, 60);
+    const hits = impactsOn(ev, g).filter((e) => e.cause.entityId === id);
+    expect(hits.length).toBe(1);
+    expect(hits[0].dv).toEqual({ x: 0, y: 0, z: 0 });
+    expect(hits[0].energy).toBeGreaterThan(1000);
+    expect(ruler.rulerDamage).toHaveBeenCalledTimes(1);
+    expect(queue.mock.calls.filter((c) => c[0] === id)).toHaveLength(0);
+    expect(dv).not.toHaveBeenCalled();
+    // The solver stopped the log on the body (it rests on it, well above the ground).
+    expect(w.entities.get(id)!.pose.p.y).toBeGreaterThan(1.2);
+  });
+
+  it('a standing ruler’s foot on a 66 kg mat gives it no reaction impulse', async () => {
+    const w = await make({ seed: 13, player: false });
+    const g = addFakeRuler(w);
+    const mat = w.addEntity({ material: 'leaves', shape: { kind: 'box', hx: 1, hy: 0.165, hz: 0.5 }, p: { x: 0, y: 0.165, z: 0 }, look: 'mat' });
+    expect(w.entities.get(mat)!.mass).toBeCloseTo(66, 6);
+    run(w, 30);
+    const body = w.physics.rapier.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(0, 2, 0));
+    rulerCollider(w, g, 'shinL', body, sensorDesc(RAPIER.ColliderDesc.cuboid(0.4, 0.3, 0.4)));
+    const queue = vi.spyOn(w.entities, 'queueImpulse');
+    const dv = vi.spyOn(w.downed, 'queueDv');
+    let y = 2;
+    const ev = run(w, 40, () => {
+      y = Math.max(0.5, y - 0.1);
+      body.setNextKinematicTranslation({ x: 0, y, z: 0 });
+    });
+    expect(w.contacts.touching(ent(mat), { kind: 'fighter', id: g.id, part: 'ruler' })).toBeGreaterThan(0);
+    expect(queue.mock.calls.filter((c) => c[0] === mat)).toHaveLength(0);
+    expect(dv).not.toHaveBeenCalled();
+    expect(impactsOn(ev, g)).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Released and thrown entities (RF-3, D-31)
+// ---------------------------------------------------------------------------
+
+describe('released and thrown entities', () => {
+  it('a 40 kg log thrown up from the hands doesn’t hit its thrower on the way out, and does on the way back down', async () => {
+    const w = await make({ seed: 14 });
+    const p = w.player!;
+    run(w, 5);
+    const head = w.zones.zonePose(p, 'head')!.p;
+    const id = spawnLog(w, { p: { x: head.x, y: head.y - 0.1, z: head.z }, length: 1.6, mass: 40 });
+    const e = w.entities.get(id)!;
+    e.body!.setLinvel({ x: 0, y: 4.5, z: 0 }, true);
+    w.entities.release(e, p.id);
+    e.thrown = { by: p.id, tick: w.tick };
+    const rel0 = w.contacts.unscored.released;
+    let clearedAt = -1;
+    let hit: ImpactEv | undefined;
+    for (let t = 0; t < 120 && !hit; t++) {
+      w.step();
+      if (clearedAt < 0 && e.releasedBy === null) clearedAt = w.tick;
+      hit = impactsOn(w.events, p).find((x) => x.cause.entityId === id);
+    }
+    expect(w.contacts.unscored.released).toBeGreaterThan(rel0);
+    expect(clearedAt).toBeGreaterThan(0);
+    expect(hit).toBeDefined();
+    expect(hit!.tick).toBeGreaterThan(clearedAt);
+    expect(hit!.damage).toBeGreaterThan(0);
+    // It came down on its thrower before touching anything else: still his (held, D-31).
+    expect(hit!.cause).toMatchObject({ kind: 'entity', held: true, fighterId: p.id });
+    expect(e.thrown).toBeNull();
+  });
+
+  it('a thrown spear’s cause is held: its point leads (sharpPoint), it is no longer thrown after the hit, and its kill is not environmental', async () => {
+    const w = await make({ seed: 15 });
+    const p = w.player!;
+    const a = addApe(w, 0, 6, -Math.PI / 2);
+    run(w, 5);
+    a.hp = 4;
+    const chest = w.zones.zonePose(a, 'chest')!.p;
+    const id = spawnStick(w, { p: { x: chest.x - 1.6, y: chest.y, z: chest.z }, length: 1.4, r: 0.025, sharp: { end: 1, s: 0.8 } });
+    const e = w.entities.get(id)!;
+    e.thrown = { by: p.id, tick: w.tick };
+    e.body!.setLinvel({ x: 8, y: 0.3, z: 0 }, true);
+    let hit: ImpactEv | undefined;
+    for (let t = 0; t < 40 && !hit; t++) {
+      w.step();
+      hit = impactsOn(w.events, a).find((x) => x.cause.entityId === id);
+    }
+    expect(hit).toBeDefined();
+    expect(hit!.cause).toMatchObject({ kind: 'entity', entityId: id, held: true, fighterId: p.id, feature: 'sharpPoint' });
+    expect(hit!.energy).toBeGreaterThan(20);
+    expect(e.thrown).toBeNull();
+    const ko = w.combat.events.find((c) => c.type === 'ko' && c.victim === a);
+    expect(ko).toMatchObject({ by: 'impact', environmental: false, killer: p });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The save record (RR-19)
+// ---------------------------------------------------------------------------
+
+describe('ContactSystem records', () => {
+  it('round-trip the touching counts, episode marks and graces, and a restored system scores the same next ticks', async () => {
+    const w = await make({ seed: 16 });
+    const p = w.player!;
+    const a = addApe(w, 4, 0);
+    run(w, 5);
+    spawnLog(w, { p: { x: 0, y: 3, z: 0 }, length: 2, mass: 40 });
+    spawnLog(w, { p: { x: 4, y: 0.4, z: 2 }, length: 2, mass: 40 });
+    run(w, 40);
+    w.contacts.grace(a.id, w.tick + 7);
+    const rec = w.contacts.toRecord();
+    expect(rec.length).toBeGreaterThan(0);
+    const sorted = [...rec].sort((x, y) => x.creature - y.creature || (x.owner < y.owner ? -1 : x.owner > y.owner ? 1 : 0));
+    expect(rec).toEqual(sorted);
+    expect(rec.some((r) => r.creature < 0)).toBe(true); // an entity's own episode (the log on the terrain)
+    expect(rec.some((r) => r.creature === p.id)).toBe(true);
+    const grace = w.contacts.graceRecord();
+    expect(grace).toContainEqual([a.id, w.tick + 7]);
+    w.contacts.restoreRecord(JSON.parse(JSON.stringify(rec)));
+    w.contacts.restoreGrace(JSON.parse(JSON.stringify(grace)));
+    expect(w.contacts.toRecord()).toEqual(rec);
+    expect(w.contacts.graceRecord()).toEqual(grace);
+    expect(w.contacts.inGrace(a.id, w.tick + 6)).toBe(true);
+    expect(w.contacts.inGrace(a.id, w.tick + 7)).toBe(false);
+    run(w, 20);
+    expect(() => w.contacts.restoreRecord([{ creature: 1, owner: 'nonsense:x', touching: 1, episodeStart: 1, cooldownUntil: -1 }])).toThrow(/bad owner key/);
+  });
+});

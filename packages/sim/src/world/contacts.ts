@@ -274,6 +274,16 @@ export class ContactSystem {
   }
 
   /**
+   * The contact geometry the rule reads for a collider pair drained this tick (tests and the dev panel; valid during
+   * phase 9, while the phase-5 store holds this tick's state): the normal out of `p.a`'s collider, the point, and each
+   * side's velocity there (m/s).
+   */
+  geometryOf(p: ContactPair): { n: V3; point: V3; va: V3; vb: V3 } {
+    const g = this.geometry(this.world, p);
+    return { n: g.n, point: g.point, va: g.va, vb: g.vb };
+  }
+
+  /**
    * The touching counts, episode starts and cooldown ends, sorted (creature, owner key) (RR-19). `creature` is the
    * subject: a fighter's id (the lower one when both sides are fighters), or −id for an entity in a group with no fighter
    * (an entity's integrity episode against another entity, the terrain or a rope). `owner` is the other side's key
@@ -329,7 +339,10 @@ export class ContactSystem {
     return ep ?? null;
   }
 
-  /** A started pair of a thrown entity with anything but its thrower and ropes is its first contact (D-31). */
+  /**
+   * A started pair of a thrown entity is its first contact (D-31), except against a rope sensor or against its thrower
+   * while it is still leaving the hands (`releasedBy`, the pairs its release raises).
+   */
   private noteThrown(p: ContactPair, out: Set<number>): void {
     for (const [x, o] of [
       [p.a, p.b],
@@ -338,7 +351,7 @@ export class ContactSystem {
       if (x.kind !== 'entity') continue;
       const e = this.world.entities.get(x.id);
       if (!e?.thrown || o.kind === 'rope') continue;
-      if (o.kind === 'fighter' && o.id === e.thrown.by) continue;
+      if (o.kind === 'fighter' && e.releasedBy && o.id === e.releasedBy.fighter) continue;
       out.add(e.id);
     }
   }
@@ -388,7 +401,10 @@ export class ContactSystem {
       const sb = this.side(w, p.b, fighters, g.point, g.vb, g.poseB);
       if (!sa || !sb) continue;
       if (sa.isStatic && sb.isStatic) continue;
-      const vn = Math.max(0, dot(sub(g.vb, g.va), g.n));
+      // The closing speed along n (out of a): (v_a − v_b)·n. DEVIATION (§4.3 writes "v_n = max(0, (v_other − v_self)·n)
+      // with n out of self"): that sign gives 0 for every approach; the A lab it cites (normals.mjs: v_n = −(v_rel·n),
+      // v_rel = v_other − v_self) and SPEC:279's "closing speed" are (v_self − v_other)·n.
+      const vn = Math.max(0, dot(sub(g.va, g.vb), g.n));
       const s = Math.max(sharpOf(sa, sb, g.point), sharpOf(sb, sa, g.point));
       const sensor = p.sensor;
       const sides: [Side, Side, V3, 0 | 1][] = [
@@ -589,18 +605,10 @@ export class ContactSystem {
       const solid = solidContact(w, ca, cb, ma, mb);
       if (solid) return { n: solid.n, point: solid.point, va: ma.vAt(solid.point), vb: mb.vAt(solid.point), poseA: ma.body, poseB: mb.body };
     }
-    const window = IMPACT_TUNING.castWindowTicks * DT;
-    const hit = ca.shape.castShape(ma.prev.p, ma.prev.q, ma.vCentre, cb.shape, mb.prev.p, mb.prev.q, mb.vCentre, 0, window, false);
+    const hit = castContact(ca.shape, ma.prev, ma.vCentre, cb.shape, mb.prev, mb.vCentre);
     if (hit) {
-      const n0 = rotate(ma.prev.q, hit.normal1);
-      const nl = len(n0);
-      if (nl > 1e-9 && Number.isFinite(nl)) {
-        const t = hit.time_of_impact;
-        const n = scale(n0, 1 / nl);
-        const w1 = rotate(ma.prev.q, hit.witness1);
-        const point = { x: ma.prev.p.x + ma.vCentre.x * t + w1.x, y: ma.prev.p.y + ma.vCentre.y * t + w1.y, z: ma.prev.p.z + ma.vCentre.z * t + w1.z };
-        return { n, point, va: ma.vAt(point), vb: mb.vAt(point), poseA: advance(ma, t), poseB: advance(mb, t) };
-      }
+      const { n, point, toi } = hit;
+      return { n, point, va: ma.vAt(point), vb: mb.vAt(point), poseA: advance(ma, toi), poseB: advance(mb, toi) };
     }
     // Began overlapped (a jump, an enable, a switch): n = −v̂_rel, or the line between the centres when nothing moves.
     const rel = sub(mb.vCentre, ma.vCentre);
@@ -805,6 +813,26 @@ function shinBand(f: Fighter, bone: BoneName, point: V3): boolean {
   const a = rotate({ x: q.x, y: q.y, z: q.z, w: q.w }, { x: 0, y: SKELETON[bone].dir * SKELETON[bone].length * f.rig[bone].s, z: 0 });
   const ankleY = knee.y + a.y;
   return point.y <= Math.max(knee.y, ankleY) && point.y >= Math.min(knee.y, ankleY);
+}
+
+/**
+ * The normal and point of a sensor pair (§4.3, departure X4: `contactCollider` at the event gave (0, 1, 0) and v_n 0 in
+ * 3 of 4 sensor cases, the cast was right in 4 of 4, A lab normals.mjs (1)): shape A cast from its pose at the start of
+ * the previous step with velocity vA against shape B from its own with vB, over IMPACT_TUNING.castWindowTicks × DT,
+ * not stopping at a starting penetration. Returns the normal out of A (world), the point on A's surface at the time of
+ * impact (world) and that time (s); null when the cast misses (they began overlapped, or never meet).
+ */
+export function castContact(shapeA: RAPIER.Shape, prevA: Pose3, vA: V3, shapeB: RAPIER.Shape, prevB: Pose3, vB: V3): { n: V3; point: V3; toi: number } | null {
+  const window = IMPACT_TUNING.castWindowTicks * DT;
+  const hit = shapeA.castShape(prevA.p, prevA.q, vA, shapeB, prevB.p, prevB.q, vB, 0, window, false);
+  if (!hit) return null;
+  const n0 = rotate(prevA.q, hit.normal1);
+  const nl = len(n0);
+  if (!(nl > 1e-9) || !Number.isFinite(nl)) return null;
+  const t = hit.time_of_impact;
+  const w1 = rotate(prevA.q, hit.witness1);
+  const point = { x: prevA.p.x + vA.x * t + w1.x, y: prevA.p.y + vA.y * t + w1.y, z: prevA.p.z + vA.z * t + w1.z };
+  return { n: scale(n0, 1 / nl), point, toi: t };
 }
 
 /**
