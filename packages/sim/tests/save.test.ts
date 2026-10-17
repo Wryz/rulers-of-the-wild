@@ -800,7 +800,12 @@ const INVENTORY: Record<string, Record<string, string>> = {
     world: 'not saved: a link',
     queue: "not saved: noises, hurts and wounds waiting for phase 17b's fold, which empties it (minds emit in phase 2); empty at a tick end (§8.3)",
   },
-  Spawner: { world: 'not saved: a link' },
+  Spawner: {
+    world: 'not saved: a link',
+    data: "not saved: the world's spawn data (generation's output), regenerated from the seed",
+    homes: 'saved: spawner.homes (each home slot: its living ape, the tick its respawn is due)',
+    sparring: 'saved: spawner.sparring (the sparring ape, the tick its respawn is due)',
+  },
   NavSystem: {
     world: 'not saved: a link',
     buildFailures: 'not saved: a dev read-out',
@@ -888,11 +893,9 @@ function missingStep(v: unknown, path: string): string | null {
 /**
  * Save keys whose runtime source arrives with a later package: the system is a stub that holds nothing yet, and its
  * record (an empty list) is already in the save. Each leaves this list when its package adds the state to the
- * inventory above.
+ * inventory above. (Empty since P22 placed the Spawner's slots.)
  */
-const AWAITING: Record<string, string> = {
-  spawner: 'Spawner (P22)',
-};
+const AWAITING: Record<string, string> = {};
 
 describe('completeness (RR-19)', () => {
   /** Every inventoried object of a populated world, by inventory entry. */

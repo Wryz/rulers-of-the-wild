@@ -9,6 +9,7 @@ import {
   createWorld,
   defineTuning,
   getTuningValue,
+  GIVE_TOOLS,
   type MetaCommand,
   restoreTuning,
   serializeWorld,
@@ -279,7 +280,7 @@ describe('dev panel: built from the registry', () => {
     expect(panel.bindingsOf('P37_LATE_TUNING', 'gain')).toHaveLength(1);
   });
 
-  it("keeps DS's dev controls, routed through the loop; dev ops wait for world/devOps.ts", () => {
+  it("keeps DS's dev controls, routed through the loop; every dev op is an enabled button", () => {
     const step = vi.spyOn(loop, 'requestStep');
     const rebuild = vi.fn();
     const { pane, panel } = setup({ onRebuild: rebuild });
@@ -292,11 +293,13 @@ describe('dev panel: built from the registry', () => {
       const bs = panel.bindingsOf('GAME_TUNING', key) as FakeBinding[];
       expect(bs.map((b) => b.path[0]), key).toEqual(['Dev', 'Client › game']);
     }
-    // Every dev op is a button; until devOps.ts applies it (P22) it is disabled (it would throw inside the tick).
+    // Every dev op is a button, enabled now that world/devOps.ts applies every op (P22).
     const ops = pane.folderAt(['Dev', 'Dev ops (commands)'])!;
     expect(ops.buttons.length).toBeGreaterThanOrEqual(12);
-    for (const b of ops.buttons) expect(b.disabled, b.title).toBe(true);
-    expect(DEV_OPS_READY.has('setTuning')).toBe(true);
+    for (const b of ops.buttons) expect(b.disabled, b.title).toBe(false);
+    for (const op of ['spawnApe', 'spawnGiant', 'giveTool', 'teleport', 'pauseMinds', 'killCreature', 'respawnPlayer', 'setTuning'] as const) {
+      expect(DEV_OPS_READY.has(op), op).toBe(true);
+    }
     // "Save world" waits for the save writer (P13): a `meta 'save'` would throw inside its tick until then.
     let saves = true;
     try {
@@ -308,6 +311,37 @@ describe('dev panel: built from the registry', () => {
     expect(pane.button(/^Load world/).disabled).toBe(true);
     expect(pushed).toEqual([]);
     step.mockRestore();
+  });
+});
+
+describe('dev panel: dev ops', () => {
+  it("sends each dev op as one meta 'dev' command in world/devOps.ts's encoding (points in whole cm)", () => {
+    const { pane } = setup();
+    const devs = (): NonNullable<MetaCommand['dev']>[] =>
+      pushed.filter((c): c is MetaCommand => c.kind === 'meta' && c.meta === 'dev').map((c) => c.dev!);
+    const click = (title: RegExp): NonNullable<MetaCommand['dev']>[] => {
+      pushed.length = 0;
+      pane.button(title).click();
+      return devs();
+    };
+    const p = world.player!;
+    const d = PANEL_TUNING.spawnApeAheadM;
+    expect(click(/^Spawn an ape near/)).toEqual([
+      { op: 'spawnApe', args: [Math.round((p.pos.x + Math.sin(p.yaw) * d) * 100) + 0, Math.round((p.pos.z + Math.cos(p.yaw) * d) * 100) + 0] },
+    ]);
+    expect(click(/^Spawn the giant/)).toEqual([{ op: 'spawnGiant', args: [] }]);
+    GIVE_TOOLS.forEach((_t, i) => expect(click(new RegExp(`^Give: ${['stone axe', 'digging stick', 'spear', 'vine'][i]}`))).toEqual([{ op: 'giveTool', args: [i] }]));
+    expect(click(/^Teleport: spawn/)).toEqual([{ op: 'teleport', args: [0, 0] }]);
+    expect(click(/^Pause minds/)).toEqual([{ op: 'pauseMinds', args: [1] }]);
+    expect(click(/^Resume minds/)).toEqual([{ op: 'pauseMinds', args: [0] }]);
+    expect(click(/^Respawn/)).toEqual([{ op: 'respawnPlayer', args: [] }]);
+    // Nothing to aim at in the empty scene (no home A, no giant, no target): no command.
+    expect(click(/^Teleport: home A/)).toEqual([]);
+    expect(click(/^Teleport: the giant/)).toEqual([]);
+    expect(click(/^Kill the target/)).toEqual([]);
+    for (const c of pushed) expect(c.tick).toBe(world.tick + 1);
+    // The shared world never runs them (the other tests read it as built).
+    world.commands.discard(1, 'meta');
   });
 });
 
