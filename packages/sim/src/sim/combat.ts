@@ -2184,7 +2184,8 @@ export class CombatSim {
         if (f.work !== work || f.state !== 'pickup') return;
       }
     }
-    if (f.stateFrame >= f.stunFrames) f.enterLocomotion(6);
+    // (A work action in a world rises back to its stance no faster than it bent, core-fix: Fighter.workFadeFrames.)
+    if (f.stateFrame >= f.stunFrames) f.enterLocomotion(work && f.ground ? f.workFadeFrames() : 6);
   }
 }
 

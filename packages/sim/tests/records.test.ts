@@ -562,6 +562,8 @@ const FIGHTER_KEYS = [
   'load',
   'drive',
   'posture',
+  // core-fix: the posture as the body shows it (ramped toward `posture`, so it never jumps the pose).
+  'postureShown',
   'work',
   'verbRequest',
   'verbAim',
@@ -588,12 +590,14 @@ const FIGHTER_NOT_SAVED: Record<string, string> = {
   rng: "the save's rng table, through rngState (§8.3)",
   ruler: "the save's rulers (§8.3)",
   ground: 'the world, set again when the fighter joins a sim',
+  reachAt: "written by the world's controller in every phase 3 before updatePose reads it (core-fix: a dragged grip)",
 };
 
 const ANIMATOR_KEYS = ['snapshot', 'keys', 'mode', 'fadeLen', 'procT'];
 const ANIMATOR_NOT_SAVED: Record<string, string> = { out: 'rewritten by every update before it is read', source: "the fighter's pose, linked at construction" };
 
-const FOOTWORK_KEYS = ['L', 'R', 'steps', 'firstStepper', 'lastStepper', 'shift', 'shiftTarget', 'run', 'phase', 'wasGait', 'initialized', 'gaitDur', 'gaitLead', 'limp'];
+// (hipDrop: core-fix, the hips lowered for a downhill foot.)
+const FOOTWORK_KEYS = ['L', 'R', 'steps', 'firstStepper', 'lastStepper', 'shift', 'shiftTarget', 'run', 'phase', 'wasGait', 'initialized', 'gaitDur', 'gaitLead', 'limp', 'hipDrop'];
 const FOOT_KEYS = ['pos', 'from', 'to', 'stepping', 't', 'dur', 'height', 'lead', 'gait'];
 const FOOTWORK_NOT_SAVED: Record<string, string> = {
   style: 'given at construction (its `limp`, set by wounds at run time, is the record\'s `limp`)',
