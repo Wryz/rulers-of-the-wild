@@ -10,8 +10,8 @@
 //    - idle: G takes the focused thing (or drops what the hands hold); 1-4 draw from or stow onto the belt and back;
 //      strikes are `button` commands (the mouse's buttons punch); holding a rope end, the punch buttons haul it
 //      (`pull` on while one is held, off when none is, §5.12);
-//    - radial (hold V / LB): the options verbsFor gives the focus, greyed with their reasons; release on one runs it;
-//      lash and bend go on to
+//    - radial (hold V / LB): the options verbsFor gives the focus, greyed with their reasons; release on one runs it
+//      (the stick's last pick stays while it springs back), Esc (pad B) closes it; lash and bend go on to
 //    - second: the next focus is the second target; LMB or E (pad A) confirms, RMB or Esc (pad B) cancels, and it
 //      lapses after secondTimeoutS;
 //    - throwAim (hold X / RB, something carried or wielded): the arc, the charge rising from 0.5 to 1 of launch speed
@@ -22,8 +22,10 @@
 //      The ghost is the sim's own placement rule run read-only (planPlace), and a sloped placement carries the pitch
 //      that rule's cast gives (§5.7).
 //    In every mode the mouse's left click is the mode's, never a punch (MAP client §2.4), and so are the strike keys.
+//    A window blur (InputFrame.lost) cancels the mode: the releases it reports are not the player's.
 // 3. The walk: a camera-relative `move` with the sprint and crouch flags (Shift held, or the pad's LS toggle that ends
-//    when you stop; Ctrl toggles crouch unless "hold to crouch" is set; the pad's B toggles it), and Space / pad A jump.
+//    when you stop; Ctrl toggles crouch, or crouches while held with "hold to crouch"; the pad's B toggles it either
+//    way), and Space / pad A jump.
 // 4. The visuals: the outline and its prompt (render/highlight.ts), the ghost (render/ghost.ts), the arc
 //    (render/aimArc.ts) and the radial (ui/radial.ts). All read the world and write nothing in it.
 //
@@ -51,11 +53,11 @@ import {
   MOVE_SPRINT,
   moveCommand,
   planPlace,
+  planThrow,
   type Pose3,
   ropeEndInReach,
   ropeNearest,
   takeMode,
-  throwLaunchSpeed,
   toCm,
   validateVerb,
   VERB_TUNING,
@@ -111,6 +113,14 @@ export const VERB_UI_TUNING = defineTuning(
     ghostOpacity: 0.38,
     wheelPxPerNotch: 100,
     wheelLinesPerNotch: 3,
+    shellOpacity: 0.6,
+    markOpacity: 0.7,
+    arcOpacity: 0.85,
+    landingRingOpacity: 0.8,
+    ringInnerFrac: 0.75,
+    groundRingLiftM: 0.02,
+    landingRingLiftM: 0.03,
+    radialRingPadPx: 26,
   },
   {
     targetConeDeg: { unit: '°', source: 'NEW (§10.7)', min: 5, max: 90, step: 1, label: 'target cone' },
@@ -149,6 +159,14 @@ export const VERB_UI_TUNING = defineTuning(
     ghostOpacity: { unit: '0-1', source: 'NEW (P35): the placement ghost', min: 0.05, max: 1, step: 0.01, label: 'ghost opacity' },
     wheelPxPerNotch: { unit: 'px', source: 'NEW (P35): a pixel-mode wheel event (Chrome: 100 px a notch)', min: 1, max: 400, step: 1, label: 'wheel px / notch' },
     wheelLinesPerNotch: { unit: 'lines', source: 'NEW (P35): a line-mode wheel event (Firefox: 3 lines a notch)', min: 1, max: 20, step: 1, label: 'wheel lines / notch' },
+    shellOpacity: { unit: '0-1', source: 'NEW (P35): the outline shell over a highlighted entity', min: 0.05, max: 1, step: 0.01, label: 'outline opacity' },
+    markOpacity: { unit: '0-1', source: 'NEW (P35): the flat marks: a ground target’s ring, a highlighted rope', min: 0.05, max: 1, step: 0.01, label: 'mark opacity' },
+    arcOpacity: { unit: '0-1', source: 'NEW (P35): the throw arc', min: 0.05, max: 1, step: 0.01, label: 'arc opacity' },
+    landingRingOpacity: { unit: '0-1', source: 'NEW (P35): the ring where the throw arc lands', min: 0.05, max: 1, step: 0.01, label: 'landing ring opacity' },
+    ringInnerFrac: { unit: 'fraction', source: 'NEW (P35): a ring’s inner radius over its outer (the ground ring, the landing ring)', min: 0, max: 0.95, step: 0.01, label: 'ring inner' },
+    groundRingLiftM: { unit: 'm', source: 'NEW (P35): the ground target’s ring floats this far over the terrain (no z-fighting)', min: 0, max: 0.2, step: 0.005, label: 'ground ring lift' },
+    landingRingLiftM: { unit: 'm', source: 'NEW (P35): the landing ring floats this far over where the arc lands', min: 0, max: 0.2, step: 0.005, label: 'landing ring lift' },
+    radialRingPadPx: { unit: 'px', source: 'NEW (P35): the radial’s backdrop reaches this far past the ring of options', min: 0, max: 100, step: 1, label: 'radial backdrop pad' },
   },
 );
 
@@ -258,8 +276,10 @@ export class VerbInput implements VerbInputPort {
   preview: PlacePreview | null = null;
   /** The throw being aimed: its charge (0..255) and unit direction. */
   readonly aiming = { charge: 0, dir: new Vector3(0, 0, 1) };
-  /** Crouching (the toggle, or the key held with "hold to crouch"). */
+  /** Crouching: the toggle (Ctrl, pad B), or the key held with "hold to crouch". */
   crouching = false;
+  /** The crouch toggle: Ctrl without "hold to crouch", and the pad's B either way. */
+  private crouchToggle = false;
   /** The pad's sprint toggle (LS), which ends when you stop. */
   padSprint = false;
   /** A `pull` is on (a punch held with a rope end in hand). */
@@ -300,7 +320,8 @@ export class VerbInput implements VerbInputPort {
     const startMode = this.mode;
     this.retarget(f, world, me);
     this.syncFocus(f, world, me);
-    if (inp.cancel && this.mode !== 'idle') this.toIdle();
+    // Esc, or a window blur (its releases are not the player's: an alt-tab mid-aim throws nothing).
+    if ((inp.cancel || inp.lost) && this.mode !== 'idle') this.toIdle();
     else if (startMode === 'radial') this.radialFrame(f, world, me);
     else if (startMode === 'second') this.secondFrame(f, world, me);
     else if (startMode === 'throwAim') this.throwFrame(f, world, me);
@@ -377,7 +398,9 @@ export class VerbInput implements VerbInputPort {
 
   /**
    * What a verb acts on: the sim's focus (world.verbs.focusOf), with the aimed point on it (the client's, when it is the
-   * client's pick too; else the sim's verbAim).
+   * client's pick too; else the sim's verbAim), put on its surface: the pick's point is on the box bounding its shape,
+   * which on a boulder seen corner-on can lie further off the surface than the anchor tolerance (anchorSurfaceTolM), and
+   * the radial's options (verbsFor) check the point as an anchor.
    */
   actTarget(world: World, me: Fighter): TargetRef | null {
     const fo = world.verbs.focusOf(me);
@@ -388,21 +411,18 @@ export class VerbInput implements VerbInputPort {
       if (!e) return null;
       const at =
         pick?.kind === 'entity' && pick.id === fo.target
-          ? pick.at.clone()
+          ? pick.at
           : me.verbAim
-            ? me.verbAim.clone()
+            ? me.verbAim
             : new Vector3(e.pose.p.x, e.pose.p.y, e.pose.p.z);
-      return { kind: 'entity', id: fo.target, at };
+      return { kind: 'entity', id: fo.target, at: surfacePoint(world, fo.target, at) };
     }
     return fo.at ? { kind: 'ground', at: new Vector3(fo.at.x, fo.at.y, fo.at.z) } : null;
   }
 
   /** A point on an entity's surface (or a tied rope's segment) nearest `p`, in whole cm: an anchor the sim accepts. */
   private anchorCm(world: World, id: number, p: Vector3): [number, number, number] {
-    const proj = world.queries.projectPoint(id, p);
-    if (Number.isFinite(proj.dist)) return toCm(proj.point);
-    const r = ropeNearest(world, id, p);
-    return toCm(r ? r.point : p);
+    return toCm(surfacePoint(world, id, p));
   }
 
   // ---------------------------------------------------------------------------
@@ -436,8 +456,9 @@ export class VerbInput implements VerbInputPort {
     const padPressed = (b: number) => !!pad?.pressed.includes(b);
     const keyPressed = (a: FullInputFrame['pressed'][number]) => inp.pressed.includes(a);
 
-    // Starting a mode.
-    if (keyPressed('verb') || padPressed(PAD.lb)) {
+    // Starting a mode (not as the window loses focus: the blur's releases would end it at once, acting).
+    const starts = !inp.lost;
+    if (starts && (keyPressed('verb') || padPressed(PAD.lb))) {
       this.radialTarget = this.actTarget(world, me);
       const opts = verbsFor(world, me, this.radialTarget).map((o) => this.radialOption(world, o, this.radialTarget));
       this.radial.open(opts);
@@ -445,12 +466,12 @@ export class VerbInput implements VerbInputPort {
       return;
     }
     const held = this.holding(me);
-    if ((keyPressed('throw') || padPressed(PAD.rb)) && held !== null) {
+    if (starts && (keyPressed('throw') || padPressed(PAD.rb)) && held !== null) {
       this.enter('throwAim', f.tick, keyPressed('throw') ? 'key' : 'pad');
       this.aiming.charge = 0;
       return;
     }
-    if ((keyPressed('place') || padPressed(PAD.down)) && held !== null) {
+    if (starts && (keyPressed('place') || padPressed(PAD.down)) && held !== null) {
       this.enter('place', f.tick, keyPressed('place') ? 'key' : 'pad');
       const ray = this.aimRay(me);
       this.placing.yawDeg = ray ? Math.atan2(ray.dir.x, ray.dir.z) / DEG : (me.yaw / DEG);
@@ -568,6 +589,11 @@ export class VerbInput implements VerbInputPort {
     const { inp } = f;
     const r = this.radial;
     const pad = inp.pad;
+    // The pad's B closes it, running nothing (§5.14: B cancels; Esc is the keyboard's, handled with every mode).
+    if (pad?.pressed.includes(PAD_MODE.cancel)) {
+      this.toIdle();
+      return;
+    }
     if (inp.mouse.dx !== 0 || inp.mouse.dy !== 0) r.point(inp.mouse.dx, inp.mouse.dy);
     if (this.modeBy === 'pad' && pad) r.stick(pad.rx, pad.ry);
     const released = this.modeBy === 'key' ? !inp.held.has('verb') : !pad?.held[PAD.lb];
@@ -868,9 +894,11 @@ export class VerbInput implements VerbInputPort {
     if (startMode !== 'radial' && (inp.pressed.includes('jump') || (padIdle && pad?.pressed.includes(PAD.a)))) {
       f.out.push({ tick: f.tick, player: this.player, kind: 'button', button: 'jump' });
     }
-    if (this.deps?.prefs?.().holdToCrouch) this.crouching = inp.held.has('crouch');
-    else if (inp.pressed.includes('crouch')) this.crouching = !this.crouching;
-    if (padIdle && pad?.pressed.includes(PAD.b)) this.crouching = !this.crouching;
+    // The key holds or toggles by the pref; the pad's B always toggles (a held key mustn't undo the pad's crouch).
+    const hold = !!this.deps?.prefs?.().holdToCrouch;
+    if (!hold && inp.pressed.includes('crouch')) this.crouchToggle = !this.crouchToggle;
+    if (padIdle && pad?.pressed.includes(PAD.b)) this.crouchToggle = !this.crouchToggle;
+    this.crouching = this.crouchToggle || (hold && inp.held.has('crouch'));
     if (padIdle && pad?.pressed.includes(PAD.ls)) this.padSprint = !this.padSprint;
   }
 
@@ -893,7 +921,7 @@ export class VerbInput implements VerbInputPort {
     const out: Command[] = this.strikes(inp).map((b) => ({ tick, player, kind: 'button', button: b }) as Command);
     if (inp.pickup || inp.pad?.pressed.includes(PAD.rs)) out.push({ tick, player, kind: 'button', button: 'pickup' });
     if (inp.pressed.includes('jump') || inp.pad?.pressed.includes(PAD.a)) out.push({ tick, player, kind: 'button', button: 'jump' });
-    if (inp.pressed.includes('crouch')) this.crouching = !this.crouching;
+    if (inp.pressed.includes('crouch')) this.crouching = this.crouchToggle = !this.crouchToggle;
     return out;
   }
 
@@ -916,7 +944,7 @@ export class VerbInput implements VerbInputPort {
       } else if (this.mode === 'place' && this.preview) {
         const p = this.preview;
         const drive = this.placing.drive === undefined ? 'auto' : this.placing.drive === 1 ? 'on' : 'off';
-        const centre = new Vector3(p.pose.p.x, p.pose.p.y + 0.3, p.pose.p.z);
+        const centre = new Vector3(p.pose.p.x, p.pose.p.y + VERB_UI_TUNING.promptLiftM, p.pose.p.z);
         prompt = {
           text: `${this.placing.orientation}${p.ok ? '' : ` — ${p.reason ?? "won't fit"}`} · wheel turn · RMB lying/upright/angled · ${keyLabel(keys.sprint)} drive: ${drive} · LMB set`,
           at: centre,
@@ -929,13 +957,38 @@ export class VerbInput implements VerbInputPort {
       else d.ghost.show(world, null, null, false);
     }
     if (d.arc) {
-      if (this.mode === 'throwAim' && held !== null) {
+      const vel = this.mode === 'throwAim' && held !== null ? this.throwVelocity(world, me) : null;
+      if (vel && held !== null) {
         const hand = handPoint(me);
-        const speed = throwLaunchSpeed(heldShape(world, held).massKg, this.aiming.charge);
-        d.arc.show(world, new Vector3(hand.x, hand.y, hand.z), this.aiming.dir, speed);
-      } else d.arc.show(world, null, null, 0);
+        d.arc.show(world, new Vector3(hand.x, hand.y, hand.z), vel, { entities: heldMembers(world, held), fighters: [me.id] });
+      } else d.arc.show(world, null, null);
     }
   }
+
+  /**
+   * The velocity the throw being aimed would leave the hand at: the sim's own plan of the command a release would send
+   * (planThrow: the quantised aim at launchSpeed(m, techSpeed) × the charge's fraction), plus the walk for a throw the
+   * sim launches as a Rapier body (§5.11: linvel = aim·v + walkVel; a DS projectile leaves without it). The walk is
+   * today's: the throw move may change it before its release frame, so the arc is a close guide, not a promise. Null
+   * when the sim would refuse the throw.
+   */
+  throwVelocity(world: World, me: Fighter): Vector3 | null {
+    const cmd: VerbCommand = { tick: world.tick, player: this.player, kind: 'verb', verb: 'throw', target: 0, aim: aimOf(this.aiming.dir), charge: this.aiming.charge };
+    const plan = planThrow(world, me, cmd);
+    if (!plan.ok) return null;
+    const p = plan.plan;
+    const v = new Vector3(p.dir.x, p.dir.y, p.dir.z).multiplyScalar(p.speed);
+    if (p.path === 'body') v.add(me.walkVel);
+    return v;
+  }
+}
+
+/** The point of an entity's surface (a tied rope: of its segments) nearest `p`; `p` itself when it has neither. */
+function surfacePoint(world: World, id: number, p: Vector3): Vector3 {
+  const proj = world.queries.projectPoint(id, p);
+  if (Number.isFinite(proj.dist)) return new Vector3(proj.point.x, proj.point.y, proj.point.z);
+  const r = ropeNearest(world, id, p);
+  return r ? new Vector3(r.point.x, r.point.y, r.point.z) : p.clone();
 }
 
 /** The shortest rotation taking unit `a` onto unit `b` (half a turn about a perpendicular when opposite). */

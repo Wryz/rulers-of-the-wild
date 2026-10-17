@@ -21,8 +21,12 @@ export class Ghost {
   private readonly group = new Group();
   private readonly mat = new MeshBasicMaterial({ color: FITS, transparent: true, opacity: VERB_UI_TUNING.ghostOpacity, depthWrite: false });
   private readonly meshes: Mesh[] = [];
-  private readonly geos = new WeakMap<Shape, BufferGeometry>();
-  private readonly owned: BufferGeometry[] = [];
+  /**
+   * The members' geometries, by shape: only those of the ghost shown last are kept (hiding it lets them all go), so
+   * the shapes of things no longer held never pile up on the GPU.
+   */
+  private readonly geos = new Map<Shape, BufferGeometry>();
+  private readonly used = new Set<Shape>();
   /** Whether the last ghost shown fits (green). */
   fits = false;
 
@@ -43,8 +47,10 @@ export class Ghost {
    */
   show(world: World, entity: number | null, pose: Pose3 | null, fits: boolean): void {
     const main = entity === null ? undefined : world.entities.get(entity);
+    this.used.clear();
     if (!main || !pose) {
       this.group.visible = false;
+      this.sweep();
       return;
     }
     this.fits = fits;
@@ -70,6 +76,12 @@ export class Ghost {
     }
     for (; i < this.meshes.length; i++) this.meshes[i].visible = false;
     this.group.visible = true;
+    this.sweep();
+  }
+
+  /** How many member geometries are held (tests: they don't pile up). */
+  get cached(): number {
+    return this.geos.size;
   }
 
   hide(): void {
@@ -79,16 +91,26 @@ export class Ghost {
   dispose(): void {
     this.scene.remove(this.group);
     this.mat.dispose();
-    for (const g of this.owned) g.dispose();
+    this.used.clear();
+    this.sweep();
   }
 
   private geometry(s: Shape): BufferGeometry {
+    this.used.add(s);
     let g = this.geos.get(s);
     if (!g) {
       g = shapeGeometry(s);
       this.geos.set(s, g);
-      this.owned.push(g);
     }
     return g;
+  }
+
+  /** Disposes the geometries of shapes not in the ghost now (a hidden mesh may still point at one: it isn't drawn). */
+  private sweep(): void {
+    for (const [s, g] of this.geos) {
+      if (this.used.has(s)) continue;
+      g.dispose();
+      this.geos.delete(s);
+    }
   }
 }

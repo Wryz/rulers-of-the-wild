@@ -3,7 +3,9 @@
 // locked on); take and drop on the sim's focus; Tab cycling; a ground focus; the two-step lash (radial → second target
 // → confirm, cancel, timeout); throw aim and charge, quantised; place yaw, pitch (a sloped pitch from the ghost's cast
 // onto a prop, then set by the sim at that angle) and drive; pull on and off with a rope end; strikes, and the clicks
-// and keys the modes consume; the move flags; the belt; the pad; the radial's refusals in words; the prompts.
+// and keys the modes consume; the move flags; the belt; the pad; the radial's refusals in words; the prompts. And the
+// package's definition of done: every verb of the radial runs from the keyboard and mouse and from a pad, each as the
+// one command the sim accepts (stand-in handlers for the verbs P15 and P16 register).
 //
 // Scene numbers (masses, lengths, positions, tick counts) are test constants, never tuning (§9).
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
@@ -16,13 +18,19 @@ import {
   COMMAND_STEPS,
   type Command,
   createWorld,
+  type JointRecord,
   MOVE_CROUCH,
   MOVE_SPRINT,
   PHYSICS_TUNING,
   physicsReady,
+  planThrow,
   prismRForMass,
   resetTuning,
+  type RopeView,
+  spawnBox,
   spawnLog,
+  spawnRopeCoil,
+  spawnSapling,
   spawnStick,
   spawnStone,
   toCm,
@@ -39,7 +47,7 @@ import { chargeAfter, promptFor, VERB_UI_TUNING, VerbInput, type VerbUiDeps, yaw
 import { AimArc } from '../src/render/aimArc';
 import { Ghost } from '../src/render/ghost';
 import { Highlight } from '../src/render/highlight';
-import { Radial, reasonText, sectorAt, sectorDir } from '../src/ui/radial';
+import { Radial, type RadialOption, reasonText, sectorAt, sectorDir } from '../src/ui/radial';
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -309,20 +317,96 @@ describe('focus and take (§10.7: on change only; the sim’s focus is what a ve
 // The radial and the two-step lash
 // ---------------------------------------------------------------------------
 
-/** A stand-in lash (P16 registers the real one): acts on nothing, so only the commands are under test. */
-const STAND_IN_LASH: VerbHandler = { verb: 'lash', target: 'entity', second: true, validate: () => null, start: () => null };
+/** A stand-in for a verb P15 or P16 registers: it acts on nothing, so only the commands are under test. */
+const standIn = (verb: VerbHandler['verb'], target: VerbHandler['target'], second = false): VerbHandler => ({ verb, target, second, validate: () => null, start: () => null });
+const STAND_IN_LASH = standIn('lash', 'entity', true);
+/** Every radial verb whose module isn't merged yet (verbsFor leaves out a verb with no handler). */
+const STAND_INS: readonly VerbHandler[] = [
+  STAND_IN_LASH,
+  standIn('tie', 'entity'),
+  standIn('bend', 'entity', true),
+  standIn('untie', 'entity'),
+  standIn('cut', 'entity'),
+  standIn('shape', 'entity'),
+  standIn('dig', 'ground'),
+];
+
+/** Runs `run` with every stand-in in place. */
+function withStandIns<T>(run: () => T, hs: readonly VerbHandler[] = STAND_INS): T {
+  return hs.length === 0 ? run() : withVerbHandler(hs[0], () => withStandIns(run, hs.slice(1)));
+}
+
+/** How a test drives the verb UI: the keyboard and mouse, or a pad. */
+type Via = 'keys' | 'pad';
+
+/**
+ * Opens the radial (V held, or the pad's LB held), points at the option `pick` chooses (the mouse, or the right stick),
+ * and lets go: the commands of that last frame. The option must be offered and enabled. (`step` false: nothing is
+ * stepped.)
+ */
+function radialRun(r: Rig, via: Via, pick: (o: RadialOption) => boolean, step = true): Command[] {
+  r.frame(via === 'keys' ? keyDown('verb') : { pad: pad([PAD.lb]) }, step);
+  expect(r.vi.mode).toBe('radial');
+  const opts = r.radial.shown;
+  const i = opts.findIndex(pick);
+  expect(i, `offered: ${opts.map((o) => `${o.verb}${o.slot ?? ''}`).join(', ')}`).toBeGreaterThanOrEqual(0);
+  expect(opts[i].disabled, `${opts[i].verb} refused`).toBeNull();
+  const d = sectorDir(i, opts.length);
+  if (via === 'keys') r.frame({ ...held('verb'), mouse: { dx: d.x * 80, dy: d.y * 80, left: false, right: false } }, step);
+  else r.frame({ pad: pad([PAD.lb], [PAD.lb], { rx: d.x, ry: d.y }) }, step);
+  expect(r.radial.selected).toBe(opts[i]);
+  return r.frame(via === 'keys' ? { released: ['verb'] } : { pad: pad([], [PAD.lb], { rx: d.x, ry: d.y }) }, step);
+}
 
 /** Opens the radial with V, moves the cursor onto `verb`'s sector, releases: the commands of that last frame. */
 function radialPick(r: Rig, verb: VerbCommand['verb']): Command[] {
-  r.frame(keyDown('verb'));
-  expect(r.vi.mode).toBe('radial');
-  const opts = r.radial.shown;
-  const i = opts.findIndex((o) => o.verb === verb);
-  expect(i, `${verb} in ${opts.map((o) => o.verb).join(',')}`).toBeGreaterThanOrEqual(0);
-  const d = sectorDir(i, opts.length);
-  r.frame({ ...held('verb'), mouse: { dx: d.x * 80, dy: d.y * 80, left: false, right: false } });
-  expect(r.radial.selected?.verb).toBe(verb);
-  return r.frame({ released: ['verb'] });
+  return radialRun(r, 'keys', (o) => o.verb === verb);
+}
+
+/** The second target's confirm: LMB, or the pad's A. */
+const confirmSecond = (r: Rig, via: Via): Command[] => r.frame(via === 'keys' ? click(0) : { pad: pad([PAD.a]) });
+
+/** The one command of `cmds` besides a focus, which the sim accepts; no strike or jump came with it. */
+function onlyVerb(w: World, cmds: Command[]): VerbCommand {
+  const v = verbs(cmds).filter((c) => c.verb !== 'focus');
+  expect(v).toHaveLength(1);
+  expect(validateVerb(w, w.player!, v[0])).toEqual({ ok: true });
+  expect(buttons(cmds)).toEqual([]);
+  return v[0];
+}
+
+/** A command's whole-cm point lies on the entity's surface (an anchor the sim accepts). */
+function expectOnSurface(w: World, id: number, at: readonly number[] | undefined): void {
+  expect(at).toBeDefined();
+  expect(w.queries.projectPoint(id, { x: at![0] / 100, y: at![1] / 100, z: at![2] / 100 }).dist).toBeLessThan(0.02);
+}
+
+/**
+ * A rope tied between two world points, made of the rope entity `rope` (now 'tied'). P10's joints aren't merged: the
+ * joint store's reads stand in for its one rope joint (what targeting draws and the sim measures range and anchors to).
+ */
+function fakeTiedRope(w: World, rope: number, a: P3, b: P3): void {
+  w.entities.setState(w.entities.get(rope)!, 'tied');
+  const lengthM = Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z);
+  const rec: JointRecord = {
+    id: 1,
+    kind: 'rope',
+    a: { entity: null, local: { ...a } },
+    b: { entity: null, local: { ...b } },
+    rope: { entity: rope, lengthM },
+    breakEnergyJ: Infinity,
+    axis: null,
+    limits: null,
+    motor: null,
+    holdsBend: null,
+    tension: [0, 0, 0],
+    pullN: 0,
+    credit: [],
+  };
+  const view: RopeView = { joint: 1, a: { ...a }, b: { ...b }, lengthM, taut: true, strain: 0 };
+  w.joints.all = () => [rec];
+  w.joints.get = (id: number) => (id === 1 ? rec : undefined);
+  w.joints.view = () => [view];
 }
 
 describe('the radial and the two-step lash (§10.7, D-48)', () => {
@@ -423,6 +507,215 @@ describe('the radial and the two-step lash (§10.7, D-48)', () => {
     expect(r.radial.selected?.verb).toBe('take');
     r.frame({ pad: pad([], [PAD.lb]) });
     expect(r.vi.mode).toBe('idle');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Every radial verb, from the keyboard and mouse and from a pad (P35's definition of done)
+// ---------------------------------------------------------------------------
+
+describe.each(['keys', 'pad'] as const)('every radial verb runs from the %s, as the one command the sim accepts (§5.13, §5.14)', (via) => {
+  it('tie, cut, shape and take on a stick (each anchor on its surface)', async () => {
+    const w = await make();
+    stand(w, 0, 0);
+    const s = stick(w, 0, 1.2);
+    w.step();
+    const r = new Rig(w);
+    withStandIns(() => {
+      r.look({ x: 0.4, y: 2.6, z: -3.2 }, { x: 0, y: 0.04, z: 1.2 });
+      r.frame();
+      expect(w.verbs.focusedEntity(w.player!)).toBe(s);
+      const tie = onlyVerb(w, radialRun(r, via, (o) => o.verb === 'tie'));
+      expect(tie).toEqual({ tick: w.tick, player: 1, kind: 'verb', verb: 'tie', target: s, at: expect.any(Array) });
+      expectOnSurface(w, s, tie.at);
+      expect(onlyVerb(w, radialRun(r, via, (o) => o.verb === 'cut'))).toEqual({ tick: w.tick, player: 1, kind: 'verb', verb: 'cut', target: s });
+      const shape = onlyVerb(w, radialRun(r, via, (o) => o.verb === 'shape'));
+      expect(shape).toEqual({ tick: w.tick, player: 1, kind: 'verb', verb: 'shape', target: s, at: expect.any(Array), charge: 1 });
+      expectOnSurface(w, s, shape.at);
+      expect(onlyVerb(w, radialRun(r, via, (o) => o.verb === 'take'))).toEqual({ tick: w.tick, player: 1, kind: 'verb', verb: 'take', target: s });
+      expect(r.vi.mode).toBe('idle');
+      untilFree(w);
+      expect(w.player!.inventory!.hands?.entity).toBe(s);
+    });
+  });
+
+  it('lash: the radial, then the second target, confirmed (LMB, or A)', async () => {
+    const w = await make();
+    stand(w, 0, 0);
+    const a = stick(w, -0.7, 1.3);
+    const b = stick(w, 0.7, 1.3);
+    w.step();
+    const r = new Rig(w);
+    withStandIns(() => {
+      r.look({ x: -0.5, y: 2.6, z: -3 }, { x: -0.6, y: 0.04, z: 1.3 });
+      r.frame();
+      expect(verbs(radialRun(r, via, (o) => o.verb === 'lash')).filter((c) => c.verb !== 'focus')).toEqual([]);
+      expect(r.vi.mode).toBe('second');
+      r.look({ x: 0.5, y: 2.6, z: -3 }, { x: 0.6, y: 0.04, z: 1.3 });
+      r.frame();
+      expect(w.verbs.focusedEntity(w.player!)).toBe(b);
+      const lash = onlyVerb(w, confirmSecond(r, via));
+      expect(lash).toEqual({ tick: w.tick, player: 1, kind: 'verb', verb: 'lash', target: a, second: b, at: expect.any(Array), at2: expect.any(Array) });
+      expectOnSurface(w, a, lash.at);
+      expectOnSurface(w, b, lash.at2);
+      expect(r.vi.mode).toBe('idle');
+    });
+  });
+
+  it('bend: a rooted sapling, then what holds it down, confirmed (LMB, or A)', async () => {
+    const w = await make();
+    stand(w, 0, 0);
+    const sapling = spawnSapling(w, { at: { x: -0.6, z: 1.3 }, diameter: 0.05, height: 2.5 });
+    const stake = stick(w, 0.7, 1.3);
+    w.step();
+    expect(w.entities.get(sapling)!.plant).not.toBeNull();
+    const r = new Rig(w);
+    withStandIns(() => {
+      r.look({ x: -0.5, y: 2.2, z: -3 }, { x: -0.6, y: 1.1, z: 1.3 });
+      r.frame();
+      expect(w.verbs.focusedEntity(w.player!)).toBe(sapling);
+      expect(verbs(radialRun(r, via, (o) => o.verb === 'bend')).filter((c) => c.verb !== 'focus')).toEqual([]);
+      expect(r.vi.mode).toBe('second');
+      expect(r.vi.first).toMatchObject({ kind: 'entity', id: sapling });
+      r.look({ x: 0.5, y: 2.6, z: -3 }, { x: 0.6, y: 0.04, z: 1.3 });
+      r.frame();
+      expect(w.verbs.focusedEntity(w.player!)).toBe(stake);
+      const bend = onlyVerb(w, confirmSecond(r, via));
+      expect(bend).toEqual({ tick: w.tick, player: 1, kind: 'verb', verb: 'bend', target: sapling, second: stake, at2: expect.any(Array) });
+      expectOnSurface(w, stake, bend.at2);
+      expect(r.vi.mode).toBe('idle');
+    });
+  });
+
+  it('untie a tied rope (aimed at along its segment)', async () => {
+    const w = await make();
+    stand(w, 0, 0);
+    const rope = spawnRopeCoil(w, { at: { x: 0, y: 0.05, z: 1.4 }, material: 'vine', lengthM: 2 });
+    w.step();
+    fakeTiedRope(w, rope, { x: -0.8, y: 1, z: 1.4 }, { x: 0.8, y: 1, z: 1.4 });
+    const r = new Rig(w);
+    withStandIns(() => {
+      r.look({ x: 0.2, y: 2.4, z: -3 }, { x: 0.1, y: 1, z: 1.4 });
+      r.frame();
+      expect(w.verbs.focusedEntity(w.player!)).toBe(rope);
+      expect(onlyVerb(w, radialRun(r, via, (o) => o.verb === 'untie'))).toEqual({ tick: w.tick, player: 1, kind: 'verb', verb: 'untie', target: rope });
+    });
+  });
+
+  it('dig the ground where the aim meets it', async () => {
+    const w = await make();
+    stand(w, 0, 0);
+    const r = new Rig(w);
+    withStandIns(() => {
+      r.look({ x: 0, y: 2.8, z: -1.2 }, { x: 0, y: 0, z: 1.5 });
+      r.frame();
+      expect(w.verbs.focusOf(w.player!)?.target).toBe(0);
+      const dig = onlyVerb(w, radialRun(r, via, (o) => o.verb === 'dig'));
+      expect(dig).toEqual({ tick: w.tick, player: 1, kind: 'verb', verb: 'dig', target: 0, at: expect.any(Array), charge: 1 });
+      expect(Math.abs(dig.at![2] - 150)).toBeLessThanOrEqual(5);
+      expect(Math.abs(dig.at![1])).toBeLessThanOrEqual(1);
+    });
+  });
+
+  it('with nothing aimed at: stow what the hands hold on the belt or the back, or drop it', async () => {
+    const w = await make();
+    stand(w, 0, 0);
+    const p = w.player!;
+    const stone = spawnStone(w, { p: { x: 0.4, y: 0.2, z: 0.4 }, mass: 1 });
+    w.step();
+    expect(w.verbs.putInHands(p, stone)).toBe(true);
+    w.step();
+    const r = new Rig(w);
+    r.look({ x: 0, y: 2.6, z: -3 }, { x: 0, y: 6, z: 20 });
+    r.frame();
+    expect(w.verbs.focusOf(p)).toBeNull();
+    // (Nothing is stepped: each runs on the stone still in the hands.)
+    const belt = onlyVerb(w, radialRun(r, via, (o) => o.verb === 'stow' && o.slot === 0, false));
+    expect(belt).toEqual({ tick: w.tick + 1, player: 1, kind: 'verb', verb: 'stow', target: 0, slot: 0 });
+    const back = onlyVerb(w, radialRun(r, via, (o) => o.verb === 'stow' && o.slot === 3, false));
+    expect(back).toEqual({ tick: w.tick + 1, player: 1, kind: 'verb', verb: 'stow', target: 0, slot: 3 });
+    const drop = onlyVerb(w, radialRun(r, via, (o) => o.verb === 'drop', false));
+    expect(drop).toEqual({ tick: w.tick + 1, player: 1, kind: 'verb', verb: 'drop', target: 0 });
+  });
+});
+
+describe('the pad’s own paths (§5.14)', () => {
+  it('RS takes the focus, and drops what the hands hold when nothing takeable is focused', async () => {
+    const w = await make();
+    stand(w, 0, 0);
+    const s = stick(w, 0, 1.2);
+    w.step();
+    const r = new Rig(w);
+    r.look({ x: 0.4, y: 2.6, z: -3.2 }, { x: 0, y: 0.04, z: 1.2 });
+    r.frame();
+    const take = r.frame({ pad: pad([PAD.rs]) });
+    expect(onlyVerb(w, take)).toEqual({ tick: w.tick, player: 1, kind: 'verb', verb: 'take', target: s });
+    untilFree(w);
+    expect(w.player!.inventory!.hands?.entity).toBe(s);
+    r.look({ x: 0, y: 3, z: -3 }, { x: 0, y: 6, z: 20 });
+    r.frame();
+    // (Not stepped: the drop is checked against the hands still holding it.)
+    expect(onlyVerb(w, r.frame({ pad: pad([PAD.rs]) }, false))).toEqual({ tick: w.tick + 1, player: 1, kind: 'verb', verb: 'drop', target: 0 });
+  });
+
+  it('the stick’s pick stays as it springs back, so a flick and a release of LB runs it; B closes the radial, running nothing', async () => {
+    const w = await make();
+    stand(w, 0, 0);
+    const s = stick(w, 0, 1.2);
+    w.step();
+    const r = new Rig(w);
+    withStandIns(() => {
+      r.look({ x: 0.4, y: 2.6, z: -3.2 }, { x: 0, y: 0.04, z: 1.2 });
+      r.frame();
+      const flickTo = (verb: VerbCommand['verb']) => {
+        r.frame({ pad: pad([PAD.lb]) });
+        const opts = r.radial.shown;
+        const d = sectorDir(
+          opts.findIndex((o) => o.verb === verb),
+          opts.length,
+        );
+        r.frame({ pad: pad([PAD.lb], [PAD.lb], { rx: d.x, ry: d.y }) });
+        // The stick springs back while LB is still held.
+        r.frame({ pad: pad([PAD.lb], [PAD.lb]) });
+        expect(r.radial.selected?.verb).toBe(verb);
+      };
+      flickTo('cut');
+      // Let go with the stick centred: it runs.
+      expect(onlyVerb(w, r.frame({ pad: pad([], [PAD.lb]) }))).toEqual({ tick: w.tick, player: 1, kind: 'verb', verb: 'cut', target: s });
+      expect(r.vi.mode).toBe('idle');
+      flickTo('cut');
+      const b = r.frame({ pad: pad([PAD.lb, PAD.b], [PAD.lb]) });
+      expect(r.vi.mode).toBe('idle');
+      expect(r.radial.isOpen).toBe(false);
+      expect(verbs(b).filter((c) => c.verb !== 'focus')).toEqual([]);
+      // B closed it: no crouch, and letting go of LB then runs nothing.
+      expect(moveOf(b).flags ?? 0).toBe(0);
+      expect(verbs(r.frame({ pad: pad([], [PAD.lb, PAD.b]) })).filter((c) => c.verb !== 'focus')).toEqual([]);
+    });
+  });
+});
+
+describe('the radial’s aimed point (§5.2 anchors)', () => {
+  it('lies on the target’s surface: a boulder seen corner-on still offers tie, and the tie is accepted', async () => {
+    const w = await make();
+    stand(w, 0, 0);
+    const boulder = spawnStone(w, { p: { x: 0, y: 1, z: 2.2 }, mass: 2000 });
+    for (let i = 0; i < 60; i++) w.step();
+    const r = new Rig(w);
+    withStandIns(() => {
+      r.look({ x: -0.6, y: 2.4, z: -2.5 }, { x: 1.2, y: 0.8, z: 2.2 });
+      r.frame();
+      expect(w.verbs.focusedEntity(w.player!)).toBe(boulder);
+      // The pick's point is on the box bounding the boulder, further off its surface than an anchor may be.
+      const pick = r.vi.target;
+      expect(pick?.kind).toBe('entity');
+      expect(w.queries.projectPoint(boulder, pick!.at).dist).toBeGreaterThan(VERB_TUNING.anchorSurfaceTolM);
+      // What the verbs get is on the surface.
+      expect(w.queries.projectPoint(boulder, r.vi.actTarget(w, w.player!)!.at).dist).toBeLessThan(1e-3);
+      const tie = onlyVerb(w, radialRun(r, 'keys', (o) => o.verb === 'tie'));
+      expect(tie).toMatchObject({ verb: 'tie', target: boulder });
+      expectOnSurface(w, boulder, tie.at);
+    });
   });
 });
 
@@ -529,14 +822,86 @@ describe('throw (§5.11, §10.7)', () => {
     expect(thr[0].aim).toEqual(aimOf({ x: Math.sin(p.yaw) * Math.cos(want), y: Math.sin(want), z: Math.cos(p.yaw) * Math.cos(want) }));
   });
 
-  it('nothing in the hands (or a dragged log): X starts no aim', async () => {
+  it('nothing in the hands, a dragged log or a rope end: X (RB) starts no aim, and C (D-pad ↓) no placement', async () => {
     const w = await make();
     stand(w, 0, 0);
+    const p = w.player!;
     const r = new Rig(w);
     r.look({ x: 0, y: 2.6, z: -3 }, { x: 0, y: 2, z: 20 });
-    r.frame(keyDown('throw'));
-    expect(r.vi.mode).toBe('idle');
-    expect(verbs(r.frame({ released: ['throw'] }), 'throw')).toEqual([]);
+    const noModes = (what: string) => {
+      for (const start of [keyDown('throw'), keyDown('place'), { pad: pad([PAD.rb]) }, { pad: pad([PAD.down]) }] as Partial<FullInputFrame>[]) {
+        r.frame(start);
+        expect(r.vi.mode, what).toBe('idle');
+        const end = verbs(r.frame({ released: ['throw', 'place'], pad: pad([]) }));
+        expect(end.filter((c) => c.verb === 'throw' || c.verb === 'place'), what).toEqual([]);
+      }
+    };
+    noModes('empty hands');
+    const log = spawnLog(w, { p: { x: 0, y: 0.4, z: 1.5 }, length: 3, mass: 100 });
+    w.step();
+    expect(w.verbs.putInHands(p, log)).toBe(true);
+    w.step();
+    expect(p.inventory!.hands?.mode).toBe('drag');
+    noModes('dragging');
+    // (Holding a rope end needs P10's joints; the hands' record is what the UI reads.)
+    p.inventory!.hands = { entity: log, mode: 'ropeEnd', grip: { x: 0, y: 0, z: 0 }, twoHanded: false, joint: null };
+    for (const start of [keyDown('throw'), keyDown('place')]) {
+      r.frame(start, false);
+      expect(r.vi.mode, 'a rope end').toBe('idle');
+    }
+  });
+
+  it('the arc: the sim’s own launch velocity, with the walk for a thrown body (not for a projectile), ending on what is in the way', async () => {
+    const w = await make();
+    stand(w, 0, 0);
+    const p = w.player!;
+    const heavy = spawnStone(w, { p: { x: 0.4, y: 0.3, z: 0.4 }, mass: 3 });
+    w.step();
+    expect(w.verbs.putInHands(p, heavy)).toBe(true);
+    w.step();
+    const r = new Rig(w);
+    r.look({ x: 0.55, y: 2.1, z: -3.5 }, { x: 0.55, y: 2.6, z: 20 });
+    r.frame(keyDown('throw'), false);
+    r.frame(held('throw'), false);
+    expect(r.vi.mode).toBe('throwAim');
+    const plan = (charge: number) => planThrow(w, p, { tick: 0, player: 1, kind: 'verb', verb: 'throw', target: 0, aim: aimOf(r.vi.aiming.dir), charge });
+    const pl = plan(r.vi.aiming.charge);
+    if (!pl.ok) throw new Error('the throw is refused');
+    expect(pl.plan.path).toBe('body');
+    const still = r.vi.throwVelocity(w, p)!;
+    expect(still.distanceTo(new Vector3(pl.plan.dir.x, pl.plan.dir.y, pl.plan.dir.z).multiplyScalar(pl.plan.speed))).toBeLessThan(1e-9);
+    // Walking: a thrown body takes the walk with it (§5.11: linvel = aim·v + walkVel).
+    p.walkVel.set(1.5, 0, 0.5);
+    const walking = r.vi.throwVelocity(w, p)!;
+    expect(walking.clone().sub(still).distanceTo(new Vector3(1.5, 0, 0.5))).toBeLessThan(1e-9);
+    // The arc's first step leaves the hand at that velocity.
+    r.frame(held('throw'), false);
+    const pts = r.arc.last!.points;
+    const dt = r.arc.last!.t / (pts.length - 1);
+    expect(pts[1].x - pts[0].x).toBeCloseTo(r.vi.throwVelocity(w, p)!.x * dt, 6);
+    // On open ground it lands on the terrain.
+    expect(r.arc.last!.landed).toBe(true);
+    expect(r.arc.last!.struck).toBe(false);
+    const open = pts[pts.length - 1].z;
+    // A wall in the way: the arc ends on it.
+    spawnBox(w, { p: { x: 0.5, y: 1.5, z: 3 }, size: [4, 3, 0.4], material: 'stone', state: 'fixed', look: 'wall' });
+    w.step();
+    expect(open).toBeGreaterThan(3);
+    r.frame(held('throw'), false);
+    const arc = r.arc.last!;
+    expect(arc.struck).toBe(true);
+    expect(arc.points[arc.points.length - 1].z).toBeCloseTo(2.8, 1);
+    p.walkVel.set(0, 0, 0);
+  });
+
+  it('a wielded tool of ≤ projectileMaxKg flies as a projectile: no walk added', async () => {
+    const { w, r } = await withStone();
+    const p = w.player!;
+    r.frame(keyDown('throw'), false);
+    const still = r.vi.throwVelocity(w, p)!;
+    p.walkVel.set(1.5, 0, 0.5);
+    expect(r.vi.throwVelocity(w, p)!.distanceTo(still)).toBeLessThan(1e-9);
+    p.walkVel.set(0, 0, 0);
   });
 });
 
@@ -720,7 +1085,7 @@ describe('pull, strikes and the walk', () => {
     expect(buttons(r.frame({ ...held('verb'), ...click(0), presses: ['lkick'] }, false))).toEqual([]);
   });
 
-  it('move flags: Shift held sprints; Ctrl toggles crouch (or holds it with "hold to crouch"); the pad’s LS sprint ends when you stop; B crouches; Space and A jump', async () => {
+  it('move flags: Shift held sprints; Ctrl toggles crouch (or holds it with "hold to crouch"); the pad’s LS sprint ends when you stop; B crouches (either way); Space and A jump', async () => {
     const w = await make();
     stand(w, 0, 0);
     const r = new Rig(w);
@@ -734,6 +1099,12 @@ describe('pull, strikes and the walk', () => {
     r.holdToCrouch = true;
     expect(flags(r.frame(held('crouch'), false))).toBe(MOVE_CROUCH);
     expect(flags(r.frame({}, false))).toBe(0);
+    // With "hold to crouch" the pad's B still toggles, and the key's hold doesn't undo it.
+    expect(flags(r.frame({ pad: pad([PAD.b]) }, false))).toBe(MOVE_CROUCH);
+    expect(flags(r.frame({ pad: pad([], [PAD.b]) }, false))).toBe(MOVE_CROUCH);
+    expect(flags(r.frame({ ...keyDown('crouch'), pad: pad([]) }, false))).toBe(MOVE_CROUCH);
+    expect(flags(r.frame({ released: ['crouch'], pad: pad([]) }, false))).toBe(MOVE_CROUCH);
+    expect(flags(r.frame({ pad: pad([PAD.b]) }, false))).toBe(0);
     r.holdToCrouch = false;
     expect(flags(r.frame({ moveY: 1, pad: pad([PAD.ls]) }, false))).toBe(MOVE_SPRINT);
     expect(flags(r.frame({ moveY: 1, pad: pad([], [PAD.ls]) }, false))).toBe(MOVE_SPRINT);
@@ -779,6 +1150,84 @@ describe('pull, strikes and the walk', () => {
     expect(verbs(r.frame({ pad: pad([PAD.back]) }, false))).toEqual([expect.objectContaining({ verb: 'draw', slot: 0 })]);
     p.inventory!.belt = [null, null, null];
     p.inventory!.back = null;
+  });
+});
+
+describe('a window blur (InputFrame.lost)', () => {
+  it('cancels the mode: the blur’s releases throw nothing and run no radial option, and start nothing', async () => {
+    const w = await make();
+    stand(w, 0, 0);
+    const p = w.player!;
+    const stone = spawnStone(w, { p: { x: 0.4, y: 0.2, z: 0.4 }, mass: 1 });
+    const s = stick(w, 0, 1.2);
+    w.step();
+    expect(w.verbs.putInHands(p, stone)).toBe(true);
+    w.step();
+    const r = new Rig(w);
+    withStandIns(() => {
+      r.look({ x: 0.4, y: 2.6, z: -3.2 }, { x: 0, y: 0.04, z: 1.2 });
+      r.frame();
+      expect(w.verbs.focusedEntity(p)).toBe(s);
+      // Aiming a throw: alt-tab.
+      r.frame(keyDown('throw'));
+      for (let i = 0; i < 10; i++) r.frame(held('throw'));
+      let cmds = r.frame({ released: ['throw'], lost: true });
+      expect(r.vi.mode).toBe('idle');
+      expect(verbs(cmds).filter((c) => c.verb !== 'focus')).toEqual([]);
+      // The radial open, the cursor on Cut: alt-tab.
+      r.frame(keyDown('verb'));
+      const opts = r.radial.shown;
+      const d = sectorDir(
+        opts.findIndex((o) => o.verb === 'cut'),
+        opts.length,
+      );
+      r.frame({ ...held('verb'), mouse: { dx: d.x * 80, dy: d.y * 80, left: false, right: false } });
+      expect(r.radial.selected?.verb).toBe('cut');
+      cmds = r.frame({ released: ['verb'], lost: true });
+      expect(r.vi.mode).toBe('idle');
+      expect(r.radial.isOpen).toBe(false);
+      expect(verbs(cmds).filter((c) => c.verb !== 'focus')).toEqual([]);
+      // A key going down as the window loses focus starts no mode (its release comes with it).
+      r.frame({ pressed: ['throw'], released: ['throw'], lost: true });
+      expect(r.vi.mode).toBe('idle');
+      expect(verbs(r.frame({})).filter((c) => c.verb !== 'focus')).toEqual([]);
+      // Placing: alt-tab (its release of C cancels, as it would anyway).
+      r.frame(keyDown('place'));
+      expect(r.vi.mode).toBe('place');
+      expect(verbs(r.frame({ released: ['place'], ...click(0, false), lost: true }), 'place')).toEqual([]);
+      expect(r.vi.mode).toBe('idle');
+    });
+  });
+});
+
+describe('the visuals hold no geometry for what they no longer show', () => {
+  it('the outline keeps only what it outlines; the ghost lets all go when hidden', async () => {
+    const w = await make();
+    stand(w, 0, 0);
+    const p = w.player!;
+    const sticks = [-0.8, -0.3, 0.2, 0.7].map((x) => stick(w, x, 1.3));
+    w.step();
+    const r = new Rig(w);
+    for (const id of sticks) {
+      const e = w.entities.get(id)!;
+      r.look({ x: e.pose.p.x, y: 2.6, z: -3 }, { x: e.pose.p.x, y: 0.04, z: 1.3 });
+      r.frame();
+      r.frame();
+      expect(w.verbs.focusedEntity(p)).toBe(id);
+      expect(r.highlight.cached).toBe(1);
+    }
+    r.look({ x: 0, y: 2.6, z: -3 }, { x: 0, y: 6, z: 20 });
+    r.frame();
+    r.frame();
+    expect(r.highlight.cached).toBe(0);
+    expect(w.verbs.putInHands(p, sticks[0])).toBe(true);
+    w.step();
+    r.frame(keyDown('place'));
+    expect(r.ghost.visible).toBe(true);
+    expect(r.ghost.cached).toBe(1);
+    r.frame({ released: ['place'] });
+    expect(r.ghost.visible).toBe(false);
+    expect(r.ghost.cached).toBe(0);
   });
 });
 

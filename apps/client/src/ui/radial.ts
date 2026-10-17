@@ -1,7 +1,8 @@
 // The verb radial (docs/M1-DESIGN.md §10.7, §5.13): hold V (or LB) for up to 8 sectors from verbsFor(world, player,
 // target) (read-only), disabled ones greyed with their reason ("too heavy (210 kg)", "needs an edge") so the player
 // learns the rule; a virtual cursor with a VERB_UI_TUNING.radialDeadPx dead zone (the mouse moves it; the right stick
-// points it); releasing on a sector executes it (input/verbInput.ts does). The sectors run clockwise from the top.
+// points it, and its pick stays while the stick springs back, so a flick and a release pick); releasing on a sector
+// executes it (input/verbInput.ts does). The sectors run clockwise from the top.
 //
 // The cursor and sector arithmetic is plain code (tests run it without a page); the DOM is built only with a root.
 import type { RefuseReason, VerbId } from '@wild/sim';
@@ -195,7 +196,11 @@ export class Radial {
     return this.selected;
   }
 
-  /** The right stick points the cursor: deflected past radialStickMin it points at a sector, else the centre. */
+  /**
+   * The right stick points the cursor: deflected past radialStickMin it points at a sector; back inside it the cursor
+   * stays where the stick last pointed, so the stick springing back as LB is let go keeps the pick (the pad's B closes
+   * the radial without running anything).
+   */
   stick(x: number, y: number): RadialOption | null {
     if (!this.open_) return null;
     const l = Math.hypot(x, y);
@@ -203,11 +208,8 @@ export class Radial {
     if (l > VERB_UI_TUNING.radialStickMin) {
       this.cx = (x / l) * r;
       this.cy = (y / l) * r;
-    } else {
-      this.cx = 0;
-      this.cy = 0;
+      this.draw();
     }
-    this.draw();
     return this.selected;
   }
 
@@ -223,7 +225,7 @@ export class Radial {
     const r = VERB_UI_TUNING.radialRadiusPx;
     const ring = document.createElement('div');
     ring.className = 'ring';
-    ring.style.width = ring.style.height = `${2 * (r + 26)}px`;
+    ring.style.width = ring.style.height = `${2 * (r + VERB_UI_TUNING.radialRingPadPx)}px`;
     el.appendChild(ring);
     this.optionEls = [];
     if (this.options.length === 0) {

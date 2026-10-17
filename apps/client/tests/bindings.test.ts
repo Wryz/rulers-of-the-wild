@@ -299,12 +299,22 @@ describe('Input', () => {
     expect(wheelNotches(-3, 1)).toBe(-1);
     expect(wheelNotches(-0.4, 2)).toBe(-1);
     expect(wheelNotches(Number.NaN, 0)).toBe(0);
-    // Blur lets go of everything held.
+    // Blur lets go of everything held, marked as the blur's (the verb UI cancels a mode rather than act on it).
+    expect(f.lost).toBe(false);
     page.key('ShiftLeft');
+    page.fire('mousedown', { button: 2 });
     page.fire('blur', {});
     f = input.poll();
     expect(f.released).toEqual(['sprint']);
     expect(f.held.size).toBe(0);
+    expect(f.clicks).toEqual([
+      { button: 2, down: true },
+      { button: 0, down: false },
+      { button: 2, down: false },
+    ]);
+    expect(f.lost).toBe(true);
+    expect(input.poll().lost).toBe(false);
+    expect(fullFrame({ moveX: 0, moveY: 0, presses: [], pickup: false, keys: [] }).lost).toBe(false);
   });
 
   it('fills the camera’s look by the verb UI’s mode: frozen in the radial, no zoom and no stick look while placing, aim while throw-aiming', () => {

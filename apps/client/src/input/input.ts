@@ -63,6 +63,11 @@ export interface InputFrame {
   cycle?: number;
   /** Escape while a verb mode is open: it cancels the mode instead of opening the menu. */
   cancel?: boolean;
+  /**
+   * The window lost focus this frame: the releases in `released` and `clicks` are the blur's, not the player's, so a
+   * verb mode cancels instead of acting on them (an alt-tab mid-aim throws nothing).
+   */
+  lost?: boolean;
   /** Raw mouse movement this frame (px, locked or not: the radial's virtual cursor) and the buttons held. */
   mouse?: { dx: number; dy: number; left: boolean; right: boolean };
   /** Mouse button edges this frame; the verb modes consume them before they become punches. */
@@ -92,6 +97,7 @@ export function fullFrame(f: InputFrame): FullInputFrame {
     released: f.released ?? [],
     cycle: f.cycle ?? 0,
     cancel: f.cancel ?? false,
+    lost: f.lost ?? false,
     mouse: f.mouse ?? { dx: 0, dy: 0, left: false, right: false },
     clicks: f.clicks ?? [],
     wheel: f.wheel ?? 0,
@@ -198,6 +204,7 @@ export class Input {
   private pickup = false;
   private cycle = 0;
   private cancel = false;
+  private lost = false;
   private keys: string[] = [];
   private clicks: { button: 0 | 2; down: boolean }[] = [];
   private mouseDx = 0;
@@ -319,7 +326,9 @@ export class Input {
     if (action && this.held.delete(action)) this.released.push(action);
   }
 
+  /** The window lost focus: every held key and button is let go, marked as the blur's (`lost`). */
   private clearHeld(): void {
+    this.lost = true;
     for (const a of this.held) this.released.push(a);
     this.held.clear();
     if (this.mouseLeft) this.clicks.push({ button: 0, down: false });
@@ -482,6 +491,7 @@ export class Input {
       released: this.released,
       cycle: this.cycle,
       cancel: this.cancel,
+      lost: this.lost,
       mouse: { dx: this.mouseDx, dy: this.mouseDy, left: this.mouseLeft, right: this.mouseRight },
       clicks: this.clicks,
       wheel: this.wheel,
@@ -496,6 +506,7 @@ export class Input {
     this.clicks = [];
     this.cycle = 0;
     this.cancel = false;
+    this.lost = false;
     this.mouseDx = 0;
     this.mouseDy = 0;
     this.lookDx = 0;

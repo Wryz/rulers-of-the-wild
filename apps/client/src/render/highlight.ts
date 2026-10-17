@@ -27,8 +27,9 @@ import { shapeGeometry } from './entityViews';
 /** The focused target's shell, the first target's (lash, bend) and the prompt's colours (presentation, not tuning). */
 const FOCUS_COLOUR = 0xffd27a;
 const FIRST_COLOUR = 0x7fd4ff;
-/** A ground target's ring: its inner radius as a fraction of VERB_UI_TUNING.groundRingM, and its lift off the ground (m). */
-const GROUND_RING = { innerFrac: 0.75, lift: 0.02 } as const;
+/** Mesh resolutions (not starting values): the ground ring's segments round, a rope segment's sides. */
+const RING_SEGMENTS = 28;
+const ROPE_SIDES = 6;
 
 /** A shell's geometry: the shape's own surface, centred on its bounding box so it scales about its middle. */
 interface ShellGeo {
@@ -50,13 +51,17 @@ class Outline {
   private readonly shell: Mesh;
   private readonly ring: Mesh;
   private readonly segs: Mesh[] = [];
-  private readonly segGeo = new CylinderGeometry(1, 1, 1, 6, 1, true);
+  private readonly segGeo = new CylinderGeometry(1, 1, 1, ROPE_SIDES, 1, true);
+  /** The inner fraction the ring's geometry was built with (rebuilt when the tuning changes it). */
+  private ringInner: number;
 
   constructor(colour: number, private readonly geoOf: (s: SimShape) => ShellGeo) {
-    this.mat = new MeshBasicMaterial({ color: colour, side: BackSide, transparent: true, opacity: 0.6, depthWrite: false });
-    this.flatMat = new MeshBasicMaterial({ color: colour, side: DoubleSide, transparent: true, opacity: 0.7, depthWrite: false });
+    const T = VERB_UI_TUNING;
+    this.mat = new MeshBasicMaterial({ color: colour, side: BackSide, transparent: true, opacity: T.shellOpacity, depthWrite: false });
+    this.flatMat = new MeshBasicMaterial({ color: colour, side: DoubleSide, transparent: true, opacity: T.markOpacity, depthWrite: false });
     this.shell = new Mesh(undefined, this.mat);
-    this.ring = new Mesh(new RingGeometry(GROUND_RING.innerFrac, 1, 28), this.flatMat);
+    this.ringInner = T.ringInnerFrac;
+    this.ring = new Mesh(new RingGeometry(this.ringInner, 1, RING_SEGMENTS), this.flatMat);
     this.ring.rotation.x = -Math.PI / 2;
     this.group.add(this.shell, this.ring);
     this.group.visible = false;
@@ -69,10 +74,18 @@ class Outline {
     for (const s of this.segs) s.visible = false;
     this.group.visible = t !== null;
     if (!t) return null;
+    const T = VERB_UI_TUNING;
+    this.mat.opacity = T.shellOpacity;
+    this.flatMat.opacity = T.markOpacity;
     if (t.kind === 'ground') {
+      if (this.ringInner !== T.ringInnerFrac) {
+        (this.ring.geometry as BufferGeometry).dispose();
+        this.ringInner = T.ringInnerFrac;
+        this.ring.geometry = new RingGeometry(this.ringInner, 1, RING_SEGMENTS);
+      }
       this.ring.visible = true;
-      this.ring.scale.setScalar(VERB_UI_TUNING.groundRingM);
-      this.ring.position.set(t.at.x, world.terrain.heightAt(t.at.x, t.at.z) + GROUND_RING.lift, t.at.z);
+      this.ring.scale.setScalar(T.groundRingM);
+      this.ring.position.set(t.at.x, world.terrain.heightAt(t.at.x, t.at.z) + T.groundRingLiftM, t.at.z);
       return this.ring.position.clone();
     }
     const e = world.entities.get(t.id);
@@ -134,8 +147,12 @@ class Outline {
 
 export class Highlight {
   private readonly root = new Group();
-  private readonly geos = new WeakMap<SimShape, ShellGeo>();
-  private readonly owned: BufferGeometry[] = [];
+  /**
+   * The shells' geometries, by shape: only those outlined in the last show() are kept (a focus change builds the new
+   * one), so pieces broken off and shapes that no longer exist never pile up on the GPU.
+   */
+  private readonly geos = new Map<SimShape, ShellGeo>();
+  private readonly used = new Set<SimShape>();
   private readonly focus: Outline;
   private readonly firstOutline: Outline;
   private readonly prompt: HTMLDivElement | null = null;
@@ -182,9 +199,11 @@ export class Highlight {
    * `prompt.at`, or over the target when `at` is null.
    */
   show(world: World, target: TargetRef | null, first: TargetRef | null, camera: Camera, prompt: { text: string; at: Vector3 | null } | null = null): void {
+    this.used.clear();
     const over = this.focus.show(world, target);
     // (The first target is drawn in its own colour; when it is also the focus the focus colour wins.)
     this.firstOutline.show(world, first && !(target && sameTarget(first, target)) ? first : null);
+    this.sweep();
     const p = this.prompt;
     if (!p) return;
     const at = prompt ? (prompt.at ?? over) : null;
@@ -209,11 +228,18 @@ export class Highlight {
     this.scene.remove(this.root);
     this.focus.dispose();
     this.firstOutline.dispose();
-    for (const g of this.owned) g.dispose();
+    this.used.clear();
+    this.sweep();
     this.prompt?.remove();
   }
 
+  /** How many shell geometries are held (tests: they don't pile up). */
+  get cached(): number {
+    return this.geos.size;
+  }
+
   private geometry(s: SimShape): ShellGeo {
+    this.used.add(s);
     let g = this.geos.get(s);
     if (!g) {
       const box = shapeBox(s);
@@ -223,9 +249,17 @@ export class Highlight {
       geo.computeBoundingSphere();
       g = { geo, centre };
       this.geos.set(s, g);
-      this.owned.push(geo);
     }
     return g;
+  }
+
+  /** Disposes the geometries of shapes not outlined now (a hidden shell may still point at one: it isn't drawn). */
+  private sweep(): void {
+    for (const [s, g] of this.geos) {
+      if (this.used.has(s)) continue;
+      g.geo.dispose();
+      this.geos.delete(s);
+    }
   }
 }
 
