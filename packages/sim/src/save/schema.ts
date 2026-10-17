@@ -1,11 +1,23 @@
 // The canonical save, version 1 (docs/M1-DESIGN.md §8.3), and the record type of every system that writes into it.
 //
-// STUB (P05; P13 owns this file): the record types below are the shapes §8.3, §6.8 and §2 give; the ones the design
-// leaves to their system's package (fighters, the bodies, verbs, drops, projectiles) are open records until that package
-// fills them in here with P13. Every system stub's toRecord()/restoreRecord() already returns and takes these types, so
-// P13 assembles the save through stable signatures.
+// Each system writes its own records (toRecord) and reads them back (restoreRecord); save/serialize.ts assembles them
+// into SaveV1 in the key order below, save/canonical.ts writes the text, save/load.ts checks and loads it. The types
+// the design leaves to their system's package are open records until that package fills them in here (TODO(P11) the
+// ruler body, TODO(P14) the verb state): every system stub's toRecord()/restoreRecord() already returns and takes these
+// types, so the save is assembled through stable signatures.
+//
+// Additions to §8.3's SaveV1 (each a deviation recorded in the package's report):
+// - `options`: the WorldOptions the world was built with (scene, terrain, size, player, sparringApe), without which a
+//   load can't regenerate the same base (a test scene is 'empty', the client's is the Clearing);
+// - `prevBlade`: CombatSim's swept blades of the last tick (MAP gap-7 §3.1; P02-fix saves it);
+// - `impulses`: the entity store's queued impulses (contact reactions of phase 9 are applied in the next tick's phase
+//   4d, so the queue is not empty at the end of a tick);
+// - `BodiesRecV1.kcc` is nullable: a ruler has no character controller (§4.7).
 import type { BoneName } from '../body/skeleton';
+import type { AIDirectorRecord, BrawlerAIRecord } from '../sim/ai';
+import type { DropRecord, ProjectileRecord } from '../sim/combat';
 import type { Command } from '../sim/commands';
+import type { FighterRecord } from '../sim/fighter';
 import type { MindScript, MindState } from '../world/creatures/mind';
 import type {
   Anchor,
@@ -23,6 +35,9 @@ import type {
 } from '../world/types';
 
 export const SAVE_FORMAT_VERSION = 1;
+
+/** The save's `format` tag. */
+export const SAVE_FORMAT = 'rotw-world';
 
 /** Every saved field of an entity (§2.3; SPEC:729), poses and velocities as the f32 values Rapier returned. */
 export interface EntityRecV1 {
@@ -55,7 +70,12 @@ export interface EntityRecV1 {
   releasedBy: { fighter: number; apartTicks: number } | null;
 }
 
-/** A joint record (§2.4), tension rings and the held end's pull included. */
+/**
+ * A joint record (§2.4), tension rings and the held end's pull included. The save holds every joint of the store, the
+ * ones generation made included (a joint has no generated/touched flag): JointStore.restoreRecord replaces the whole
+ * store with the saved joints (see save/load.ts), so a generated joint that still exists comes back from its record and
+ * one that was cut or untied stays gone.
+ */
 export interface JointRecV1 {
   id: number;
   kind: JointKind;
@@ -73,41 +93,57 @@ export interface JointRecV1 {
 }
 
 /**
- * A fighter's saved state: every field marked Save in MAP gap-7 §3.4-3.5 (P04's toRecord()) plus the world fields
- * (playerId, species, massKg, toughnessJ, lastKnock, armour, inventory, drive, posture, work, verbRequest, verbAim,
- * throwAim, moveFlags, jumpRequest, idlePaused). TODO(P13, P04): the full field list.
+ * A fighter's saved state: every field marked Save in MAP gap-7 §3.4-3.5 plus §8.3's world fields, written by P04's
+ * Fighter.toRecord (sim/fighter.ts's FighterRecord, in its key order).
  */
-export interface FighterRecV1 {
-  id: number;
-  [field: string]: unknown;
-}
+export type FighterRecV1 = FighterRecord;
 
-/** The inner BrawlerAI's 20 history fields (MAP gap-7 §3.3; P04's toRecord()). TODO(P13, P04): the field list. */
-export interface BrawlerRecV1 {
-  [field: string]: unknown;
-}
+/** The inner BrawlerAI's 20 history fields (MAP gap-7 §3.3; P04's BrawlerAI.toRecord). */
+export type BrawlerRecV1 = BrawlerAIRecord;
 
-/** A character controller (§4.2), crouch included. TODO(P08): its exact fields. */
+/** A weapon lying around (CombatSim.drops; P02-fix's DropRecord). */
+export type DropRecV1 = DropRecord;
+
+/** A weapon in flight (CombatSim.projectiles; P02-fix's ProjectileRecord). */
+export type ProjRecV1 = ProjectileRecord;
+
+/** The AI director's turn-taking clock (P04's AIDirector.toRecord). */
+export type DirectorRecV1 = AIDirectorRecord;
+
+/** A character controller (§4.2; P08's CharacterControllers.toRecord), crouch included. */
 export interface KccRecV1 {
+  /** The capsule body's pose (f32, as Rapier holds it). */
   pose: Pose3;
   vy: number;
   grounded: boolean;
   crouched: boolean;
-  [field: string]: unknown;
+  /** Off while the fighter is down (the slab has it). */
+  enabled: boolean;
+  /** The capsule's half height now (crouched or standing). */
+  halfHeight: number;
+  /** A pending teleport's feet point (the next resolve places the capsule there and skips the sweep), or null. */
+  teleport: V3 | null;
+  /** The pushes it queued at `pushTick` (entity, unit horizontal direction): the next sweep reads whether each yielded. */
+  pushes: { entity: number; x: number; z: number }[];
+  pushTick: number;
 }
 
-/** A downed slab (§4.5). TODO(P08): its exact fields. */
+/** A downed slab (§4.5; P08's DownedBodies.toRecord). */
 export interface SlabRecV1 {
   enabled: boolean;
   pose: Pose3;
   lin: V3;
   ang: V3;
-  [field: string]: unknown;
+  /** Ticks the settle has held. */
+  hold: number;
+  handedBack: boolean;
+  /** A world impact's Δv queued for the next phase 4a, or null. */
+  dv: V3 | null;
 }
 
 /**
  * The ruler's body (§4.7): body type, pose, velocities, the frozen trip pose (12 × pos + quat) and the zone pose history
- * (RR-19). TODO(P11): its exact fields.
+ * (RR-19). TODO(P11): its exact fields (P11 writes and reads it; the loader passes it through).
  */
 export interface RulerBodyRecV1 {
   dynamic: boolean;
@@ -119,29 +155,18 @@ export interface RulerBodyRecV1 {
   [field: string]: unknown;
 }
 
-/** One fighter's bodies. */
+/** One fighter's bodies (every fighter of the sim, by fighter id). */
 export interface BodiesRecV1 {
   fighter: number;
   /**
    * §8.3 writes `kcc: KccRecV1`; null here because a ruler has no character controller (§4.7: its body is the
-   * RulerBodies one, saved in `ruler`). Players and apes always have one. TODO(P13): keep or change with §8.3.
+   * RulerBodies one, saved in `ruler`). Players and apes always have one.
    */
   kcc: KccRecV1 | null;
+  /** ZoneBodies.historyRecord: per bone, the last stored pose and the one before it (P08). */
   zonesHistory: number[];
   slab: SlabRecV1 | null;
   ruler: RulerBodyRecV1 | null;
-}
-
-/** A weapon lying on the ground (CombatSim.drops). TODO(P13): its exact fields. */
-export interface DropRecV1 {
-  id: number;
-  [field: string]: unknown;
-}
-
-/** A weapon in flight (CombatSim.projectiles). TODO(P13): its exact fields. */
-export interface ProjRecV1 {
-  id: number;
-  [field: string]: unknown;
 }
 
 /** A fighter's verb state (buffer, held ends, continuous verbs). TODO(P14): its exact fields. */
@@ -198,35 +223,117 @@ export interface FellingRecV1 {
   fall: PlantState['fall'];
 }
 
-/** The whole world (§8.3). Writers emit keys in this order (canonical.ts). */
+/** The WorldOptions a world was built with (all but `seed`, which is the save's own, and `nav`, a load option). */
+export interface SaveOptionsV1 {
+  scene: 'clearing' | 'empty';
+  terrain: 'generated' | 'flat';
+  /** m, as asked (the terrain rounds it to whole tiles, the same way on load). */
+  size: number;
+  player: boolean;
+  sparringApe: boolean;
+}
+
+/** A queued entity impulse (EntityStore.queueImpulse): applied in the next tick's phase 4d, queue order kept. */
+export interface ImpulseRecV1 {
+  entity: number;
+  j: V3;
+  at: V3 | null;
+}
+
+/** One saved tuning value that differs from its registered default (sim tables only). */
+export interface TuningOverrideV1 {
+  table: string;
+  key: string;
+  value: number | boolean | string;
+}
+
+/** The whole world (§8.3, plus the additions named at the top of this file). Writers emit keys in this order. */
 export interface SaveV1 {
   format: 'rotw-world';
   formatVersion: 1;
   seed: number;
+  options: SaveOptionsV1;
   tick: number;
-  tuningOverrides: { table: string; key: string; value: number | boolean | string }[];
+  /** Sorted (table, key); client tables (folder 'Client …') are never saved. */
+  tuningOverrides: TuningOverrideV1[];
   counters: { fighter: number; entity: number; joint: number; wound: number; dropSerial: number; projSerial: number };
+  /** uint32 states; `fighters` and `minds` as [fighter id, state], by id. */
   rng: { combat: number; world: number; fighters: [number, number][]; minds: [number, number][] };
-  director: { lastAttack: number };
+  director: DirectorRecV1;
+  /** CommandQueue order. */
   pending: Command[];
+  /** Edits vs generated heights, sorted (tile, vertex). */
   terrain: { tile: number; vertex: number; dh: number }[];
+  /** (tile, vertex) of every ever-dug vertex, sorted (§4.13). */
   dug: [number, number][];
+  /** (cell, value) edits, sorted. */
   cover: [number, number][];
+  /** Id order: every non-generated entity and every touched generated one. */
   entities: EntityRecV1[];
+  /** Generated ids no longer present, sorted. */
   removed: number[];
+  impulses: ImpulseRecV1[];
+  /** Id order, every joint (generation's included). */
   joints: JointRecV1[];
+  /** combat.fighters order (the step order). */
   fighters: FighterRecV1[];
+  /** By fighter id (§6.8). */
   minds: MindRecV1[];
+  /** By fighter id. */
   verbs: VerbStateRecV1[];
   spawner: SpawnerRecV1;
   drops: DropRecV1[];
   projectiles: ProjRecV1[];
+  /** [fighter id, blade points at the end of the last tick's hit detection], in combat.fighters order. */
+  prevBlade: [number, V3[]][];
+  /** Every fighter of the sim, by id. */
   bodies: BodiesRecV1[];
+  /** [fighter id, its RulerState], by id. */
   rulers: [number, RulerState][];
+  /** ContactSystem's runtime maps, sorted (creature, owner key) (RR-19). */
   contacts: ContactRecV1[];
+  /** (fighter, untilTick), sorted. */
   contactGrace: [number, number][];
+  /** Trees notched, falling or felled, by id. */
   felling: FellingRecV1[];
   deaths: { fighter: number; respawnTick: number }[];
   corpses: { fighter: number; removeTick: number }[];
+  /** (layer, ty, tx). */
   navDirty: [number, number, number][];
 }
+
+/** SaveV1's keys in the order the writer emits them. */
+export const SAVE_V1_KEYS: readonly (keyof SaveV1)[] = [
+  'format',
+  'formatVersion',
+  'seed',
+  'options',
+  'tick',
+  'tuningOverrides',
+  'counters',
+  'rng',
+  'director',
+  'pending',
+  'terrain',
+  'dug',
+  'cover',
+  'entities',
+  'removed',
+  'impulses',
+  'joints',
+  'fighters',
+  'minds',
+  'verbs',
+  'spawner',
+  'drops',
+  'projectiles',
+  'prevBlade',
+  'bodies',
+  'rulers',
+  'contacts',
+  'contactGrace',
+  'felling',
+  'deaths',
+  'corpses',
+  'navDirty',
+];
