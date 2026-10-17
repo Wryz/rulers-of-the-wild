@@ -450,6 +450,27 @@ describe('jump, fall and landing (§4.2, §5.5)', () => {
     expect(w.kcc.verticalSpeed(p)).toBeLessThan(vy);
   });
 
+  it('a jump under a low ceiling stops at it and falls back at once', async () => {
+    const w = await make({ seed: 25 });
+    // A fixed slab 2.1 m up: the 1.8 m capsule (+ 0.02 m skin) has 0.28 m of room.
+    entity(w, 'stone', { kind: 'box', hx: 2, hy: 0.1, hz: 2 }, { x: 0, y: 2.2, z: 0 }, 'fixed');
+    w.step();
+    const p = w.player!;
+    w.commands.push({ tick: w.tick + 1, player: 1, kind: 'button', button: 'jump' });
+    let top = 0;
+    let air = 0;
+    for (let t = 0; t < 60; t++) {
+      w.step();
+      top = Math.max(top, p.pos.y);
+      if (!w.kcc.grounded(p)) air++;
+    }
+    expect(top).toBeGreaterThan(0.1);
+    expect(top).toBeLessThan(2.1 - 1.8);
+    // Far shorter than the free jump's ≈ 50 ticks in the air.
+    expect(air).toBeLessThan(25);
+    expect(w.kcc.grounded(p)).toBe(true);
+  });
+
   it('walking off a 5 m scaffold: a fall, a `land` event on it with the rule’s energy, and a knockdown over 9 m/s', async () => {
     const w = await make({ seed: 23 });
     entity(w, 'dryWood', { kind: 'box', hx: 1, hy: 2.5, hz: 1 }, { x: 0, y: 2.5, z: 0 }, 'fixed');

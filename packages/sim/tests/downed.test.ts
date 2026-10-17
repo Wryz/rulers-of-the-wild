@@ -109,7 +109,7 @@ describe('the slab (§4.5)', () => {
     expect(w.downed.pose(p.id)).toBeNull();
     // Found by no query while disabled.
     w.step();
-    expect(w.queries.castRay({ x: 0, y: 0.9, z: -3 }, { x: 0, y: 0, z: 1 }, 6, { terrain: false, entities: 'none', fighters: 'zones' })?.owner.part).toBe('zone');
+    expect(w.queries.castRay({ x: 0, y: 0.9, z: -3 }, { x: 0, y: 0, z: 1 }, 6, { terrain: false, entities: 'none', fighters: 'zones' })?.owner).toMatchObject({ part: 'zone' });
     const T = DOWNED_TUNING;
     expect(2 * (T.halfWidth + T.border)).toBeCloseTo(0.48, 9);
     expect(2 * (T.halfLength + T.border)).toBeCloseTo(1.81, 9);
@@ -499,6 +499,8 @@ describe('definition of done (P08)', () => {
     let hits = 0;
     let closest = Infinity;
     for (let t = 0; t < 3600; t++) {
+      // Let the worker answer Vitest's RPC now and then on a loaded machine (this loop runs for seconds).
+      if (t % 300 === 299) await new Promise((res) => setImmediate(res));
       const r = w.step();
       for (const e of r.world) if (e.type === 'launch') launches++;
       for (const e of r.combat) {

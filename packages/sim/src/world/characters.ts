@@ -275,8 +275,8 @@ export class CharacterControllers implements FighterMover {
       }
     }
     c.grounded = grounded;
-    // Rising and stopped short (a ceiling): the jump is spent.
-    if (dy > 0 && m.y < dy * 0.5) c.vy = Math.min(c.vy, 0);
+    // Rising and stopped short by more than the controller's skin (a ceiling): the jump is spent.
+    if (dy > 0 && m.y + c.params.offset < dy) c.vy = Math.min(c.vy, 0);
     this.queuePushes(c, still);
     // Crouch (§4.2): this sweep used the old shape, the next one sees the new shape at the new centre (feet fixed).
     const crouch = this.wantsCrouch(f);
