@@ -122,6 +122,10 @@ export interface RulerBodyRecV1 {
 /** One fighter's bodies. */
 export interface BodiesRecV1 {
   fighter: number;
+  /**
+   * §8.3 writes `kcc: KccRecV1`; null here because a ruler has no character controller (§4.7: its body is the
+   * RulerBodies one, saved in `ruler`). Players and apes always have one. TODO(P13): keep or change with §8.3.
+   */
   kcc: KccRecV1 | null;
   zonesHistory: number[];
   slab: SlabRecV1 | null;

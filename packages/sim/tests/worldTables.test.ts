@@ -2,6 +2,10 @@
 // holding its §9 starting values (double entry against the design, so a transcription slip fails here). The registry
 // test checks every leaf's unit and source. Values are matched as a subset: a later package adds its new keys to its
 // own module's table (§13.0) without touching this file.
+//
+// One `it` per owning package (§13.1), named after it: a package that changes one of its §9 values (a design change)
+// edits or moves its own block (into its own test file), and no other. P05 keeps the registration test and its own
+// three tables. This file is outside P05's Owns list: recorded for the orchestrator's ledger.
 import { describe, expect, it } from 'vitest';
 import { TUNING, tuningLeaves } from '../src/tuning/registry';
 import { CHARACTER_TUNING } from '../src/world/characters';
@@ -48,7 +52,7 @@ describe('the tables P05 registers', () => {
     for (const e of TUNING) expect(tuningLeaves(e).length, e.name).toBeGreaterThan(0);
   });
 
-  it('WORLD_TUNING, TERRAIN_TUNING and PHYSICS_TUNING hold the §9 values', () => {
+  it('P05: WORLD_TUNING, TERRAIN_TUNING and PHYSICS_TUNING hold the §9 values', () => {
     expect(WORLD_TUNING).toMatchObject({
       clearingSize: 200,
       gravityY: -9.81,
@@ -98,7 +102,7 @@ describe('the tables P05 registers', () => {
     });
   });
 
-  it('the bodies, ruler body and materials-and-joints tables hold the §9 values', () => {
+  it('P08: CHARACTER_TUNING and DOWNED_TUNING hold the §9 values', () => {
     expect(CHARACTER_TUNING).toMatchObject({
       pushN: 500,
       capsuleR: 0.3,
@@ -134,6 +138,9 @@ describe('the tables P05 registers', () => {
       maxStandSlopeDeg: 45,
       boneBands: [0.5, 0.94, 1.09, 1.29, 1.55],
     });
+  });
+
+  it('P11: RULER_BODY_TUNING holds the §9 values', () => {
     expect(RULER_BODY_TUNING).toMatchObject({
       tripSpeed: 4,
       getupAfterS: 4,
@@ -158,6 +165,9 @@ describe('the tables P05 registers', () => {
       pitDownDepthFrac: 0.5,
       coverTripWindowTicks: 30,
     });
+  });
+
+  it('P10: JOINT_TUNING, BREAK_TUNING, LOAD_TUNING and FELL_TUNING hold the §9 values', () => {
     expect(JOINT_TUNING).toMatchObject({
       tripwireWindowS: 0.1,
       ropeBreakSteps: 3,
@@ -188,7 +198,7 @@ describe('the tables P05 registers', () => {
     });
   });
 
-  it('NAV_TUNING and CLEARING_TUNING hold the §9 values', () => {
+  it('P12: NAV_TUNING holds the §9 values', () => {
     expect(NAV_TUNING).toMatchObject({
       human: { radius: 0.4, height: 1.8, climb: 0.4, maxSlopeDeg: 45, cs: 0.2, ch: 0.2, tileVox: 32, halfExtents: [2, 4, 2], tilesPerTick: 2 },
       ruler: { radius: 1.65, height: 10, climb: 1.0, maxSlopeDeg: 40, cs: 0.5, ch: 0.25, tileVox: 32, halfExtents: [4, 6, 4], tilesPerTick: 1 },
@@ -204,6 +214,9 @@ describe('the tables P05 registers', () => {
       blockerMinKg: 500,
       extrudeAboveAnkleM: 0.39,
     });
+  });
+
+  it('P21: CLEARING_TUNING holds the §9 values', () => {
     expect(CLEARING_TUNING).toMatchObject({
       trees: 60,
       groves: 6,
@@ -301,7 +314,7 @@ describe('the tables P05 registers', () => {
     });
   });
 
-  it('VERB_TUNING and TOOL_TUNING hold the §9 values', () => {
+  it('P14: VERB_TUNING and TOOL_TUNING hold the §9 values', () => {
     expect(VERB_TUNING).toMatchObject({
       targetRadiusM: 2.5,
       standOffM: 0.6,
@@ -415,7 +428,7 @@ describe('the tables P05 registers', () => {
     });
   });
 
-  it('CREATURE_TUNING and NOISE_TUNING hold the §9 values', () => {
+  it('P18: CREATURE_TUNING and NOISE_TUNING hold the §9 values', () => {
     expect(CREATURE_TUNING.shared).toMatchObject({
       navQueriesPerTick: 4,
       crouchSightMul: 0.6,
