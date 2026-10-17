@@ -17,13 +17,11 @@ export class Hud {
   private readonly wave: HTMLDivElement;
   private readonly banner: HTMLDivElement;
   private readonly hint: HTMLDivElement;
-  private readonly coinsEl: HTMLDivElement;
   private readonly promptEl: HTMLDivElement;
   private readonly flashEl: HTMLDivElement;
   private readonly movesEl: HTMLDivElement;
   private readonly incomingEl: HTMLDivElement;
   private slotEls: { root: HTMLDivElement; name: HTMLSpanElement; cd: HTMLElement; key: HTMLElement; alt: HTMLElement }[] = [];
-  private shownCoins = 0;
   private comboTimer = 0;
   private lagP = 1;
   private lagE = 1;
@@ -43,7 +41,6 @@ export class Hud {
         <div class="bar hp"><div class="lag"></div><div class="fill"></div></div>
       </div>
       <div class="wave"></div>
-      <div class="coins"><span class="coin"></span><b>0</b></div>
       <div class="prompt"></div>
       <div class="flash"></div>
       <div class="combo"></div>
@@ -70,7 +67,6 @@ export class Hud {
     this.wave = q('.wave');
     this.banner = q('.banner');
     this.hint = q('.hint');
-    this.coinsEl = q('.coins');
     this.promptEl = q('.prompt');
     this.flashEl = q('.flash');
     this.movesEl = q('.moves');
@@ -159,22 +155,6 @@ export class Hud {
   mood(kind: '' | 'death') {
     this.el.classList.toggle('dying', kind === 'death');
     document.body.classList.toggle('dying', kind === 'death');
-  }
-
-  setCoins(n: number, animate = true) {
-    if (!animate) this.shownCoins = n;
-    const target = Math.floor(n);
-    if (target > this.shownCoins) {
-      this.coinsEl.classList.remove('bump');
-      void this.coinsEl.offsetWidth;
-      this.coinsEl.classList.add('bump');
-    }
-    this.shownCoins = target;
-    this.coinsEl.querySelector('b')!.textContent = String(target);
-  }
-
-  showCoins(show: boolean) {
-    this.coinsEl.style.display = show ? '' : 'none';
   }
 
   /** Short prompt floating above a world position (empty text hides it). */

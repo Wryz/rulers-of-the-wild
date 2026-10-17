@@ -21,7 +21,6 @@ import { Input } from '../input/input';
 import { CAMERA_TUNING, CameraRig } from '../render/cameraRig';
 import { Blood } from '../render/blood';
 import { Gibs } from '../render/gibs';
-import { Coins } from '../render/coins';
 import { cutoutUniforms, updateCutout } from '../render/cutout';
 import { Effects } from '../render/particles';
 import { FighterView, type GearLook, PLAYER_PALETTE, type Palette } from '../render/fighterView';
@@ -30,44 +29,22 @@ import { DEFAULT_AI, type AIConfig } from '@wild/sim';
 import { moveCommand } from '@wild/sim';
 import { buttonMove, type CombatEvent, CombatSim, type Fatal, PARRY_WINDOW, PERFECT_DODGE, type HurtZone, hurtSpheres, strikePoint, type Tear } from '@wild/sim';
 import { DEFENSES, type MoveDef, moveLength } from '@wild/sim';
-import { ARCHETYPES, coinDrop, createEnemy, type EnemyKind, type EnemyMods } from '@wild/sim';
-import { type Button, DEFAULT_STATS, type Fighter, type FighterStats } from '@wild/sim';
+import { ARCHETYPES, createEnemy, type EnemyKind, type EnemyMods } from '@wild/sim';
+import { type Button, type Fighter } from '@wild/sim';
 import { DT, Rng } from '@wild/sim';
 import { createPlayer } from '@wild/sim';
 import { BattleLog } from '../ui/battleLog';
-import { DeathScreen, type RunSummary } from '../ui/death';
 import { Hud } from '../ui/hud';
 import { keyLabel } from '../input/bindings';
 import { SettingsMenu } from '../ui/settings';
-import { Shop } from '../ui/shop';
 import { ArenaWalkable } from '@wild/sim';
 import type { Drop } from '@wild/sim';
 import { limbBones, WEAPONS, type Wound } from '@wild/sim';
 import { DropView, ProjectileView } from '../render/weaponView';
 import { projectileDir, projectileGrip } from '@wild/sim';
 import { Cinematics, type Shot } from '../render/cinematics';
-import { OUTFITS, SUPPLIES } from './catalog';
 import { BattleRecorder } from './recorder';
-import { deathRewardParts, item, loadSave, NO_BUFFS, opponentGear, type RoundBuffs, type SaveData, SLOTS, staminaRegen, statsWithGear, useSupplies, writeSave } from './economy';
-import { type RoundSpec, roundSpec, type Spawn } from './gauntlet';
 import { Trauma } from './trauma';
-
-/** One run of the gauntlet, from round 1 until you fall. */
-export interface RunStats {
-  kos: number;
-  hits: number;
-  damage: number;
-  bestCombo: number;
-  perfect: number;
-  /** Skulls split / cleft / crushed and heads taken. */
-  brutal: number;
-  started: number;
-  killedBy: string;
-}
-
-function newRun(): RunStats {
-  return { kos: 0, hits: 0, damage: 0, bestCombo: 0, perfect: 0, brutal: 0, started: performance.now(), killedBy: '' };
-}
 
 export const GAME_TUNING = {
   timeScale: 1,
@@ -82,15 +59,11 @@ const TIME_SCALES = [1, 0.5, 0.25, 0.1];
 const IMPACT: Partial<Record<string, Material>> = { pan: 'pan', chair: 'metal', crowbar: 'metal', pipe: 'metal', sledgehammer: 'metal', bottle: 'glass' };
 /** What each arena's floor is, for footsteps. */
 const FLOOR: Record<ThemeId, Surface> = { ring: 'canvas', street: 'asphalt', grocery: 'tile', colosseum: 'sand', warehouse: 'concrete', bar: 'wood', dojo: 'wood', rooftop: 'gravel' };
-const PLAYER_BASE: FighterStats = { ...DEFAULT_STATS, maxHp: 100, walkSpeed: 2.6 };
-/** Enemies stand still for this long while the round is announced (real seconds). */
-const INTRO_HOLD = 1.6;
 const _los = new Vector3();
 /** Weapons that knock (wood) rather than ring (metal, glass) when they hit the floor. */
 const WOODEN = new Set(['bat', 'club', 'bokken', 'cue']);
 
-type Mode = 'gauntlet' | 'training';
-type Phase = 'play' | 'clear' | 'shop' | 'down';
+type Phase = 'play' | 'down';
 
 const TORSO = ['chest', 'abdomen', 'head'] as const;
 const _edge = new Vector3();
@@ -104,7 +77,6 @@ export class Game {
   readonly cine = new Cinematics();
   private readonly lastHitBy = new Map<Fighter, Fighter>();
   readonly effects: Effects;
-  readonly coins: Coins;
   readonly blood: Blood;
   readonly gibs: Gibs;
   readonly trauma = new Map<Fighter, Trauma>();
@@ -112,13 +84,10 @@ export class Game {
   readonly input: Input;
   readonly hud: Hud;
   readonly settings: SettingsMenu;
-  readonly shop: Shop;
   readonly world: RAPIER.World;
   readonly sim: CombatSim;
   readonly aiCfg: AIConfig = { ...DEFAULT_AI };
   readonly player: Fighter;
-  readonly mode: Mode;
-  readonly save: SaveData;
   /** All live (and recently KO'd) enemies. */
   readonly enemies: Fighter[] = [];
   private readonly enemyKind = new Map<Fighter, EnemyKind>();
@@ -130,16 +99,9 @@ export class Game {
   private themeView: ThemeView | null = null;
   private envBody: RAPIER.RigidBody | null = null;
 
-  // Gauntlet.
-  /** Current round. */
-  round = 0;
-  spec: RoundSpec | null = null;
-  private readonly roundRng = new Rng((Date.now() & 0xffff) + 7);
-  private holdIn = -1;
-  private clearIn = -1;
-  private nextRoundIn = -1;
-
   // Training.
+  /** Shuffles where the weapons lie at the start of a round. */
+  private readonly roundRng = new Rng((Date.now() & 0xffff) + 7);
   wave = 1;
   kos = 0;
   private respawnIn = -1;
@@ -162,18 +124,8 @@ export class Game {
   private stepOnce = false;
   private slowmo = 0;
   private downIn = -1;
-  /** What the last run paid out when it ended. */
-  private lastPay = 0;
   private recorder!: BattleRecorder;
   private battleLog!: BattleLog;
-  /** Supplies in use this round. */
-  private buffs: RoundBuffs = NO_BUFFS;
-  private wornOutfit: string | null = null;
-  private runSummary: RunSummary | null = null;
-  private readonly death: DeathScreen;
-  /** This run so far (since the last round 1), for the end-of-run screen. */
-  run: RunStats = newRun();
-  private shopIn = -1;
   private bannerIn = -1;
   private attacksThrown = 0;
   private time = 0;
@@ -213,13 +165,9 @@ export class Game {
     r.outputColorSpace = SRGBColorSpace;
     this.renderer = r;
     this.effects = new Effects(this.scene);
-    this.coins = new Coins(this.scene);
     this.blood = new Blood(this.scene);
     this.gibs = new Gibs(this.scene);
     this.scene.add(this.debugGroup);
-    const params = new URLSearchParams(location.search);
-    this.mode = DEV && (params.get('mode') === 'training' || params.get('mode') === 'arena') ? 'training' : 'gauntlet';
-    this.save = loadSave();
 
     this.world = new RAPIER.World({ x: 0, y: -9.81, z: 0 });
     this.world.timestep = DT;
@@ -257,45 +205,11 @@ export class Game {
     this.recorder = new BattleRecorder(this.renderer.domElement);
     this.recorder.enabled = this.settings.prefs.record;
     this.battleLog = new BattleLog(document.body, this.recorder);
-    this.battleLog.onClose = () => {
-      // (Back to whatever it was opened over: the shop or the defeat screen stay paused.)
-      if (!this.shop.isOpen && !this.death.isOpen && this.phase !== 'shop') this.setMenuPause(false);
-    };
+    this.battleLog.onClose = () => this.setMenuPause(false);
     this.hud.logButton.addEventListener('click', () => this.openLog());
-    this.shop = new Shop(document.body, this.save);
-    this.death = new DeathScreen(document.body);
-    this.death.onTick = () => this.sfx.coin();
-    this.death.onShop = () => {
-      this.hud.setCoins(this.save.coins, false);
-      this.shop.open(this.round, this.lastPay);
-    };
-    this.death.onReplay = () => this.openLog();
-    this.shop.onReplay = () => this.openLog();
-    this.death.onAgain = () => {
-      this.hud.setCoins(this.save.coins, false);
-      this.setMenuPause(false);
-      this.startRound(1);
-    };
-    this.shop.onBuy = () => {
-      writeSave(this.save);
-      this.applyGear();
-      this.hud.setCoins(this.save.coins, false);
-      this.sfx.coin();
-    };
-    this.shop.onDenied = () => this.sfx.block(false);
-    this.shop.stats = () => this.player.stats;
-    this.shop.onDone = () => {
-      this.shop.close();
-      this.setMenuPause(false);
-      // (After a death the run starts over.)
-      this.startRound(this.shop.fallen ? 1 : this.round + 1);
-    };
 
-    this.applyGear();
-    if (this.mode === 'training') this.setupTraining();
-    else this.startRound(1);
-    this.hud.setCoins(this.save.coins, false);
-    this.hud.showCoins(this.mode === 'gauntlet');
+    // The training ring is the only mode (the Clearing replaces it in Milestone 1).
+    this.setupTraining();
 
     this.cine.onChange = (on) => this.hud.cinematic(on);
     // Cut cameras keep a clear line to the action: no shooting through a column, a car
@@ -328,30 +242,6 @@ export class Game {
     }
   }
 
-  /** Everything bought, applied: gear, training, skills, this round's supplies, the outfit. */
-  applyGear() {
-    const p = this.player;
-    const hpFrac = p.hp / p.stats.maxHp;
-    p.stats = statsWithGear(this.save, PLAYER_BASE, this.buffs);
-    p.hp = Math.min(p.stats.maxHp, Math.max(1, hpFrac * p.stats.maxHp));
-    p.staminaRegenMul = staminaRegen(this.save, this.buffs);
-    p.weaponDamageMul = 1 + this.buffs.weaponDamageMul;
-    p.perks = new Set(this.save.skills);
-    if (this.buffs.lastStand) p.perks.add('lastStand');
-    this.applyOutfit();
-    this.applyGearLook();
-  }
-
-  /** Worn armour, shown on the body. */
-  private applyGearLook() {
-    const look: GearLook = {};
-    for (const slot of SLOTS) {
-      const g = item(slot, this.save.gear[slot]);
-      if (g) look[slot] = { material: g.material, tier: g.tier };
-    }
-    this.views.get(this.player)?.setGear(look);
-  }
-
   // ---------------------------------------------------------------------------
   // Fighters
   // ---------------------------------------------------------------------------
@@ -382,27 +272,16 @@ export class Game {
     this.airborne.delete(f);
   }
 
-  private spawn(kind: EnemyKind, x: number, z: number, mods: EnemyMods & Partial<Spawn> = {}, fx = true): Fighter {
-    const training = this.mode === 'training';
-    const { fighter, ai } = createEnemy(kind, this.sim.rng, mods, training ? this.aiCfg : {});
-    if (training) ai.cfg = this.aiCfg;
-    // Geared up for the round: the same armour you can buy, and maybe a weapon.
-    if (mods.gear) {
-      fighter.stats = opponentGear(fighter.stats, mods.gear);
-      fighter.hp = fighter.stats.maxHp;
-    }
-    if (mods.weapon && !fighter.weapon) fighter.weapon = WEAPONS[mods.weapon];
+  private spawn(kind: EnemyKind, x: number, z: number, mods: EnemyMods = {}, fx = true): Fighter {
+    // (The AI settings are the developer panel's, live.)
+    const { fighter, ai } = createEnemy(kind, this.sim.rng, mods, this.aiCfg);
+    ai.cfg = this.aiCfg;
     fighter.pos.set(x, 0, z);
     fighter.yaw = Math.atan2(this.player.pos.x - x, this.player.pos.z - z);
     fighter.updatePose(0, 0, 0);
     this.sim.add(fighter, ai);
     const look = lookFor(kind, this.theme.id);
-    const worn: GearLook = { ...look.gear };
-    for (const slot of SLOTS) {
-      const g = item(slot, mods.gear?.[slot] ?? 0);
-      if (g) worn[slot] = { material: g.material, tier: g.tier };
-    }
-    this.attach(fighter, look.palette, worn);
+    this.attach(fighter, look.palette, { ...look.gear });
     this.ragdolls.get(fighter)?.snapTo(fighter);
     this.enemies.push(fighter);
     this.enemyKind.set(fighter, kind);
@@ -415,28 +294,6 @@ export class Game {
 
   private clearEnemies() {
     for (const e of [...this.enemies]) this.detach(e);
-  }
-
-  /** Coins are worth more with Fortune, and double with a Lucky Coin. */
-  private get coinMul(): number {
-    return this.buffs.coinMul * (this.save.skills.includes('fortune') ? 1.3 : 1);
-  }
-
-  /** The outfit chosen in the shop (the body is rebuilt in its colours). */
-  private applyOutfit() {
-    const o = OUTFITS.find((x) => x.id === this.save.outfit) ?? OUTFITS[0];
-    if (this.wornOutfit === o.id) return;
-    this.wornOutfit = o.id;
-    const p = this.player;
-    const old = this.views.get(p);
-    if (!old) return;
-    const view = new FighterView({ ...PLAYER_PALETTE, ...o.colors });
-    view.setScale(p.scale);
-    this.scene.remove(old.root);
-    this.scene.add(view.root);
-    this.views.set(p, view);
-    this.shownWounds = new WeakSet();
-    this.applyGearLook();
   }
 
   private resetPlayer(x: number, z: number, yaw: number) {
@@ -569,7 +426,7 @@ export class Game {
     const def = THEMES[id];
     this.theme = def;
     this.themeView?.dispose();
-    this.themeView = new ThemeView(this.scene, def, (Date.now() & 0xffff) + this.round * 131);
+    this.themeView = new ThemeView(this.scene, def, Date.now() & 0xffff);
     this.scene.background = this.themeView.background;
     this.sfx.setAmbience(def.id);
     this.sim.walkable = new ArenaWalkable(def.shape, def.obstacles);
@@ -616,13 +473,12 @@ export class Game {
     this.sweat.clear();
     this.clearEnemies();
     this.clearDrops();
-    this.coins.clear();
     this.blood.clear();
     this.gibs.clear();
     this.trauma.clear();
     this.views.get(this.player)?.setTrauma(0, false);
     this.player.minHp = 0;
-    this.holdIn = this.clearIn = this.nextRoundIn = this.downIn = this.shopIn = this.respawnIn = -1;
+    this.downIn = this.respawnIn = -1;
     this.slowmo = 0;
     this.hud.hideBanner();
     this.hud.prompt('');
@@ -631,124 +487,14 @@ export class Game {
 
   private placePlayer() {
     const [x, z] = this.theme.playerSpawn;
-    this.applyGear();
     // Face the middle of the arena.
     this.resetPlayer(x, z, Math.atan2(-x, -z * 0.3));
-    // Walk in with the weapon you've chosen from the rack.
-    if (this.save.loadout) this.giveWeapon(this.save.loadout);
     this.camRig.snap(this.player);
-  }
-
-  /** Supplies going into this round: " · Health Tonic, War Paint". */
-  private suppliesNote(): string {
-    if (!this.buffs.used.length) return '';
-    return ` · using ${this.buffs.used.map((id) => SUPPLIES.find((x) => x.id === id)!.name).join(', ')}`;
-  }
-
-  /** How the opponent comes kitted out: " · tier 3 armour · machete". */
-  private kitNote(s: Spawn): string {
-    const tiers = Object.values(s.gear).filter((t): t is number => !!t);
-    const armour = tiers.length ? ` · tier ${Math.max(...tiers)} armour` : '';
-    const w = s.weapon ? ` · ${WEAPONS[s.weapon].name.toLowerCase()}` : '';
-    return armour + w;
   }
 
   private banner(text: string, sub: string, cls = '', secs = 2.2) {
     this.hud.showBanner(text, sub, cls);
     this.bannerIn = secs;
-  }
-
-  // ---------------------------------------------------------------------------
-  // Gauntlet
-  // ---------------------------------------------------------------------------
-
-  /** Round n: new arena, new opponent. */
-  startRound(n: number) {
-    this.resetArena();
-    if (n === 1 || !this.run) this.run = newRun();
-    this.runSummary = null;
-    // One of each supply in the bag goes into this round.
-    this.buffs = this.mode === 'gauntlet' ? useSupplies(this.save) : NO_BUFFS;
-    if (this.buffs.used.length) writeSave(this.save);
-    this.round = n;
-    const spec = roundSpec(n, this.roundRng);
-    this.spec = spec;
-    this.setTheme(spec.theme);
-    this.placePlayer();
-    const spots = this.theme.enemySpawns;
-    spec.spawns.forEach((s, i) => {
-      const [x, z] = spots[i % spots.length];
-      const ring = Math.floor(i / spots.length) * 0.8;
-      const f = this.spawn(s.kind, x + ring, z, s);
-      this.sim.ais.get(f)!.cfg.passive = true;
-    });
-    this.scatterWeapons();
-    // Rolling: this battle goes in the log.
-    this.recorder.start({ round: n, arena: this.theme.name, opponent: ARCHETYPES[spec.spawns[0].kind].name, boss: !!spec.boss });
-    this.holdIn = INTRO_HOLD;
-    this.hud.mood('');
-    if (spec.boss) {
-      // The giant steps in: low angle, looking up at it.
-      const boss = this.enemies[0];
-      this.holdIn = INTRO_HOLD + 0.9;
-      const toPlayer = new Vector3().subVectors(this.player.pos, boss.pos).setY(0).normalize();
-      this.cut({
-        focus: () => new Vector3(boss.pos.x, boss.rig.chest.pos.y + 0.15 * boss.scale, boss.pos.z),
-        side: toPlayer.applyAxisAngle(new Vector3(0, 1, 0), 0.55),
-        distance: 3.3 * boss.scale,
-        height: -0.75 * boss.scale,
-        orbit: -0.12,
-        dolly: -0.35,
-        fov: 42,
-        duration: 2.4,
-        slow: 1,
-        priority: 2,
-      });
-      this.banner(`BOSS · ${ARCHETYPES[spec.boss].name.toUpperCase()}`, `round ${n} · ${this.theme.name}${this.kitNote(spec.spawns[0])}`, 'down', 2.6);
-      this.camRig.addTrauma(0.35);
-      this.sfx.knockdown();
-    } else {
-      this.banner(`ROUND ${n}`, `${this.theme.name} · ${ARCHETYPES[spec.spawns[0].kind].name}${this.kitNote(spec.spawns[0])}${this.suppliesNote()}`, 'intro');
-    }
-    this.setMenuPause(false);
-  }
-
-  private updateGauntlet() {
-    if (this.phase !== 'play' || !this.spec || this.clearIn >= 0) return;
-    if (this.enemies.length > 0 && this.enemies.every((e) => !e.alive)) this.clearIn = 2.3;
-  }
-
-  private roundCleared() {
-    const spec = this.spec!;
-    this.phase = 'clear';
-    this.save.bestRound = Math.max(this.save.bestRound, spec.round);
-    const p = this.player.pos;
-    const reward = Math.round(spec.reward * this.coinMul);
-    this.coins.burst(new Vector3(p.x, 1.6, p.z), reward);
-    writeSave(this.save);
-    this.sfx.chime();
-    this.banner(spec.boss ? 'BOSS DOWN' : 'ROUND CLEAR', `+${reward} coins`, 'intro', 2.4);
-    this.shopIn = 2.6;
-    this.victoryShot();
-  }
-
-  /** The winner, arms up, from just below — heroic. */
-  private victoryShot() {
-    const p = this.player;
-    if (!p.alive) return;
-    if (p.free) p.celebrate();
-    const front = new Vector3(Math.sin(p.yaw), 0, Math.cos(p.yaw)).applyAxisAngle(new Vector3(0, 1, 0), 0.6);
-    this.cut({
-      focus: () => new Vector3(p.pos.x, p.rig.chest.pos.y + 0.1, p.pos.z),
-      side: front,
-      distance: 2.6,
-      height: -0.25,
-      orbit: -0.22,
-      fov: 40,
-      duration: 2.4,
-      slow: 1,
-      priority: 4,
-    });
   }
 
   // ---------------------------------------------------------------------------
@@ -763,13 +509,9 @@ export class Game {
     this.scatterWeapons();
   }
 
-  /** Replace the opponent (training), or add a brawler (debug panel "Respawn enemy"). */
+  /** Replace the opponent (also the debug panel's "Respawn enemy"). */
   spawnEnemy(first = false) {
     const p = this.player.pos;
-    if (this.mode !== 'training') {
-      this.spawn('brawler', p.x + 2.5, p.z);
-      return;
-    }
     this.clearEnemies();
     const [x, z] = first ? this.theme.enemySpawns[0] : [p.x > 0 ? -2.2 : 2.2, -p.z * 0.5];
     const f = this.spawn('brawler', x, z, { hpMul: 1 + 0.12 * (this.wave - 1) }, !first);
@@ -848,11 +590,6 @@ export class Game {
   }
 
   restart() {
-    this.shop.close();
-    if (this.mode === 'gauntlet') {
-      this.startRound(Math.max(1, this.round));
-      return;
-    }
     this.wave = 1;
     this.kos = 0;
     this.resetArena();
@@ -901,7 +638,7 @@ export class Game {
 
     const fwd = this.camRig.groundForward;
     const right = this.camRig.groundRight;
-    const blocked = this.phase === 'shop' || this.phase === 'down' || this.settings.isOpen || this.battleLog?.isOpen;
+    const blocked = this.phase === 'down' || this.settings.isOpen || this.battleLog?.isOpen;
     // Input reaches the sim only as commands for its next tick (applied as that tick starts).
     const tick = this.sim.frame + 1;
     const id = this.player.id;
@@ -944,42 +681,19 @@ export class Game {
     if (this.slowmo > 0) this.slowmo -= dt;
     this.cine.update(dt);
     if (due(this.bannerIn)) this.hud.hideBanner();
-    if (due(this.holdIn)) {
-      for (const e of this.enemies) {
-        const ai = this.sim.ais.get(e);
-        if (ai) ai.cfg.passive = false;
-      }
-    }
-    if (due(this.clearIn)) this.roundCleared();
-    if (due(this.shopIn)) {
-      this.recorder.stop('won');
-      this.phase = 'shop';
-      this.setMenuPause(true);
-      this.shop.open(this.round, null);
-    }
-    if (due(this.nextRoundIn)) this.startRound(this.round + 1);
     if (due(this.respawnIn)) {
       this.wave++;
       this.spawnEnemy();
       this.hud.hideBanner();
     }
     if (due(this.downIn)) {
-      if (this.mode === 'gauntlet') {
-        // The run's over: how it went, what it paid — then gear up, or straight back in.
-        this.recorder.stop('lost');
-        this.hud.hideBanner();
-        this.phase = 'shop';
-        this.setMenuPause(true);
-        if (this.runSummary) this.death.open(this.runSummary);
-        else this.shop.open(this.round, this.lastPay);
-      } else {
-        this.revivePlayer();
-        this.phase = 'play';
-        this.hud.hideBanner();
-        this.hud.mood('');
-      }
+      // Back up: in the training ring you're patched up and fight on.
+      this.revivePlayer();
+      this.phase = 'play';
+      this.hud.hideBanner();
+      this.hud.mood('');
     }
-    for (const k of ['bannerIn', 'holdIn', 'clearIn', 'shopIn', 'nextRoundIn', 'respawnIn', 'downIn'] as const) {
+    for (const k of ['bannerIn', 'respawnIn', 'downIn'] as const) {
       if (this[k] > 0) this[k] -= dt;
     }
   }
@@ -987,7 +701,7 @@ export class Game {
   private metaKey(code: string) {
     switch (code) {
       case 'Escape':
-        if (this.phase !== 'shop') this.settings.toggle();
+        this.settings.toggle();
         return;
       case 'KeyM':
         this.sfx.setVolume(this.sfx.volume > 0 ? 0 : GAME_TUNING.volume);
@@ -1040,7 +754,6 @@ export class Game {
     for (const e of events) this.handleEvent(e);
     this.footsteps();
     this.landings();
-    if (this.mode === 'gauntlet') this.updateGauntlet();
 
     const isDown = (f: Fighter) => f.state === 'knockdown' || f.state === 'ko' || !f.alive;
     let downSlots = 0;
@@ -1071,14 +784,6 @@ export class Game {
         const m = e.move;
         const heavy = m.weight === 'heavy';
         const byPlayer = e.attacker.team === 'player';
-        if (byPlayer) {
-          this.run.hits++;
-          this.run.damage += e.damage;
-          this.run.bestCombo = Math.max(this.run.bestCombo, e.combo);
-          if (e.fatal || e.sever === 'head') this.run.brutal++;
-        } else if (e.defender === this.player) {
-          this.run.killedBy = `${ARCHETYPES[this.enemyKind.get(e.attacker) ?? 'brawler']?.name ?? 'them'}${e.weapon ? ` · ${e.weapon.name}` : ''}${e.fatal ? ` · ${e.fatal === 'split' ? 'skull split' : e.fatal === 'cleft' ? 'skull cleft' : 'skull crushed'}` : e.sever === 'head' ? ' · decapitated' : ''}`;
-        }
         // Markers: what that blow did, where it landed.
         const dmg = Math.max(1, Math.round(e.damage));
         this.logHit(e, dmg);
@@ -1171,7 +876,6 @@ export class Game {
           this.camRig.zoomPunch(0.6);
           this.effects.ring(this.player.pos, 1.1, '#ffd36b', 0.5, () => this.player.pos);
           this.sfx.counterReady();
-          this.run.perfect++;
         } else if (e.parry) this.marker(e.defender === this.player ? 'PARRY!' : 'PARRIED', e.point, e.defender === this.player ? 'parry' : 'hurt');
         else if (e.defender === this.player) this.marker('BLOCK', e.point, 'block');
         else this.marker('BLOCKED', e.point, 'block');
@@ -1186,7 +890,6 @@ export class Game {
           this.slowmo = Math.max(this.slowmo, 0.35);
           this.camRig.zoomPunch(0.6);
           this.effects.ring(this.player.pos, 1.1, '#ffd36b', 0.5, () => this.player.pos);
-          this.run.perfect++;
         } else if (e.defender === this.player) this.marker(e.kind === 'airborne' ? 'EVADED' : 'DODGE', e.point, 'parry');
         else this.marker('MISS', e.point, 'miss');
         if (e.defender === this.player && e.kind !== 'airborne') {
@@ -1583,50 +1286,21 @@ export class Game {
       const by = this.lastHitBy.get(f) ?? this.enemy ?? f;
       this.hud.mood('death');
       this.cut({ focus: this.pelvisOf(f), side: this.across(by.pos, f.pos, -0.2), distance: 3.0, height: 1.7, orbit: 0.16, dolly: -0.2, fov: 40, duration: 3.2, slow: 0.22, priority: 5 });
-      this.clearIn = this.holdIn = -1;
-      if (this.mode === 'gauntlet') {
-        // The run is over — but what it earned is yours to spend on the next one.
-        const prevBest = this.save.bestRound;
-        const parts = deathRewardParts(this.round, prevBest);
-        const pay = parts.base + parts.bonus;
-        const best = Math.max(prevBest, this.round - 1);
-        this.save.bestRound = best;
-        this.save.coins += pay;
-        this.lastPay = pay;
-        writeSave(this.save);
-        const r = this.run;
-        this.runSummary = {
-          round: this.round, best, newBest: this.round - 1 > prevBest, killedBy: r.killedBy,
-          kos: r.kos, hits: r.hits, damage: r.damage, bestCombo: r.bestCombo, perfect: r.perfect, brutal: r.brutal,
-          seconds: (performance.now() - r.started) / 1000, pay: parts, coins: this.save.coins,
-        };
-        this.banner('K.O.', `round ${this.round}`, 'down', 2.6);
-      } else {
-        this.banner('DOWN', 'get up', 'down', 3.2);
-      }
+      this.banner('DOWN', 'get up', 'down', 3.2);
       this.downIn = 3.4;
       return;
     }
     this.koAt.set(f, this.sim.frame);
-    this.run.kos++;
     // The finishing blow: low and from the side, following them down.
     // (A decapitation already has its own shot, following the head.)
     if (this.enemies.every((e) => !e.alive) && this.player.alive && !f.isSevered('head')) {
       const by = this.lastHitBy.get(f) ?? this.player;
       this.cut({ focus: this.pelvisOf(f), side: this.across(by.pos, f.pos, 0.1), distance: 3.8 * Math.max(1, f.scale * 0.75), height: 0.55, orbit: 0.3, fov: 38, duration: 2.2, slow: 0.18, priority: 4 });
     }
-    if (this.mode === 'training') {
-      this.slowmo = 1.5;
-      this.kos++;
-      this.banner('K.O.', `round ${this.wave} clear`, '', 3.2);
-      this.respawnIn = 3.2;
-      return;
-    }
-    // Coins burst out; slow-mo only for the last enemy of a round.
-    const kind = this.enemyKind.get(f) ?? 'brawler';
-    const at = this.ragdolls.get(f)?.pelvisPos() ?? f.pos.clone();
-    this.coins.burst(at, Math.round(coinDrop(kind, this.sim.rng, this.round) * this.coinMul));
-    if (this.enemies.every((e) => !e.alive)) this.slowmo = 1.2;
+    this.slowmo = 1.5;
+    this.kos++;
+    this.banner('K.O.', `round ${this.wave} clear`, '', 3.2);
+    this.respawnIn = 3.2;
   }
 
   // ---------------------------------------------------------------------------
@@ -1659,13 +1333,6 @@ export class Game {
         const view = this.views.get(f);
         if (view) this.blood.drip(view.facePoint(t.cut && Math.random() < 0.4 ? 'brow' : 'mouth'));
       }
-    }
-    const got = this.coins.update(simDt, this.player.pos);
-    if (got > 0) {
-      this.save.coins += got;
-      this.hud.setCoins(this.save.coins);
-      this.sfx.coin();
-      writeSave(this.save);
     }
     this.themeView?.update(this.time);
     this.updateWeaponsAndWounds(simDt);
@@ -1764,9 +1431,7 @@ export class Game {
   }
 
   private label(): string {
-    if (this.mode === 'training') return `TRAINING · ROUND ${this.wave}${this.kos ? `  ·  ${this.kos} KO` : ''}`;
-    const best = this.save.bestRound > 0 ? `  ·  BEST ${this.save.bestRound}` : '';
-    return `ROUND ${this.round}  ·  ${this.theme.name.toUpperCase()}${best}`;
+    return `TRAINING · ROUND ${this.wave}${this.kos ? `  ·  ${this.kos} KO` : ''}`;
   }
 
   private updateDebug() {

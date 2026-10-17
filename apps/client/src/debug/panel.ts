@@ -103,28 +103,6 @@ export function buildPanel(game: Game): { toggle: () => void } {
   wpn.addButton({ title: 'Give to player' }).on('click', () => game.giveWeapon(pick.weapon as WeaponId));
   wpn.addButton({ title: 'Empty hands' }).on('click', () => game.giveWeapon(null));
 
-  const runF = pane.addFolder({ title: 'Gauntlet', expanded: false });
-  runF.addButton({ title: game.mode === 'gauntlet' ? 'Open training ring' : 'Back to the fights' }).on('click', () => {
-    location.search = game.mode === 'gauntlet' ? '?mode=training' : '';
-  });
-  if (game.mode === 'gauntlet') {
-    const jump = { round: 4 };
-    runF.addBinding(jump, 'round', { min: 1, max: 40, step: 1, label: 'jump to' });
-    runF.addButton({ title: 'Start that round' }).on('click', () => game.startRound(jump.round));
-  }
-  runF.addButton({ title: 'New game (reset save)' }).on('click', () => {
-    try {
-      localStorage.removeItem('brawler.save.v2');
-    } catch {
-      // ignore
-    }
-    location.reload();
-  });
-  runF.addButton({ title: '+200 coins' }).on('click', () => {
-    game.save.coins += 200;
-    game.hud.setCoins(game.save.coins);
-  });
-
   pane.addButton({ title: 'Copy tuning as JSON' }).on('click', () => {
     const pick = (t: Record<string, MoveDef>) =>
       Object.fromEntries(Object.values(t).map((m) => [m.id, Object.fromEntries(MOVE_FIELDS.map(([k]) => [k, m[k]]))]));

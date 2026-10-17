@@ -291,13 +291,6 @@ export class Sfx {
     this.thump(1980, 1970, 0.04, 0.14, 'sine');
   }
 
-  coin() {
-    if (!this.ctx) return;
-    const f = 1300 + Math.random() * 300;
-    this.thump(f, f * 1.01, 0.08, 0.09, 'square');
-    this.thump(f * 1.5, f * 1.5, 0.05, 0.14, 'sine');
-  }
-
   /** Edge through flesh: a wet, tearing high-frequency rip plus a dull thud. */
   slice(heavy: boolean) {
     if (!this.ctx) return;

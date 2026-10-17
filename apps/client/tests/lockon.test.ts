@@ -1,6 +1,5 @@
 import { Vector3 } from 'three';
 import { describe, expect, it } from 'vitest';
-import { loadSave } from '../src/game/economy';
 import { CombatSim, FACING } from '@wild/sim';
 import { createBrawler, createPlayer } from '@wild/sim';
 import { RectWalkable } from '@wild/sim';
@@ -88,16 +87,5 @@ describe('sparring', () => {
     expect(e.alive).toBe(true);
     // Hits landed (down to the floor) but never past it.
     expect(e.hp).toBe(20);
-  });
-
-  it('carries coins and gear over from the old save', () => {
-    const store = {
-      getItem: (k: string) =>
-        k === 'brawler.save.v1' ? JSON.stringify({ coins: 77, gear: { helmet: 2 }, loop: 3, tutorialDone: true }) : null,
-    };
-    const s = loadSave(store);
-    expect(s.coins).toBe(77);
-    expect(s.gear.helmet).toBe(2);
-    expect(s.bestRound).toBe(0);
   });
 });
