@@ -141,6 +141,8 @@ export function sideMass(s: MeffSide): number {
  * "backed" by the rest of a body against a 2,865 kg bone).
  * TODO "crush rule": a zone backed by terrain or a fixed body counts as static for the impactor (m_eff = the
  * impactor's mass), the §4.15 lever for AC-9; not built in M1.
+ * The contact pipeline scores creatures with it; an entity's own integrity reads integrityMeff (the effective masses
+ * at the contact point; the last two rows of this table are the whole-mass reading it replaces).
  */
 export function contactMeff(self: MeffSide, other: MeffSide, unbackedRatio: number): number {
   let mSelf = sideMass(self);
