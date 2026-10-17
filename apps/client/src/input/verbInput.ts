@@ -513,18 +513,24 @@ export class VerbInput implements VerbInputPort {
     if (hands) f.out.push({ tick: f.tick, player: this.player, kind: 'verb', verb: 'drop', target: 0 });
   }
 
-  /** The pad's Back: the belt into empty hands one slot after another; with something held, it goes onto the belt. */
+  /**
+   * The pad's Back: the belt into empty hands one slot after another, the back slot last (INTERPRETATION: §5.14 says
+   * "cycle the belt"; the back is in the cycle so a pad can draw from it too); with something held, it goes onto the
+   * belt (or the back).
+   */
   private beltCycle(f: Frame, world: World, me: Fighter): void {
     const inv = me.inventory!;
     if (inv.hands) {
       this.stowAnywhere(f, world, me);
       return;
     }
-    const n = Math.min(VERB_TUNING.beltSlots, inv.belt.length);
+    const belt = Math.min(VERB_TUNING.beltSlots, inv.belt.length);
+    const n = belt + 1;
     for (let k = 0; k < n; k++) {
       const s = (this.beltNext + k) % n;
-      if (inv.belt[s] !== null) {
-        f.out.push(this.slotCommand(f.tick, 'draw', s));
+      const occupied = s < belt ? inv.belt[s] !== null : inv.back !== null;
+      if (occupied) {
+        f.out.push(this.slotCommand(f.tick, 'draw', s < belt ? s : backSlot(me)));
         this.beltNext = (s + 1) % n;
         return;
       }

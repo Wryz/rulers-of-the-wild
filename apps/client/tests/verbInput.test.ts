@@ -771,7 +771,14 @@ describe('pull, strikes and the walk', () => {
     expect(verbs(r.frame({ pad: pad([PAD.back], [PAD.back]) }, false))).toEqual([]);
     expect(verbs(r.frame({ pad: pad([]) }, false))).toEqual([]);
     expect(verbs(r.frame({ pad: pad([PAD.back]) }, false))).toEqual([expect.objectContaining({ verb: 'draw', slot: 2 })]);
+    // The back slot comes last in the cycle (so a pad can draw from it), then round again.
+    p.inventory!.back = 98;
+    r.frame({ pad: pad([]) }, false);
+    expect(verbs(r.frame({ pad: pad([PAD.back]) }, false))).toEqual([expect.objectContaining({ verb: 'draw', slot: 3 })]);
+    r.frame({ pad: pad([]) }, false);
+    expect(verbs(r.frame({ pad: pad([PAD.back]) }, false))).toEqual([expect.objectContaining({ verb: 'draw', slot: 0 })]);
     p.inventory!.belt = [null, null, null];
+    p.inventory!.back = null;
   });
 });
 
