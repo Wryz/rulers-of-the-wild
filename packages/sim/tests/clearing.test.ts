@@ -660,24 +660,17 @@ describe('the Clearing (§6.7)', () => {
   // At rest, on the terrain
   // -------------------------------------------------------------------------
 
-  /**
-   * A vine coil (the factory's flat 8-gon disc, FACTORY_TUNING.coilAspect 0.25) set down on sloping heightfield sinks
-   * through it more often than not (28 of 30 on a planar 2 % slope; never a box, a slab hull or a stick; CCD makes no
-   * difference): a physics defect outside P21's files, reported with the package. Generation puts the coils the first
-   * minutes need on the spawn's flat ground; the ones at grove edges are on slopes.
-   */
+  /** A vine coil off the spawn's flat ground (at a grove edge, on a slope). */
   const onSlope = (e: Entity): boolean => e.look === 'coil' && e.state === 'free' && dist(xz(e), spawn) > T.flatInnerM;
 
-  it('every loose generated thing starts at rest on the ground and stays near where it was put (but coils on slopes)', async () => {
+  it('every loose generated thing starts at rest on the ground and stays near where it was put', async () => {
     const w = await make({ seed: S, player: false });
     const start = new Map(w.entities.all().map((e) => [e.id, { ...e.pose.p }]));
-    const sloped = new Set(w.entities.all().filter((e) => onSlope(e)).map((e) => e.id));
-    expect(sloped.size).toBe(4);
     for (let t = 0; t < 120; t++) w.step();
     let touched = 0;
     let worst = 0;
     for (const e of w.entities.all()) {
-      if (e.state !== 'free' || sloped.has(e.id)) continue;
+      if (e.state !== 'free') continue;
       const moved = Math.hypot(e.pose.p.x - start.get(e.id)!.x, e.pose.p.y - start.get(e.id)!.y, e.pose.p.z - start.get(e.id)!.z);
       worst = Math.max(worst, moved);
       if (e.touched) touched++;
@@ -688,10 +681,12 @@ describe('the Clearing (§6.7)', () => {
     console.info(`after 2 s: ${touched} of ${free} free generated things touched, the farthest moved ${(worst * 100).toFixed(2)} cm`);
   });
 
-  // Known defect (see onSlope): when the coil-on-heightfield contact is fixed this starts passing, and `.fails` must go.
-  it.fails('known defect, outside P21: the vine coils at grove edges (on slopes) stay where they were put', async () => {
+  // A flat 8-gon disc sank through sloping heightfield (Rapier's FIX_INTERNAL_EDGES contact, now avoided in shapes.ts
+  // colliderDesc): the coils at grove edges, on slopes, stay where they were put.
+  it('the vine coils at grove edges (on slopes) stay where they were put', async () => {
     const w = await make({ seed: S, player: false });
     const coils = w.entities.all().filter((e) => onSlope(e));
+    expect(coils.length).toBeGreaterThan(0);
     const start = new Map(coils.map((e) => [e.id, { ...e.pose.p }]));
     for (let t = 0; t < 120; t++) w.step();
     for (const e of coils) expect(e.pose.p.y, `coil ${e.id}`).toBeGreaterThan(start.get(e.id)!.y - 0.1);

@@ -1217,12 +1217,7 @@ class ClearingGen {
     return best;
   }
 
-  /**
-   * 6 vine coils (§6.7): lengths shuffled; the 12 m and 18 m ones within 20 m of the spawn, the others at grove edges.
-   * The near ones lie on the spawn's flat ground (within flatInnerM): a coil (a flat 8-gon disc, FACTORY_TUNING.coilAspect
-   * 0.25) set down on sloping heightfield often sinks through it (a physics defect outside this file, reported by P21),
-   * and the first minutes must not lose them.
-   */
+  /** 6 vine coils (§6.7): lengths shuffled; the 12 m and 18 m ones within 20 m of the spawn, the others at grove edges. */
   private vineCoils(): void {
     const T = this.T;
     const rng = this.rng;
@@ -1230,7 +1225,7 @@ class ClearingGen {
       const near = T.coilNearSpawnLengthsM.includes(len);
       const shape = ropeCoilShape(len);
       const p = this.pick(
-        () => (near ? polar(this.spawn, rng.range(T.nearSpawnMinM, Math.min(T.coilNearSpawnM, T.flatInnerM)), rng.range(0, 2 * Math.PI)) : this.groveEdgePoint()),
+        () => (near ? polar(this.spawn, rng.range(T.nearSpawnMinM, T.coilNearSpawnM), rng.range(0, 2 * Math.PI)) : this.groveEdgePoint()),
         (q) => this.looseViolations(circle(q, shape.r)),
       );
       this.loose.push(circle(p, shape.r));
