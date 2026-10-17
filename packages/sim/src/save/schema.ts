@@ -2,9 +2,9 @@
 //
 // Each system writes its own records (toRecord) and reads them back (restoreRecord); save/serialize.ts assembles them
 // into SaveV1 in the key order below, save/canonical.ts writes the text, save/load.ts checks and loads it. The types
-// the design leaves to their system's package are open records until that package fills them in here (TODO(P11) the
-// ruler body; the verb state stays open because P14's own record extends it): every system stub's
-// toRecord()/restoreRecord() already returns and takes these types, so the save is assembled through stable signatures.
+// the design leaves to their system's package are filled in here by that package (the verb state stays open because
+// P14's own record extends it): every system's toRecord()/restoreRecord() returns and takes these types, so the save is
+// assembled through stable signatures.
 //
 // Additions to §8.3's SaveV1 (each a deviation recorded in the package's report):
 // - `options`: the WorldOptions the world was built with (scene, terrain, size, player, sparringApe), without which a
@@ -22,6 +22,7 @@ import type { MindScript, MindState } from '../world/creatures/mind';
 import type {
   Anchor,
   EntityState,
+  ImpactCause,
   JointKind,
   MaterialId,
   Owner,
@@ -142,17 +143,32 @@ export interface SlabRecV1 {
 }
 
 /**
- * The ruler's body (§4.7): body type, pose, velocities, the frozen trip pose (12 × pos + quat) and the zone pose history
- * (RR-19). TODO(P11): its exact fields (P11 writes and reads it; the loader passes it through).
+ * The ruler's body (§4.7, RR-19; P11's RulerBodies.toRecord, world/rulerBody.ts, in this key order): body type, pose,
+ * velocities, the frozen trip pose, the colliders' pose history, sleep, and the mover's memory.
  */
 export interface RulerBodyRecV1 {
+  /** Tripped or a corpse: a dynamic body with solid colliders (else kinematic with sensors). */
   dynamic: boolean;
+  /** The body's pose as Rapier holds it (f32). */
   pose: Pose3;
+  /** The body's velocities while dynamic; 0 standing (Rapier derives a kinematic body's from its next pose). */
   lin: V3;
   ang: V3;
+  /** While dynamic: each bone's frame relative to the body (the pose frozen at the trip), BONES order; [] standing. */
   local: { bone: BoneName; p: V3; q: Quat }[];
+  /** The colliders' centres at the last two posings, 3 numbers a bone in BONES order, the last then the one before; [] none. */
   history: number[];
-  [field: string]: unknown;
+  sleeping: boolean;
+  /** The next phase 4c puts the body at its pose at once and fills the history with it. */
+  jump: boolean;
+  /** The root's height when its climb out of a pit began, or null. */
+  climbFloor: number | null;
+  /** The obstacle it last deflected along, and when. */
+  deflect: { entity: number; tick: number } | null;
+  /** Entities that held up its root or a foot lately, by entity id: the tick last seen and their credit. */
+  supports: { entity: number; tick: number; credit: string[] }[];
+  /** The last support that vanished under it (a load break), and its cause. */
+  coverBreak: { tick: number; cause: ImpactCause } | null;
 }
 
 /** One fighter's bodies (every fighter of the sim, by fighter id). */
