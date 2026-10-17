@@ -870,6 +870,20 @@ describe('touched, release and keep-awake', () => {
       [j2, 'release', true],
     ]);
     expect(b.joints).toEqual([]);
+
+    // A release that removes the entity itself (a rope entity left with no joint, P10): removed once, one event.
+    const rope = w.entities.create(box('vine', [0.05, 0.05, 0.5], { x: 3, y: 0.05, z: 0 }));
+    join('rope', at(rope.id), at(b.id));
+    (w.joints as { remove: (id: number, why: string) => void }).remove = (id) => {
+      records.delete(id);
+      rope.joints = [];
+      b.joints = [];
+      w.entities.remove(rope.id);
+    };
+    w.events.length = 0;
+    w.entities.remove(rope.id);
+    expect(w.entities.get(rope.id)).toBeUndefined();
+    expect(w.events).toEqual([{ type: 'remove', entity: rope.id }]);
   });
 });
 

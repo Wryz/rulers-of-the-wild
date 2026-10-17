@@ -207,6 +207,8 @@ export class EntityStore {
     if (!e) throw new Error(`EntityStore.remove: no entity ${id}`);
     const joints = this.world.joints;
     for (const j of [...e.joints]) if (joints.get(j)) joints.remove(j, 'release');
+    // Releasing a joint may already have removed this entity (a rope entity left with no joint, P10).
+    if (this.byId.get(id) !== e) return;
     this.forget(e);
     this.world.events.push({ type: 'remove', entity: id });
   }
