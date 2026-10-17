@@ -546,7 +546,7 @@ describe('SfxAdapter', () => {
   it('writes nothing it reads: events are handled with the world, its entities and the fighters frozen', () => {
     const { sfx } = recSfx();
     const me = fighter({ id: 1, x: 0, z: 0 });
-    const w = Object.freeze(fakeWorld({ fighters: [me.f], entities: { 6: { id: 6, material: 'dryWood', mass: 50, pose: { p: { x: 0, y: 0, z: 0 } }, plant: null } } }));
+    const w = Object.freeze(fakeWorld({ fighters: [me.f], entities: { 6: { id: 6, material: 'dryWood', mass: 50, pose: { p: { x: 0, y: 0, z: 0 } }, plant: null } } })) as unknown as World;
     const a = new SfxAdapter(sfx, () => me.f);
     const events: unknown[] = [
       { type: 'land', entity: 6, f: null, point: { x: 0, y: 0, z: 0 }, energy: 200, mass: 50 },

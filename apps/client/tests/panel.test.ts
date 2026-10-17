@@ -171,7 +171,7 @@ function setup(over: Partial<PanelHost> = {}) {
 const setTunings = () => pushed.filter((c): c is MetaCommand => c.kind === 'meta' && c.meta === 'dev' && c.dev?.op === 'setTuning');
 
 /** The single binding of a field that sits in its table's folder. */
-function bindingOf(pane: FakePane, panel: DevPanel, table: string, key: string): FakeBinding {
+function bindingOf(panel: DevPanel, table: string, key: string): FakeBinding {
   const path = panel.folderPathOf(table)!;
   const b = (panel.bindingsOf(table, key) as FakeBinding[]).find((x) => path.every((s, i) => x.path[i] === s));
   if (!b) throw new Error(`no binding for ${table}.${key}`);
@@ -234,8 +234,8 @@ describe('dev panel: built from the registry', () => {
     expect(panel.boundKeys('CLEARING_TUNING')).toEqual(expect.arrayContaining(['groveDistM.0', 'groveDistM.1']));
     expect(panel.boundKeys('MATERIALS')).toContain('greenWood.strength.solidJPerKg');
     // An option field is a list of its options; a value at Infinity (an "off" lever) is typed.
-    expect(bindingOf(pane, panel, 'TERRAIN_TUNING', 'material').params.options).toMatchObject({ dirt: 'dirt', stone: 'stone' });
-    expect(bindingOf(pane, panel, 'IMPACT_TUNING', 'unbackedTargetMassRatio').value).toBe('Infinity');
+    expect(bindingOf(panel, 'TERRAIN_TUNING', 'material').params.options).toMatchObject({ dirt: 'dirt', stone: 'stone' });
+    expect(bindingOf(panel, 'IMPACT_TUNING', 'unbackedTargetMassRatio').value).toBe('Infinity');
   });
 
   it('builds the folders of a table registered after it, on the next refresh', () => {
@@ -282,9 +282,9 @@ describe('dev panel: built from the registry', () => {
 
 describe('dev panel: edits', () => {
   it("sends an edit to a sim table as exactly one meta 'dev' setTuning command, and changes nothing until its tick", () => {
-    const { pane, panel } = setup();
+    const { panel } = setup();
     const before = getTuningValue('DAMAGE_TUNING', 'K') as number;
-    const b = bindingOf(pane, panel, 'DAMAGE_TUNING', 'K');
+    const b = bindingOf(panel, 'DAMAGE_TUNING', 'K');
     // A drag: intermediate values send nothing; the last one is the edit.
     b.input(before + 1, false);
     b.input(before + 2, false);
@@ -312,12 +312,12 @@ describe('dev panel: edits', () => {
   });
 
   it('sends nested, compound, boolean and option edits with their dotted keys and types', () => {
-    const { pane, panel } = setup();
-    bindingOf(pane, panel, 'CREATURE_TUNING', 'giant.chargeCooldownS').input(7);
-    bindingOf(pane, panel, 'CLEARING_TUNING', 'groveDistM.1').input(70);
-    bindingOf(pane, panel, 'MATERIALS', 'greenWood.strength.solidJPerKg').input(45);
-    bindingOf(pane, panel, 'TERRAIN_TUNING', 'material').input('stone');
-    bindingOf(pane, panel, 'IMPACT_TUNING', 'unbackedTargetMassRatio').input('12.5');
+    const { panel } = setup();
+    bindingOf(panel, 'CREATURE_TUNING', 'giant.chargeCooldownS').input(7);
+    bindingOf(panel, 'CLEARING_TUNING', 'groveDistM.1').input(70);
+    bindingOf(panel, 'MATERIALS', 'greenWood.strength.solidJPerKg').input(45);
+    bindingOf(panel, 'TERRAIN_TUNING', 'material').input('stone');
+    bindingOf(panel, 'IMPACT_TUNING', 'unbackedTargetMassRatio').input('12.5');
     expect(setTunings().map((c) => c.dev!.tuning)).toEqual([
       { table: 'CREATURE_TUNING', key: 'giant.chargeCooldownS', value: 7 },
       { table: 'CLEARING_TUNING', key: 'groveDistM.1', value: 70 },
@@ -335,24 +335,24 @@ describe('dev panel: edits', () => {
   });
 
   it('puts a binding back, sending nothing, when its value is not a value', () => {
-    const { pane, panel } = setup();
-    const b = bindingOf(pane, panel, 'IMPACT_TUNING', 'unbackedTargetMassRatio');
+    const { panel } = setup();
+    const b = bindingOf(panel, 'IMPACT_TUNING', 'unbackedTargetMassRatio');
     b.input('lots');
     expect(pushed).toEqual([]);
     expect(b.value).toBe('Infinity');
     // Setting a field back to the value it has sends nothing either.
-    bindingOf(pane, panel, 'DAMAGE_TUNING', 'K').input(getTuningValue('DAMAGE_TUNING', 'K'));
+    bindingOf(panel, 'DAMAGE_TUNING', 'K').input(getTuningValue('DAMAGE_TUNING', 'K'));
     expect(pushed).toEqual([]);
   });
 
   it('changes a client table at once, with no command', () => {
-    const { pane, panel, volume } = setup();
-    const b = bindingOf(pane, panel, 'GAME_TUNING', 'hitstopMul');
+    const { panel, volume } = setup();
+    const b = bindingOf(panel, 'GAME_TUNING', 'hitstopMul');
     b.input(2.5, false); // client tables follow a drag live
     expect(GAME_TUNING.hitstopMul).toBe(2.5);
-    bindingOf(pane, panel, 'FEEL_TUNING', 'jungle.birdsPerS').input(1.2);
+    bindingOf(panel, 'FEEL_TUNING', 'jungle.birdsPerS').input(1.2);
     expect(FEEL_TUNING.jungle.birdsPerS).toBe(1.2);
-    bindingOf(pane, panel, 'GAME_TUNING', 'volume').input(0.3);
+    bindingOf(panel, 'GAME_TUNING', 'volume').input(0.3);
     expect(GAME_TUNING.volume).toBe(0.3);
     expect(volume).toHaveBeenCalledWith(0.3);
     // The quick binding in "Dev" and the one in "Client › game" are one field.
@@ -364,9 +364,9 @@ describe('dev panel: edits', () => {
   });
 
   it('follows values changed elsewhere (the H key, a replayed command) without sending anything', () => {
-    const { pane, panel } = setup();
-    const hit = bindingOf(pane, panel, 'GAME_TUNING', 'showHitboxes');
-    const k = bindingOf(pane, panel, 'DAMAGE_TUNING', 'K');
+    const { panel } = setup();
+    const hit = bindingOf(panel, 'GAME_TUNING', 'showHitboxes');
+    const k = bindingOf(panel, 'DAMAGE_TUNING', 'K');
     GAME_TUNING.showHitboxes = !GAME_TUNING.showHitboxes;
     setTuningValue('DAMAGE_TUNING', 'K', (getTuningValue('DAMAGE_TUNING', 'K') as number) + 5);
     panel.refresh(world);
