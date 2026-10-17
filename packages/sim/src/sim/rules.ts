@@ -21,6 +21,7 @@ export const DAMAGE_TUNING = defineTuning(
     meleeJPerDmg: 18,
     throwCapJ: 400,
     leadingCos: 0.7,
+    bladeSharpness: 0.8,
     tipRadiusM: 0.15,
     impactCooldownTicks: 6,
     minImpactJ: 5,
@@ -33,6 +34,8 @@ export const DAMAGE_TUNING = defineTuning(
     meleeJPerDmg: { unit: 'J per DS damage point', source: 'SPEC:283', min: 0 },
     throwCapJ: { unit: 'J', source: 'SPEC:285, 886', min: 0 },
     leadingCos: { unit: 'cos', source: 'DS (projectileStrike leading test)', min: -1, max: 1 },
+    // The thrown rule's s for a DungeonStyle blade (WeaponDef.sharpness absent, edge 'blade'); a blunt one is 0.
+    bladeSharpness: { unit: 'sharpness', source: '§4.4, D-12', min: 0, max: 1 },
     tipRadiusM: { unit: 'm', source: 'NEW: a sharp point counts only near its tip', min: 0 },
     impactCooldownTicks: { unit: 'ticks', source: 'NEW: bounce suppression per pair', min: 0, step: 1 },
     minImpactJ: { unit: 'J', source: 'NEW: ignore brushes (with |Δv| < flinchDv)', min: 0 },

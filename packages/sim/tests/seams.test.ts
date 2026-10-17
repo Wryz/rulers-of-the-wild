@@ -884,7 +884,7 @@ describe('the fighter\'s M1 fields', () => {
 describe('sim/rules.ts', () => {
   it('registers DAMAGE_TUNING and MOVE_TUNING with the §9 values, a unit and a source on every key', () => {
     expect(DAMAGE_TUNING).toEqual({
-      kS: 3, K: 18, meleeJPerDmg: 18, throwCapJ: 400, leadingCos: 0.7, tipRadiusM: 0.15, impactCooldownTicks: 6,
+      kS: 3, K: 18, meleeJPerDmg: 18, throwCapJ: 400, leadingCos: 0.7, bladeSharpness: 0.8, tipRadiusM: 0.15, impactCooldownTicks: 6,
       minImpactJ: 5, hardLandingBluntOnly: true, zoneGraceTicks: 2,
     });
     expect(MOVE_TUNING).toMatchObject({

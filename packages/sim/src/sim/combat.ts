@@ -2135,24 +2135,19 @@ function faceWork(f: Fighter, w: Work) {
 }
 
 /**
- * How sharp a blade without its own `sharpness` counts in the thrown rule (docs/M1-DESIGN.md §4.4: "default
- * `edge === 'blade' ? 0.8 : 0`"). TODO(P02a-fix): a §9 starting value with no table yet; it belongs in DAMAGE_TUNING
- * (sim/rules.ts) as `bladeSharpness` 0.8 (unit sharpness, source §4.4, D-12). Only DungeonStyle's weapons lack the
- * field; every tool the world makes carries its head's sharpness (synthWeapon, §5.2).
- */
-const BLADE_SHARPNESS = 0.8;
-
-/**
  * A thrown weapon's blow by the one damage rule (world mode; docs/M1-DESIGN.md §4.4, D-12): m_eff = the reduced mass of
  * the weapon and the struck bone, v = the arriving part's speed relative to the body, s = the weapon's sharpness when
  * its point or edge leads (DungeonStyle's leading test), else 0; HP = max(0, E − T) / K against the zone's toughness.
+ * A weapon without its own `sharpness` (only DungeonStyle's lack it; every tool the world makes carries its head's,
+ * synthWeapon §5.2) counts as DAMAGE_TUNING.bladeSharpness when it is a blade (§4.4: "default `edge === 'blade' ? 0.8 :
+ * 0`") and 0 when blunt.
  * A ruler's zone and toughness are its own rule's (rulerHit classifies the zone, §4.6), so for a ruler T = 0 here and
  * `hp` carries E / K: rulerHit recovers E = hp × K.
  */
 function thrownRule(d: Fighter, zone: HurtZone, bone: BoneName, w: WeaponDef, mass: number, vp: Vector3, leads: boolean): RuleBlow {
   const mEff = reducedMass(mass, boneMass(d, bone));
   const v = Math.hypot(vp.x - d.vel.x - d.walkVel.x, vp.y, vp.z - d.vel.z - d.walkVel.z);
-  const s = leads ? (w.sharpness ?? (w.edge === 'blade' ? BLADE_SHARPNESS : 0)) : 0;
+  const s = leads ? (w.sharpness ?? (w.edge === 'blade' ? DAMAGE_TUNING.bladeSharpness : 0)) : 0;
   const energy = impactEnergy(mEff, v, s);
   const toughness = d.ruler ? 0 : zoneToughness(d, zone);
   return { hp: hpFromEnergy(energy, toughness), energy, toughness };
