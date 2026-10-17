@@ -362,7 +362,7 @@ export const RENDER_TUNING = defineTuning(
     drag: {
       linkColor: colour('NEW: C-fix (the link drawn from a dragging hand to the grip it pulls by, rule 3)'),
       linkRadiusM: { unit: 'm', source: 'NEW: C-fix (the drag link\'s thickness)', min: 0.002, max: 0.1, step: 0.002 },
-      linkSides: { unit: 'sides', source: 'NEW: C-fix (a faceted strap, like the ropes)', min: 3, max: 16, step: 1 },
+      linkSides: { unit: 'sides', source: 'NEW: C-fix (a faceted cord, like the ropes)', min: 3, max: 16, step: 1 },
     },
     wounds: {
       scarLengthM: { unit: 'm (bone frame)', source: 'NEW: SPEC:845 (a healed ruler wound: a scar)', min: 0.01, max: 0.5, step: 0.01 },

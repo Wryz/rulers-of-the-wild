@@ -73,7 +73,7 @@ export class DragLinks {
     if (!this.geo || this.sides !== D.linkSides) {
       this.sides = D.linkSides;
       const old = this.geo;
-      // A unit-length strap along +y from its foot (scaled to the hand-grip distance).
+      // A unit-length cord along +y from its foot (scaled to the hand-grip distance).
       this.geo = new CylinderGeometry(1, 1, 1, Math.max(3, Math.round(D.linkSides)), 1).translate(0, 0.5, 0);
       for (const l of this.links.values()) l.geometry = this.geo;
       old?.dispose();
