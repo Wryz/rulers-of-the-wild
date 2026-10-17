@@ -390,7 +390,8 @@ describe('refusals (§5.11)', () => {
     expect(why(cmd(LEVEL_Z))).toBeNull();
     expect(planThrow(w, p, cmd(LEVEL_Z))).toEqual({ ok: true, plan: expect.objectContaining({ path: 'projectile', move: 'throwOne', techSpeed: 20, speedFrac: 1, speed: 20 }) });
     // Nothing moved: the stone is still in the hands.
-    expect(p.inventory!.hands?.entity).toBe(stone);
+    const inHands = (f: Fighter): number | undefined => f.inventory?.hands?.entity;
+    expect(inHands(p)).toBe(stone);
     expect(ent(w, stone).state).toBe('held');
   });
 });

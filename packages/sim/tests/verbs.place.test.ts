@@ -183,7 +183,6 @@ describe('upright: stakes driven into soft ground, free otherwise (§5.7 step 4,
 
   it('the same stake set upright on a boulder is placed free (stone is no soft ground), placeDropM above its top', async () => {
     const w = await make();
-    const p = w.player!;
     const boulder = spawnStone(w, { p: { x: 0, y: 0.5, z: 1.4 }, mass: 400 });
     const id = stick(w, 1.4, 0.05, 2, 2, 0.6);
     run(w, 90);
@@ -316,7 +315,7 @@ describe('lying (§5.7)', () => {
     const w = await make();
     const p = w.player!;
     for (let x = -2; x <= 2 + 1e-9; x += 0.25) for (let z = 1.5; z <= 2.5 + 1e-9; z += 0.25) w.terrain.lower(x, z, 20);
-    const bearers = [-0.4, 0, 0.4].map((x, i) => spawnStick(w, { p: { x: 3 + i * 0.3, y: 0.03, z: -1 }, length: 3, r: 0.02, material: 'rottenWood' }));
+    const bearers = [0, 1, 2].map((i) => spawnStick(w, { p: { x: 3 + i * 0.3, y: 0.03, z: -1 }, length: 3, r: 0.02, material: 'rottenWood' }));
     const grass = spawnGrass(w, { p: { x: -3, y: 0.05, z: -1 }, mass: 2 });
     w.step();
     [-0.4, 0, 0.4].forEach((x, i) => {
