@@ -89,12 +89,22 @@ class FakePane implements PanelFolder {
   readonly folders: FakePane[] = [];
   readonly bindings: FakeBinding[] = [];
   readonly buttons: FakeButton[] = [];
+  /** Like Tweakpane: folders report their first opening (the panel then fills them). */
+  onFirstOpen?: (h: () => void) => void;
+  private readonly opened: (() => void)[] = [];
   constructor(
     readonly path: readonly string[] = [],
     readonly all: { folders: FakePane[]; bindings: FakeBinding[]; buttons: FakeButton[] } = { folders: [], bindings: [], buttons: [] },
-  ) {}
+    readonly lazy = false,
+  ) {
+    if (lazy) this.onFirstOpen = (h) => void this.opened.push(h);
+  }
+  /** The user opens the folder. */
+  open(): void {
+    for (const h of this.opened.splice(0)) h();
+  }
   addFolder(p: { title: string; expanded?: boolean }): FakePane {
-    const f = new FakePane([...this.path, p.title], this.all);
+    const f = new FakePane([...this.path, p.title], this.all, this.lazy);
     this.folders.push(f);
     this.all.folders.push(f);
     return f;
@@ -236,6 +246,27 @@ describe('dev panel: built from the registry', () => {
     // An option field is a list of its options; a value at Infinity (an "off" lever) is typed.
     expect(bindingOf(panel, 'TERRAIN_TUNING', 'material').params.options).toMatchObject({ dirt: 'dirt', stone: 'stone' });
     expect(bindingOf(panel, 'IMPACT_TUNING', 'unbackedTargetMassRatio').value).toBe('Infinity');
+  });
+
+  it("makes a table's bindings when its folder first opens (Tweakpane's fold event), not at boot", () => {
+    pushed = [];
+    const pane = new FakePane([], undefined, true);
+    const panel = buildPanel({ world, loop, sfx: { setVolume() {} }, onRebuild: null }, { pane, now: () => 0 });
+    expect(panel.boundKeys('DAMAGE_TUNING')).toEqual([]);
+    expect(panel.boundKeys('SPECIES_BODY')).toEqual([]);
+    // The quick bindings in "Dev" exist at once.
+    expect(panel.bindingsOf('GAME_TUNING', 'timeScale')).toHaveLength(1);
+    pane.folderAt(['Damage rule'])!.open();
+    expect(panel.boundKeys('DAMAGE_TUNING').sort()).toEqual(tuningLeaves(TUNING.find((e) => e.name === 'DAMAGE_TUNING')!).map((l) => l.key).sort());
+    pane.folderAt(['Damage rule'])!.open(); // once
+    expect(panel.bindingsOf('DAMAGE_TUNING', 'K')).toHaveLength(1);
+    // A shared folder's tables fill when their own sub-folder opens.
+    pane.folderAt(['Creatures › bodies'])!.open();
+    expect(panel.boundKeys('SPECIES_BODY')).toEqual([]);
+    pane.folderAt(['Creatures › bodies', 'SPECIES_BODY'])!.open();
+    expect(panel.boundKeys('SPECIES_BODY').length).toBeGreaterThan(20);
+    pane.folderAt(['Client › game'])!.open();
+    expect(panel.bindingsOf('GAME_TUNING', 'timeScale')).toHaveLength(2);
   });
 
   it('builds the folders of a table registered after it, on the next refresh', () => {
@@ -406,7 +437,7 @@ describe('dev panel: read-outs', () => {
   it('reads out the player, and the last impacts and tripwires with cause, credit, HP and environmental', () => {
     const { pane, panel } = setup();
     const ro = pane.folderAt(['Read-outs (live)'])!;
-    const text = (label: string) => String(ro.bindings.find((b) => b.params.label === label)!.value);
+    const text = (key: string) => String(ro.bindings.find((b) => b.key === key)!.value);
     const player = world.player!;
     const impact = {
       type: 'impact',
@@ -422,13 +453,13 @@ describe('dev panel: read-outs', () => {
     panel.refresh(world);
     expect(text('impacts')).toMatch(/entity #17 \(falling\) 230 J → 12\.3 HP env \[p1\]/);
     expect(text('tripwires')).toMatch(/rope #4 by fighter#9: 812 N SNAPPED loosed 21/);
-    expect(text('player')).toMatch(/^hp \d/);
+    expect(text('player')).toMatch(/^PLAYER\nhp \d/);
     expect(text('player')).toMatch(/hands: empty/);
-    expect(text('giant')).toMatch(/no giant/);
+    expect(text('giant')).toMatch(/^GIANT\n— none/);
     // Only the last PANEL_TUNING.impactsShown impacts stay.
     for (let i = 0; i < PANEL_TUNING.impactsShown + 5; i++) panel.handle(impact, world);
     panel.refresh(world);
-    expect(text('impacts').split('\n')).toHaveLength(PANEL_TUNING.impactsShown);
+    expect(text('impacts').split('\n')).toHaveLength(PANEL_TUNING.impactsShown + 1);
   });
 
   it("reads the last tick's world events itself until the game hands it every event", () => {
@@ -438,8 +469,8 @@ describe('dev panel: read-outs', () => {
     world.events.push({ type: 'tripwire', joint: 2, by: { kind: 'terrain' }, loadN: 50, snapped: false, loosed: [] } as WorldEvent);
     panel.refresh(world);
     panel.refresh(world); // the same tick is read once
-    const trip = String(ro.bindings.find((b) => b.params.label === 'tripwires')!.value);
-    expect(trip.split('\n')).toHaveLength(1);
+    const trip = String(ro.bindings.find((b) => b.key === 'tripwires')!.value);
+    expect(trip.split('\n')).toHaveLength(2);
     expect(trip).toMatch(/rope #2 by terrain: 50\.0 N/);
   });
 

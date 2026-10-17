@@ -74,6 +74,11 @@ export interface PanelFolder {
   addFolder(params: { title: string; expanded?: boolean }): PanelFolder;
   addBinding(obj: Record<string, unknown>, key: string, params?: Record<string, unknown>): PanelBinding;
   addButton(params: { title: string; disabled?: boolean }): PanelButton;
+  /**
+   * Calls `handler` the first time the folder is opened (Tweakpane's fold event). A table's bindings are made then:
+   * the registry has ~1,100 fields, too many to build at boot. Without it the panel fills every folder at once.
+   */
+  onFirstOpen?(handler: () => void): void;
 }
 
 export interface PanelOptions {
@@ -90,6 +95,8 @@ interface LeafView {
   readonly sim: boolean;
   /** Dotted key of the primitive in its table. */
   readonly key: string;
+  /** The key's segments (read straight from the table on every refresh). */
+  readonly path: readonly string[];
   readonly kind: 'number' | 'numberText' | 'boolean' | 'options' | 'readOnly';
   readonly proxy: { v: TuningValue };
   readonly bindings: PanelBinding[];
@@ -122,7 +129,7 @@ export class DevPanel implements PanelPort {
   private readonly folderByName = new Map<string, PanelFolder>();
   private readonly pending = new Map<string, PendingEdit>();
   private built = 0;
-  private readonly ro = { player: '—', focus: '—', giant: '—', impacts: '—', tripwires: '—' };
+  private readonly ro = { player: 'PLAYER', focus: 'ENTITY', giant: 'GIANT', impacts: 'LAST IMPACTS', tripwires: 'TRIPWIRES' };
   private readonly inspect = { entity: 0 };
   private readonly impacts: string[] = [];
   private readonly tripwires: string[] = [];
@@ -142,6 +149,12 @@ export class DevPanel implements PanelPort {
       container.className = 'panel';
       container.style.display = 'none';
       container.style.width = '340px';
+      // Typing into a field is the field's: the game's keys (Enter, L, P, the number keys…) listen on the window and
+      // would steal the keystrokes, and Enter's preventDefault there would stop the field from committing.
+      container.addEventListener('keydown', (e) => {
+        const t = e.target as HTMLElement | null;
+        if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT')) e.stopPropagation();
+      });
       document.body.appendChild(container);
       this.container = container;
       this.root = tweakpane(container);
@@ -287,22 +300,25 @@ export class DevPanel implements PanelPort {
     });
     op('Respawn', 'respawnPlayer', () => []);
 
-    const note = { text: 'Sim tables: an edit is a setTuning command, applied on the next tick (so replays keep it). Client tables: applied at once.' };
-    dev.addBinding(note, 'text', { readonly: true, multiline: true, rows: 3, label: 'note' });
+    const note = {
+      text: ['Sim tables: an edit is a setTuning', 'command, applied on the next tick', '(so a replay keeps it).', 'Client tables: applied at once.'].join('\n'),
+    };
+    dev.addBinding(note, 'text', { readonly: true, multiline: true, rows: 4, label: null, interval: 0 });
   }
 
   /** The read-outs a playtest observer needs to see what a trap did (§10.10, RT-24). */
   private buildReadouts(): void {
     const f = this.root.addFolder({ title: 'Read-outs (live)', expanded: false });
     f.addBinding(this.inspect, 'entity', { min: 0, step: 1, label: 'inspect entity (0: focus)' });
-    const mon = (key: keyof DevPanel['ro'], label: string, rows: number) => {
-      this.monitors.push(f.addBinding(this.ro, key, { readonly: true, multiline: true, rows, label, interval: 0 }));
+    // Full width (no label column): each text starts with its own title line.
+    const mon = (key: keyof DevPanel['ro'], rows: number) => {
+      this.monitors.push(f.addBinding(this.ro, key, { readonly: true, multiline: true, rows, label: null, interval: 0 }));
     };
-    mon('player', 'player', 6);
-    mon('focus', 'entity', 7);
-    mon('giant', 'giant', 6);
-    mon('impacts', 'impacts', 10);
-    mon('tripwires', 'tripwires', 6);
+    mon('player', 7);
+    mon('focus', 8);
+    mon('giant', 7);
+    mon('impacts', 11);
+    mon('tripwires', 7);
   }
 
   /** Builds the folders of every table registered since the last call (tables register as modules load). */
@@ -321,6 +337,18 @@ export class DevPanel implements PanelPort {
     const own = TUNING.filter((e) => e.folder === entry.folder).length > 1;
     const folder = own ? shared.addFolder({ title: entry.name, expanded: false }) : shared;
     this.tableFolders.set(entry.name, { folder, path: own ? [entry.folder, entry.name] : [entry.folder] });
+    let filled = false;
+    const fill = () => {
+      if (filled) return;
+      filled = true;
+      this.fillTable(entry, folder);
+    };
+    if (folder.onFirstOpen) folder.onFirstOpen(fill);
+    else fill();
+  }
+
+  /** A table's bindings: one per field (nested tables as sub-folders; a compound value, one per primitive). */
+  private fillTable(entry: TuningEntry, folder: PanelFolder): void {
     const subs = new Map<string, PanelFolder>();
     const folderFor = (segments: readonly string[]): PanelFolder => {
       let f = folder;
@@ -364,7 +392,7 @@ export class DevPanel implements PanelPort {
     if (!v) {
       const value = readValue(entry.name, key);
       const kind = kindOf(value, meta, readOnly);
-      v = { entry, sim: !IS_CLIENT.test(entry.folder), key, kind, proxy: { v: shown(value, kind) }, bindings: [], editing: false };
+      v = { entry, sim: !IS_CLIENT.test(entry.folder), key, path: key.split('.'), kind, proxy: { v: shown(value, kind) }, bindings: [], editing: false };
       this.views.set(id, v);
     }
     const view = v;
@@ -374,6 +402,8 @@ export class DevPanel implements PanelPort {
         if (meta.min !== undefined) params.min = meta.min;
         if (meta.max !== undefined) params.max = meta.max;
         if (meta.step !== undefined) params.step = meta.step;
+        // Without a step Tweakpane shows two decimals, which hides small values (0.0022 rad/px reads 0.00).
+        else params.format = formatNumber;
         break;
       case 'options':
         params.options = Object.fromEntries((meta.options ?? []).map((o) => [o, o]));
@@ -404,7 +434,7 @@ export class DevPanel implements PanelPort {
       return;
     }
     if (!v.sim) {
-      const before = readValue(v.entry.name, v.key);
+      const before = readAt(v);
       if (!Object.is(before, value)) {
         writeClient(v.entry, v.key, value);
         clientEdited(this.host, v.entry.name, v.key, value);
@@ -433,7 +463,7 @@ export class DevPanel implements PanelPort {
   private effective(id: string, v: LeafView): TuningValue | null {
     const p = this.pending.get(id);
     if (p && this.host.world.tick < p.tick) return p.value;
-    return readValue(v.entry.name, v.key);
+    return readAt(v);
   }
 
   /** Puts the field's bindings back on its effective value. */
@@ -482,13 +512,13 @@ export class DevPanel implements PanelPort {
   private readouts(world: World): void {
     const ro = this.ro;
     const me = world.player;
-    ro.player = me ? playerLines(me, world) : '—';
+    ro.player = `PLAYER\n${me ? playerLines(me, world) : '—'}`;
     const ent = this.inspected(world);
-    ro.focus = ent ? entityLines(ent, world) : '— (no entity in focus or near)';
+    ro.focus = `ENTITY (${this.inspect.entity > 0 ? 'inspected' : 'focus, or nearest'})\n${ent ? entityLines(ent, world) : '— none in reach'}`;
     const g = giantOf(world);
-    ro.giant = g ? giantLines(g, world) : '— (no giant)';
-    ro.impacts = this.impacts.length ? this.impacts.join('\n') : '—';
-    ro.tripwires = this.tripwires.length ? this.tripwires.join('\n') : '—';
+    ro.giant = `GIANT\n${g ? giantLines(g, world) : '— none'}`;
+    ro.impacts = `LAST IMPACTS (newest first)\n${this.impacts.length ? this.impacts.join('\n') : '—'}`;
+    ro.tripwires = `TRIPWIRES (newest first)\n${this.tripwires.length ? this.tripwires.join('\n') : '—'}`;
   }
 
   /** The entity typed in, else the one in focus (nearest the focused point), else the nearest within reach. */
@@ -595,7 +625,20 @@ function adapt(f: FolderApi): PanelFolder {
     addFolder: (p) => adapt(f.addFolder(p)),
     addBinding: (obj, key, params) => f.addBinding(obj, key, params) as unknown as PanelBinding,
     addButton: (p) => f.addButton(p),
+    onFirstOpen: (handler) => {
+      let done = false;
+      f.on('fold', (ev) => {
+        if (!ev.expanded || done) return;
+        done = true;
+        handler();
+      });
+    },
   };
+}
+
+/** A number as it is, to four significant digits. */
+function formatNumber(v: number): string {
+  return Number.isInteger(v) ? String(v) : String(Number(v.toPrecision(4)));
 }
 
 function viewId(table: string, key: string): string {
@@ -617,7 +660,20 @@ function primitivesOf(v: unknown, path: string[]): string[][] {
 
 /** A primitive's current value in the registry (null for an empty compound or null). */
 function readValue(table: string, key: string): TuningValue | null {
-  const v = getTuningValue(table, key);
+  return primitive(getTuningValue(table, key));
+}
+
+/** A view's current value, read straight from its table (refresh reads ~1,100 of them: no registry lookups). */
+function readAt(v: LeafView): TuningValue | null {
+  let h: unknown = v.entry.table;
+  for (const seg of v.path) {
+    if (h === null || typeof h !== 'object') return null;
+    h = (h as Record<string, unknown>)[seg];
+  }
+  return primitive(h);
+}
+
+function primitive(v: unknown): TuningValue | null {
   return typeof v === 'number' || typeof v === 'boolean' || typeof v === 'string' ? v : null;
 }
 
