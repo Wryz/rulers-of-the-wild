@@ -1,4 +1,8 @@
 // @wild/sim: the deterministic, DOM-free simulation. The client imports everything from here.
+//
+// Every module of docs/M1-DESIGN.md §1.3 is exported, the systems later packages fill included (P05's stubs), so later
+// packages never edit this file. No module runs a Rapier or recast call at load: importing the index costs only the
+// module import (the world's physicsReady() initialises both).
 export * from './arena/themes';
 export * from './body/animator';
 export * from './body/footwork';
@@ -29,3 +33,60 @@ export * from './world/collision';
 export * from './world/materials';
 export * from './world/shapes';
 export * from './world/types';
+// The world (§1.3): world, physics, terrain, queries and the systems.
+export * from './world/world';
+export * from './world/worldTuning';
+export * from './world/physics';
+export * from './world/groups';
+export * from './world/rngs';
+export * from './world/queries';
+export * from './world/terrain';
+export * from './world/entities';
+export * from './world/factory';
+export * from './world/characters';
+export * from './world/zones';
+export * from './world/downed';
+export * from './world/contacts';
+export * from './world/damage';
+export * from './world/deaths';
+export * from './world/devOps';
+export * from './world/rulerBody';
+export * from './world/joints';
+export * from './world/breaking';
+export * from './world/loads';
+export * from './world/felling';
+export * from './world/nav';
+export * from './world/navInput';
+export * from './world/cover';
+export * from './world/clearing';
+// Verbs (§5).
+export * from './world/verbs/index';
+export * from './world/verbs/targets';
+export * from './world/verbs/tools';
+export * from './world/verbs/hands';
+export * from './world/verbs/tuning';
+export * from './world/verbs/strike';
+export * from './world/verbs/cut';
+export * from './world/verbs/dig';
+export * from './world/verbs/lash';
+export * from './world/verbs/bend';
+export * from './world/verbs/pull';
+export * from './world/verbs/shape';
+export * from './world/verbs/place';
+export * from './world/verbs/throw';
+// Creatures (§6).
+export * from './world/creatures/defs';
+export * from './world/creatures/noise';
+export * from './world/creatures/perception';
+export * from './world/creatures/mind';
+export * from './world/creatures/pathFollow';
+export * from './world/creatures/apeMind';
+export * from './world/creatures/factory';
+export * from './world/creatures/rulerMind';
+export * from './world/creatures/spawner';
+// The save (§8).
+export * from './save/canonical';
+export * from './save/schema';
+export * from './save/serialize';
+export * from './save/bodyState';
+export * from './save/load';

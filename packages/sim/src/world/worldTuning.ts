@@ -17,9 +17,14 @@ export const WORLD_TUNING = defineTuning(
     corpseDespawnMinDistM: 40,
     elementsPeriodTicks: 6,
     slowPeriodTicks: 60,
-    // Not a §9.1 row: the chest point verbs measure range and reach from (§5.0 "pos + 1.2·scale up"), read by
-    // WorldQueries.surfaceDistance and validateVerb, so the one number lives here instead of in two files.
+    // Not §9.1 rows (values the design states in prose, kept here so no file holds them as bare constants):
+    // the chest point verbs measure range and reach from (§5.0 "pos + 1.2·scale up"), read by
+    // WorldQueries.surfaceDistance and validateVerb;
     chestHeightM: 1.2,
+    // how far above `fromY` an entity's top still counts as support (§1.5.2 GroundQuery.supportAt "below fromY + 0.5");
+    supportReachM: 0.5,
+    // how far above the terrain World.teleport looks for the support it lands on (a scaffold box, a log).
+    teleportProbeM: 50,
   },
   {
     clearingSize: { unit: 'm', source: 'SPEC:869' },
@@ -34,5 +39,7 @@ export const WORLD_TUNING = defineTuning(
     elementsPeriodTicks: { unit: 'ticks', source: 'SPEC:702 (10 Hz; M2 hook)' },
     slowPeriodTicks: { unit: 'ticks', source: 'SPEC:702 (1 Hz; M3 hook)' },
     chestHeightM: { unit: 'm × scale', source: 'NEW: §5.0 chest point (pos + 1.2·scale up) for verb range and reach' },
+    supportReachM: { unit: 'm', source: 'NEW: §1.5.2 GroundQuery.supportAt (an entity top below fromY + 0.5 is support)' },
+    teleportProbeM: { unit: 'm above the terrain', source: 'NEW: where World.teleport starts its search for support' },
   },
 );
