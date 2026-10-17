@@ -488,12 +488,14 @@ class ValueNoise2 {
     const sz = fade(z - zi);
     const P = this.perm;
     const V = this.vals;
-    const i0 = xi & 255;
-    const i1 = (xi + 1) & 255;
+    const p0 = P[xi & 255];
+    const p1 = P[(xi + 1) & 255];
     const j0 = zi & 255;
     const j1 = (zi + 1) & 255;
-    const a = V[P[P[i0] + j0]] + (V[P[P[i1] + j0]] - V[P[P[i0] + j0]]) * sx;
-    const b = V[P[P[i0] + j1]] + (V[P[P[i1] + j1]] - V[P[P[i0] + j1]]) * sx;
+    const v00 = V[P[p0 + j0]];
+    const v01 = V[P[p0 + j1]];
+    const a = v00 + (V[P[p1 + j0]] - v00) * sx;
+    const b = v01 + (V[P[p1 + j1]] - v01) * sx;
     return a + (b - a) * sz;
   }
 }
