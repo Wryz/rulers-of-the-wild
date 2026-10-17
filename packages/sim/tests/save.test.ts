@@ -52,6 +52,7 @@ import { defineTuning, getTuningValue, resetTuning, setTuningValue, tuningSnapsh
 import { ApeMind } from '../src/world/creatures/apeMind';
 import { createCreature } from '../src/world/creatures/factory';
 import type { CreatureMind } from '../src/world/creatures/mind';
+import { RulerMind } from '../src/world/creatures/rulerMind';
 import { spawnBox, spawnGrass, spawnLog, spawnRopeCoil, spawnSapling, spawnStick, spawnStone, spawnTree } from '../src/world/factory';
 import { physicsReady } from '../src/world/physics';
 import type { Quat, RulerState, V3 } from '../src/world/types';
@@ -732,6 +733,34 @@ const INVENTORY: Record<string, Record<string, string>> = {
     current: 'saved: minds[].script',
     inner: "saved: minds[].inner (the inner BrawlerAI's history fields; its cfg and plan are the maker's, its rng CombatSim's)",
   },
+  /** The giant ape's mind (P20): CreatureMind's fields, no inner AI, and the route set by hand. */
+  RulerMind: {
+    cfg: 'not saved: the AI config its maker gives it (passive: rulers never block)',
+    director: "not saved: CombatSim's AIDirector (a link; its state is saved as director)",
+    drops: "not saved: CombatSim's drops (a link; saved as drops)",
+    ownsTarget: 'not saved: a constant (the mind picks its target)',
+    state: 'saved: minds[].state',
+    stateTick: 'saved: minds[].stateTick',
+    resume: 'saved: minds[].resume',
+    mark: 'saved: minds[].mark',
+    paused: 'saved: minds[].paused',
+    senses: 'system: Senses',
+    path: 'system: PathFollower',
+    rng: "saved: minds[].rng and rng.minds (the world's mind stream)",
+    self: 'not saved: its fighter (a link; minds[].fighter names it)',
+    world: 'not saved: a link',
+    hurt: 'saved: minds[].hurt',
+    home: 'saved: minds[].home (the lair)',
+    homeIdx: 'saved: minds[].homeIdx',
+    routeIdx: 'saved: minds[].routeIdx',
+    restUntil: 'saved: minds[].restUntil',
+    cooldownUntil: 'saved: minds[].cooldownUntil (the charge cooldown)',
+    fleeUntil: 'saved: minds[].fleeUntil',
+    heading: 'saved: minds[].heading (the committed charge heading, the climb heading)',
+    charge: 'saved: minds[].charge',
+    current: 'saved: minds[].script',
+    routeOverride: "saved: minds[].route (a giant's record only: null when it follows the spawn data's route)",
+  },
   Senses: {
     awareness: 'saved: minds[].awareness',
     lkp: 'saved: minds[].lkp',
@@ -789,6 +818,17 @@ const DESCRIPTIVE = ['Registry', 'Save'];
  */
 const UNREACHED: Record<string, string> = {};
 
+/**
+ * `saved:` places that only some records of a list have (P20): checked against the records that must have them, in a
+ * populated save that has at least one; the other records must not have them.
+ */
+const KIND_ONLY: Record<string, { why: string; has: (s: SaveV1) => { yes: unknown[]; no: unknown[] } }> = {
+  'minds[].route': {
+    why: "only a giant's mind has a patrol route of its own (RulerMind); an ape's record has no such field",
+    has: (s) => ({ yes: s.minds.filter((m) => m.kind === 'giantApe'), no: s.minds.filter((m) => m.kind !== 'giantApe') }),
+  },
+};
+
 /** The populated scenes' creature: an ape 8 m off the player, a mind with a path, its inner BrawlerAI and its senses. */
 function addApe(w: World): CreatureMind {
   const f = createCreature(w, 'ape', { x: 8, z: -8 }, 0);
@@ -837,7 +877,7 @@ const AWAITING: Record<string, string> = {
 
 describe('completeness (RR-19)', () => {
   /** Every inventoried object of a populated world, by inventory entry. */
-  function systems(w: World, e: number, mind: CreatureMind, giant: number): Record<string, object> {
+  function systems(w: World, e: number, mind: CreatureMind, giant: number, rulerMind: CreatureMind): Record<string, object> {
     const rt = (w.entities as unknown as { rt: Map<number, object> }).rt;
     const byId = (system: object): Map<number, object> => (system as { byId: Map<number, object> }).byId;
     return {
@@ -871,6 +911,7 @@ describe('completeness (RR-19)', () => {
       VerbSystem: w.verbs,
       MindRegistry: w.minds,
       ApeMind: mind,
+      RulerMind: rulerMind,
       Senses: mind.senses,
       PathFollower: mind.path,
       NoiseBus: w.noise,
@@ -883,11 +924,13 @@ describe('completeness (RR-19)', () => {
     const w = await make({ nav: 'full' });
     const ids = populate(w);
     const mind = addApe(w);
-    // A ruler (P11's RulerBody is reached through it), away from the scene.
+    // A ruler (P11's RulerBody is reached through it), away from the scene; and the giant ape with its mind (P20).
     const giant = addGiant(w, -15, 15);
+    const rulerMind = w.minds.get(createCreature(w, 'giantApe', { x: 15, z: 15 }, 0))!;
     run(w, 20, new Rng(4));
     expect(mind).toBeInstanceOf(ApeMind);
-    const sys = systems(w, ids.log, mind, giant.id);
+    expect(rulerMind).toBeInstanceOf(RulerMind);
+    const sys = systems(w, ids.log, mind, giant.id, rulerMind);
     const diffs: { entry: string; notInInventory: string[]; notOnObject: string[] }[] = [];
     for (const [name, o] of Object.entries(sys)) {
       const have = Object.keys(o).sort();
@@ -931,10 +974,30 @@ describe('completeness (RR-19)', () => {
     expect([...paths].filter((p) => p.includes('[]')).length).toBeGreaterThan(30);
     const missing: Record<string, string> = {};
     for (const p of [...paths].sort()) {
+      if (p in KIND_ONLY) continue;
       const step = missingStep(s, p);
       if (step !== null && !(p in UNREACHED)) missing[p] = step;
     }
     expect(missing).toEqual({});
+    // A place only some records have: on every one of them, on none of the others, in a save that has both kinds (the
+    // scene's ape and the giant ape with its mind and a route set by hand, P20).
+    const w2 = await make();
+    addApe(w2);
+    (w2.minds.get(createCreature(w2, 'giantApe', { x: -15, z: 15 }, 0)) as RulerMind).setRoute([
+      { x: -15, z: 20 },
+      { x: 15, z: 20 },
+    ]);
+    run(w2, 20, new Rng(5));
+    const s2 = parsed(serializeWorld(w2)) as unknown as SaveV1;
+    for (const [p, k] of Object.entries(KIND_ONLY)) {
+      expect(paths.has(p), p).toBe(true);
+      const [list, ...rest] = p.split('[].');
+      const { yes, no } = k.has(s2);
+      expect(no.length, `${p}: another kind's record`).toBeGreaterThan(0);
+      expect(yes.length, `${p}: ${k.why}`).toBeGreaterThan(0);
+      expect(missingStep({ [list]: yes }, p), p).toBeNull();
+      for (const r of no) expect(Object.prototype.hasOwnProperty.call(r, rest.join('.')), `${p} on another record`).toBe(false);
+    }
     // An unreached place is one the populated save can't reach, and is still named by a verdict.
     for (const p of Object.keys(UNREACHED)) {
       expect(paths.has(p), p).toBe(true);
