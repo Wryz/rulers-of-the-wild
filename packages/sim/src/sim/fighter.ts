@@ -514,6 +514,8 @@ export class Fighter {
    */
   startPickup(target: { pos: Vector3; weapon: WeaponDef }, frames: number) {
     this.setState('pickup');
+    // (A weapon pickup is no work action: setState keeps `work` within 'pickup'.)
+    this.work = null;
     this.pickupRequest = 0;
     this.stunFrames = frames;
     const grabAt = Math.round(frames * 0.5);
@@ -908,11 +910,14 @@ export class Fighter {
 
   /** Chest rising and falling: slow and shallow when fresh, fast and heaving when gassed. */
   private breathing(): number {
+    // Paused idle life holds the breath where it is: the chest doesn't move, even as the wind comes back.
+    if (this.idlePaused) return this.heldBreath;
     const e = 1 - this.stamina;
-    // Paused idle life holds the breath where it is (the chest doesn't move).
-    if (!this.idlePaused) this.breathPhase += (2.2 + 4.5 * e) / 60;
-    return Math.sin(this.breathPhase) * (0.01 + 0.045 * e * e);
+    this.breathPhase += (2.2 + 4.5 * e) / 60;
+    return (this.heldBreath = Math.sin(this.breathPhase) * (0.01 + 0.045 * e * e));
   }
+  /** The chest's last breathing offset (held while idle life is paused). */
+  private heldBreath = 0;
 
   /**
    * A weapon can't pass through a body: if it would go through our own torso or head
@@ -1019,7 +1024,8 @@ export class Fighter {
     smoothProfile(this.motion, this.motionTarget, threat ? 0.25 : 0.06);
     const M = this.motion;
     Object.assign(this.footwork.mods, { stance: M.stance, stepFrames: M.stepFrames, stepHeight: M.stepHeight, stride: M.stride, gait: M.gait });
-    Object.assign(this.idle.mods, { bounce: M.bounce, bounceHz: M.bounceHz, sway: M.sway, head: M.head, feints: M.feints, paws: M.paws });
+    // (Paused idle life keeps the amplitudes it had too, so nothing it adds changes.)
+    if (!this.idlePaused) Object.assign(this.idle.mods, { bounce: M.bounce, bounceHz: M.bounceHz, sway: M.sway, head: M.head, feints: M.feints, paws: M.paws });
 
     const info = this.motionInfo;
     info.zone = (Object.entries(weights) as [Zone, number][])

@@ -13,7 +13,8 @@ export interface FootworkStyle {
   /**
    * A limp (a severe leg wound, docs/M1-DESIGN.md §6.4), `amount` 0..1: the bad leg bears the weight for less time
    * (the good leg swings through quicker: its swing, the bad leg's time alone on the ground, × (1 −
-   * MOVE_TUNING.limpStanceMul × amount)) and is dragged low (its step height × MOVE_TUNING.limpStepHeightMul).
+   * MOVE_TUNING.limpStanceMul × amount)) and is dragged low (its step height × MOVE_TUNING.limpStepHeightMul at a
+   * full limp, eased in with the amount).
    */
   limp?: { side: Side; amount: number };
 }
