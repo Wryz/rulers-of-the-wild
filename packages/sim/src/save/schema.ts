@@ -123,6 +123,9 @@ export interface KccRecV1 {
   halfHeight: number;
   /** A pending teleport's feet point (the next resolve places the capsule there and skips the sweep), or null. */
   teleport: V3 | null;
+  /** The pushes it queued at `pushTick` (entity, unit horizontal direction): the next sweep reads whether each yielded. */
+  pushes: { entity: number; x: number; z: number }[];
+  pushTick: number;
 }
 
 /** A downed slab (§4.5; P08's DownedBodies.toRecord). */

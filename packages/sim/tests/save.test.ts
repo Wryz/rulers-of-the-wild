@@ -23,6 +23,7 @@
 // Scene numbers (sizes, masses, positions, ticks) are test constants, never tuning (§9).
 import { readFileSync, writeFileSync } from 'node:fs';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { BONES } from '../src/body/skeleton';
 import { canonicalJson, parseCanonicalJson } from '../src/save/canonical';
 import { bodyStateBytes } from '../src/save/bodyState';
 import { loadWorld, migrate, readSave } from '../src/save/load';
@@ -312,13 +313,22 @@ describe('determinism', () => {
     const withBody = w.entities.all().filter((e) => e.body).length;
     expect(withBody).toBe(Object.keys(ids).length - 1); // the stowed stick has no body
     const entityBlock = 1 + 4 + 13 * 4;
+    // The player's bodies: its controller's capsule, its zone body and its (disabled) slab.
+    const partBlock = 1 + 4 + 1 + 13 * 4;
     const fighterBlock = 1 + 4 + 14 * 8 + 12 * 7 * 8;
-    expect(b.length).toBe(withBody * entityBlock + fighterBlock + 1 + 8);
+    expect(b.length).toBe(withBody * entityBlock + 3 * partBlock + fighterBlock + 1 + 8);
     const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
     expect(dv.getUint8(0)).toBe(1);
     expect(dv.getUint32(1, true)).toBe(ids.log);
     expect(dv.getFloat64(b.length - 8, true)).toBe(w.combat.rng.state);
-    const f = withBody * entityBlock;
+    const parts = withBody * entityBlock;
+    for (let i = 0; i < 3; i++) {
+      const at = parts + i * partBlock;
+      expect([dv.getUint8(at), dv.getUint32(at + 1, true), dv.getUint8(at + 5)]).toEqual([2, 1, i]);
+    }
+    const capsule = w.kcc.capsulePose(w.player!)!;
+    expect(dv.getFloat32(parts + 6, true)).toBe(capsule.p.x);
+    const f = parts + 3 * partBlock;
     expect([dv.getUint8(f), dv.getUint32(f + 1, true), dv.getFloat64(f + 5, true)]).toEqual([5, 1, w.player!.pos.x]);
     const other = await make({ seed: 7 });
     populate(other);
@@ -505,9 +515,52 @@ const INVENTORY: Record<string, Record<string, string>> = {
   },
   AIDirector: { frame: 'not saved: set from the tick every step', lastAttack: 'saved: director.lastAttack', gap: 'not saved: a setting' },
   CommandQueue: { pending: 'saved: pending' },
-  CharacterControllers: { world: 'not saved: a link' },
-  ZoneBodies: { world: 'not saved: a link' },
-  DownedBodies: { world: 'not saved: a link' },
+  CharacterControllers: {
+    world: 'not saved: a link',
+    byId: 'saved: bodies (each Controller as bodies[].kcc)',
+    pending: 'not saved: pushes queued in phase 3 and applied in phase 4d of the same tick (empty at a tick end)',
+  },
+  Controller: {
+    f: 'not saved: the fighter (a link)',
+    body: 'not saved: the capsule body, rebuilt (its pose is bodies[].kcc.pose)',
+    col: 'not saved: the capsule collider, rebuilt',
+    cc: "not saved: Rapier's character controller, rebuilt",
+    r: 'not saved: CHARACTER_TUNING × scale when made',
+    halfH: 'not saved: CHARACTER_TUNING × scale when made',
+    halfNow: 'saved: bodies[].kcc.halfHeight',
+    crouched: 'saved: bodies[].kcc.crouched',
+    enabled: 'saved: bodies[].kcc.enabled',
+    vy: 'saved: bodies[].kcc.vy',
+    grounded: 'saved: bodies[].kcc.grounded',
+    teleport: 'saved: bodies[].kcc.teleport',
+    collided: 'not saved: a read-out of the last sweep (tests, AC-6)',
+    pushed: 'not saved: a read-out of the last sweep (tests, AC-6)',
+    lastPushes: 'saved: bodies[].kcc.pushes',
+    pushTick: 'saved: bodies[].kcc.pushTick',
+    params: 'not saved: derived from the scale and CHARACTER_TUNING',
+  },
+  ZoneBodies: { world: 'not saved: a link', byId: 'saved: bodies (each ZoneSet as bodies[].zonesHistory)' },
+  ZoneSet: {
+    f: 'not saved: the fighter (a link)',
+    body: 'not saved: the zone body, rebuilt and posed from the rig in every phase 4b',
+    cols: "not saved: the bone sensors, rebuilt (a severed bone's is turned off in phase 4b)",
+    offs: 'not saved: derived from the scale',
+    keys: 'not saved: owner keys',
+    enabled: 'not saved: off exactly while the slab is active or just handed back; the loader sets it from bodies[].slab',
+    jump: 'not saved: a load resets the pose history, which sets it',
+  },
+  DownedBodies: { world: 'not saved: a link', byId: 'saved: bodies (each Slab as bodies[].slab)' },
+  Slab: {
+    f: 'not saved: the fighter (a link)',
+    body: 'not saved: the slab body, rebuilt (bodies[].slab.pose, lin, ang)',
+    col: 'not saved: the slab collider, rebuilt',
+    halfLen: 'not saved: DOWNED_TUNING × scale when made',
+    key: 'not saved: its owner key',
+    active: 'saved: bodies[].slab.enabled',
+    hold: 'saved: bodies[].slab.hold',
+    handedBack: 'saved: bodies[].slab.handedBack',
+    dv: 'saved: bodies[].slab.dv',
+  },
   RulerBodies: { world: 'not saved: a link', mover: 'not saved: code (RulerMover)' },
   ContactSystem: { world: 'not saved: a link' },
   Deaths: { world: 'not saved: a link' },
@@ -515,7 +568,17 @@ const INVENTORY: Record<string, Record<string, string>> = {
   MindRegistry: { world: 'not saved: a link', minds: 'saved: minds (by fighter id) and rng.minds' },
   NoiseBus: { world: 'not saved: a link (the bus is empty at the end of a tick)' },
   Spawner: { world: 'not saved: a link' },
-  NavSystem: { world: 'not saved: a link' },
+  NavSystem: {
+    world: 'not saved: a link',
+    buildFailures: 'not saved: a dev read-out',
+    dirtyReasons: 'not saved: a dev read-out',
+    layers: 'saved: navDirty (each layer\'s dirty tiles); the navmeshes themselves are rebuilt on load (TODO(M3): tile versions, which paths keep)',
+    disposed: 'not saved: false for a live system',
+    baked: 'not saved: the static and resting entities, taken afresh by the build on load',
+    bakedSorted: 'not saved: a cache of baked',
+    seenVersion: 'not saved: the terrain as the navmesh last saw it, taken afresh by the build on load',
+    seenHeights: 'not saved: the terrain as the navmesh last saw it, taken afresh by the build on load',
+  },
   /** Fighter fields the save keeps outside the fighter's record (P04's records.test.ts inventories the rest). */
   Fighter: { rng: 'saved: rng.fighters', ruler: 'saved: rulers' },
   /** The tuning registry (per process). */
@@ -534,19 +597,18 @@ const AWAITING: Record<string, string> = {
   joints: 'JointStore (P10)',
   verbs: 'VerbSystem (P14)',
   spawner: 'Spawner (P22)',
-  bodies: 'CharacterControllers, ZoneBodies, DownedBodies (P08), RulerBodies (P11)',
   contacts: 'ContactSystem (P09)',
   contactGrace: 'ContactSystem (P09)',
   felling: 'Felling (P10)',
   deaths: 'Deaths (P09)',
   corpses: 'Deaths (P09)',
-  navDirty: 'NavSystem (P12)',
 };
 
 describe('completeness (RR-19)', () => {
   /** Every inventoried object of a populated world, by inventory entry. */
   function systems(w: World, e: number): Record<string, object> {
     const rt = (w.entities as unknown as { rt: Map<number, object> }).rt;
+    const byId = (system: object): Map<number, object> => (system as { byId: Map<number, object> }).byId;
     return {
       World: w,
       ids: w.ids,
@@ -566,8 +628,11 @@ describe('completeness (RR-19)', () => {
       AIDirector: w.combat.director,
       CommandQueue: w.commands,
       CharacterControllers: w.kcc,
+      Controller: byId(w.kcc).get(1)!,
       ZoneBodies: w.zones,
+      ZoneSet: byId(w.zones).get(1)!,
       DownedBodies: w.downed,
+      Slab: byId(w.downed).get(1)!,
       RulerBodies: w.rulers,
       ContactSystem: w.contacts,
       Deaths: w.deaths,
@@ -584,15 +649,15 @@ describe('completeness (RR-19)', () => {
     const ids = populate(w);
     run(w, 20, new Rng(4));
     const sys = systems(w, ids.log);
+    const diffs: { entry: string; notInInventory: string[]; notOnObject: string[] }[] = [];
     for (const [name, o] of Object.entries(sys)) {
-      const want = INVENTORY[name];
-      expect(want, `inventory entry ${name}`).toBeDefined();
       const have = Object.keys(o).sort();
-      const listed = Object.keys(want).sort();
+      const listed = Object.keys(INVENTORY[name] ?? {}).sort();
       const missing = have.filter((k) => !listed.includes(k));
       const gone = listed.filter((k) => !have.includes(k));
-      expect({ entry: name, notInInventory: missing, notOnObject: gone }).toEqual({ entry: name, notInInventory: [], notOnObject: [] });
+      if (missing.length > 0 || gone.length > 0) diffs.push({ entry: name, notInInventory: missing, notOnObject: gone });
     }
+    expect(diffs).toEqual([]);
     // Every `system:` names an entry, every entry is reached, every verdict is one of the three kinds.
     for (const [name, fields] of Object.entries(INVENTORY)) {
       for (const [k, v] of Object.entries(fields)) {
@@ -724,7 +789,7 @@ describe('save → load → save', () => {
     expect(l.combat.fighters).toEqual([l.player]);
     expect(l.player!.toRecord(l.combat.drops)).toEqual(w.player!.toRecord(w.combat.drops));
     expect(l.player!.rngState).toBe(w.player!.rngState);
-    for (const b of Object.keys(l.player!.rig) as (keyof typeof l.player.rig)[]) {
+    for (const b of BONES) {
       expect(l.player!.rig[b].pos.toArray()).toEqual(w.player!.rig[b].pos.toArray());
       expect(l.player!.rig[b].rot.toArray()).toEqual(w.player!.rig[b].rot.toArray());
     }
@@ -775,6 +840,79 @@ describe('save → load → save', () => {
       }
     }
     expect(l2.tick).toBe(60 + 300);
+  });
+
+  it('loads a knocked-down player down: its slab moving, its controller and zones off, and it gets up as the original does', async () => {
+    const w = await make();
+    populate(w);
+    run(w, 20, new Rng(15));
+    const p = w.player!;
+    // A blow in the next phase 3, as CombatSim's hit() leaves one: knockback in f.vel, the knockdown, its hit event.
+    const sim = w.combat;
+    const orig = sim.stepBody;
+    sim.stepBody = function () {
+      sim.stepBody = orig;
+      const ev = orig.call(sim);
+      p.vel.set(3, 0, 1);
+      p.enterKnockdown();
+      ev.push({ type: 'hit', attacker: p, defender: p, move: { lift: 1 }, knockdown: true, ko: false } as unknown as (typeof ev)[number]);
+      return ev;
+    };
+    for (let i = 0; i < 8; i++) w.step();
+    expect(w.downed.active(p)).toBe(true);
+    expect(w.kcc.isEnabled(p)).toBe(false);
+    expect(w.zones.enabled(p)).toBe(false);
+    const a = serializeWorld(w);
+    const l = await load(a);
+    const q = l.player!;
+    expect(l.downed.active(q)).toBe(true);
+    expect(l.kcc.isEnabled(q)).toBe(false);
+    expect(l.zones.enabled(q)).toBe(false);
+    expect(q.state).toBe('knockdown');
+    const sa = parsed(a) as unknown as SaveV1;
+    const sb = parsed(serializeWorld(l)) as unknown as SaveV1;
+    expect(sa.bodies[0].slab!.enabled).toBe(true);
+    expect(canonicalJson(sb.bodies.map((b) => [b.kcc, b.slab]))).toBe(canonicalJson(sa.bodies.map((b) => [b.kcc, b.slab])));
+    for (const k of EXACT) expect(canonicalJson(sb[k]) === canonicalJson(sa[k]), `section ${k}`).toBe(true);
+    // Both get up (the slab settles, hands back, the zones come back); the loaded one within a few ticks of the other.
+    const upAt = (x: World): number => {
+      for (let t = 0; t < 900; t++) {
+        x.step();
+        if (!x.downed.active(x.player!) && x.kcc.isEnabled(x.player!) && x.zones.enabled(x.player!)) return x.tick;
+      }
+      return -1;
+    };
+    const t1 = upAt(w);
+    const t2 = upAt(l);
+    expect(t1).toBeGreaterThan(0);
+    expect(t2).toBeGreaterThan(0);
+    expect(Math.abs(t1 - t2)).toBeLessThanOrEqual(3);
+  });
+
+  it('rebuilds the navmesh over the loaded ground and gives it back its dirty tiles', async () => {
+    const w = await make({ nav: 'full' });
+    populate(w);
+    run(w, 5, new Rng(16));
+    w.nav!.markDirty({ min: { x: -20, y: 0, z: -20 }, max: { x: 20, y: 1, z: 20 } }, 'save test');
+    const queue = w.nav!.dirtyQueue();
+    expect(queue.length).toBeGreaterThan(2);
+    const a = serializeWorld(w);
+    expect((parsed(a) as unknown as SaveV1).navDirty).toEqual(queue);
+    const l = await load(a, { nav: 'full' });
+    expect(l.nav!.built).toBe(true);
+    expect(l.nav!.dirtyQueue()).toEqual(queue);
+    // The dug hole is in the rebuilt navmesh as in the original's: the same walkable cells around it.
+    for (const [x, z] of [
+      [-6, 6],
+      [-5.6, 6],
+      [-6.5, 6.4],
+      [0, 0],
+      [2, 1],
+    ]) {
+      expect(l.nav!.isWalkable('human', x, z), `(${x}, ${z})`).toBe(w.nav!.isWalkable('human', x, z));
+    }
+    // Loaded without a navmesh, the dirty tiles are moot.
+    expect((await load(a, { nav: 'off' })).nav).toBeNull();
   });
 });
 

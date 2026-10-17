@@ -227,6 +227,10 @@ function restoreWorld(w: World, s: SaveV1): void {
   w.kcc.restoreRecord(kcc);
   w.downed.restoreRecord(slabs);
   w.rulers.restoreRecord(rulers);
+  // The standing zones have no record of their own: they are off exactly while the slab is active, and until the
+  // phase 4a after the slab was handed back (world/downed.ts), so that is where a load leaves them.
+  // TODO(P08-fix): ZoneBodies could save its `enabled` itself (or DownedBodies.restoreRecord set it).
+  for (const { fighter, slab } of slabs) if (slab.enabled || slab.handedBack) w.zones.setEnabled(fighterById(w, fighter, 'bodies'), false);
   for (const f of [...w.combat.fighters].sort(byId)) if (!f.ruler) w.zones.resetHistory(f);
   w.contacts.restoreRecord(s.contacts);
   for (const [id, until] of s.contactGrace) w.contacts.grace(id, until);
@@ -898,7 +902,7 @@ function bodies(v: unknown, p: string): BodiesRecV1 {
   return {
     fighter: nat(o.fighter, `${p}.fighter`),
     kcc: nullable(o.kcc, `${p}.kcc`, (x, q) => {
-      const k = exactKeys(obj(x, q), ['pose', 'vy', 'grounded', 'crouched', 'enabled', 'halfHeight', 'teleport'], q);
+      const k = exactKeys(obj(x, q), ['pose', 'vy', 'grounded', 'crouched', 'enabled', 'halfHeight', 'teleport', 'pushes', 'pushTick'], q);
       return {
         pose: pose3(k.pose, `${q}.pose`),
         vy: fin(k.vy, `${q}.vy`),
@@ -907,6 +911,12 @@ function bodies(v: unknown, p: string): BodiesRecV1 {
         enabled: bool(k.enabled, `${q}.enabled`),
         halfHeight: fin(k.halfHeight, `${q}.halfHeight`),
         teleport: nullable(k.teleport, `${q}.teleport`, v3),
+        pushes: arr(k.pushes, `${q}.pushes`).map((x, i) => {
+          const at = `${q}.pushes[${i}]`;
+          const d = exactKeys(obj(x, at), ['entity', 'x', 'z'], at);
+          return { entity: nat(d.entity, `${at}.entity`), x: fin(d.x, `${at}.x`), z: fin(d.z, `${at}.z`) };
+        }),
+        pushTick: int(k.pushTick, `${q}.pushTick`),
       };
     }),
     zonesHistory: arr(o.zonesHistory, `${p}.zonesHistory`).map((x, i) => fin(x, `${p}.zonesHistory[${i}]`)),
