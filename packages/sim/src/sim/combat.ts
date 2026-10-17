@@ -1350,7 +1350,8 @@ export class CombatSim {
     for (const a of this.fighters) {
       if (a.hitThisAttack || contacts.some((c) => c.attacker === a)) continue;
       const swinging = a.inWeaponContact();
-      if (!swinging && !a.inActiveFrames()) continue;
+      // (World mode: an unarmed limb meets the world over its forward path, as a blade does: unarmedReach.)
+      if (!swinging && !a.inActiveFrames() && !(this.world && unarmedReach(a))) continue;
       // World mode: the world's things take the place of the arena's props (docs/M1-DESIGN.md §5.2).
       if (this.world) {
         this.strikeWorld(this.world, a, swinging);
@@ -1371,6 +1372,9 @@ export class CombatSim {
     this.resolveJams(new Set(contacts.map((c) => c.attacker)));
     for (const f of this.fighters) {
       if (f.weapon && f.inWeaponContact()) this.prevBlade.set(f, bladePoints(f, f.weapon));
+      // World mode: an unarmed strike's fist or foot over its forward path, so the world's strike seam sweeps it as it
+      // sweeps a blade (docs/M1-DESIGN.md §5.2; P15 review: a foot passed through a prop between two ticks).
+      else if (this.world && unarmedReach(f)) this.prevBlade.set(f, [strikePoint(f, f.move!, new Vector3())]);
       else this.prevBlade.delete(f);
     }
     // Apply after detection so simultaneous strikes trade.
@@ -1388,7 +1392,7 @@ export class CombatSim {
     const w = swinging && a.weapon ? a.weapon : null;
     const pts = w ? bladePoints(a, w) : [strikePoint(a, a.move!, new Vector3())];
     const offs = w ? sampleOffsets(w) : [0];
-    const prev = w ? this.prevBlade.get(a) : undefined;
+    const prev = this.prevBlade.get(a);
     const hit = world.strike(a, prev && prev.length === pts.length ? prev : null, pts, offs, w);
     if (!hit) return;
     a.hitThisAttack = true;
@@ -2445,6 +2449,17 @@ function reactionFor(m: MoveDef, zone: HurtZone, aimId?: string): PoseName {
     if ((m.kind === 'hook' || m.kind === 'kick') && side !== 0) return side > 0 ? 'hitHookL' : 'hitHookR';
   }
   return m.weight === 'heavy' ? 'stagger' : 'hitHigh';
+}
+
+/**
+ * An unarmed strike's forward path in world mode (P15): from half-way through its wind-up (where a blade's contact
+ * starts, Fighter.inWeaponContact) to the end of its active frames. The world's strike seam is offered the fist or
+ * foot over it, swept from last tick's point (kept in prevBlade), so a kick can't pass through a prop between ticks.
+ */
+function unarmedReach(f: Fighter): boolean {
+  const m = f.move;
+  if (f.state !== 'attack' || !m || (m.weapon && f.weapon) || f.attackEnd || m.noHit) return false;
+  return f.stateFrame >= Math.floor(m.startup * 0.5) && f.stateFrame < m.startup + m.active;
 }
 
 export function strikePoint(f: Fighter, m: MoveDef, out: Vector3): Vector3 {
