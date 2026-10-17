@@ -5,7 +5,7 @@ import './style.css';
 import RAPIER from '@dimforge/rapier3d-compat';
 import { Scene } from 'three';
 import { createWorld, physicsReady, type World } from '@wild/sim';
-import { bootParams, cryptoSeed, DEV, rebuildSearch } from './dev';
+import { bootParams, cryptoSeed, DEV, fetchSave, pinCamera, rebuildSearch, shotParams } from './dev';
 import { Sfx } from './feel/audio';
 import { SfxAdapter } from './feel/sfxPort';
 import { Game } from './game/game';
@@ -37,10 +37,19 @@ async function boot() {
   const loading = document.querySelector<HTMLDivElement>('#loading');
   try {
     const params = bootParams(location.search, DEV, cryptoSeed);
+    // Developer screenshots (tools/shots): ?save=<url> builds the world from a canonical save instead of the seed;
+    // ?paused, ?cam, ?fov and ?hud below. The dev server's build only: production replaces import.meta.env.DEV with
+    // false and drops all of it.
+    const shot = import.meta.env.DEV ? shotParams(location.search) : null;
     await physicsReady();
     // TODO(P22): ?mode=training's sparring ape (D-50) appears once the Spawner places it; until then the flag reaches
     // the world and nothing spawns.
-    const world = await createWorld({ seed: params.seed, scene: 'clearing', sparringApe: params.sparringApe });
+    const world =
+      import.meta.env.DEV && shot?.save
+        ? // (The loader by a dynamic import in this branch, which the production build drops: a static import of
+          // loadWorld here keeps its module's record checkers in the player's bundle though nothing calls them.)
+          await (await import('@wild/sim')).loadWorld(await fetchSave(shot.save), { applyTuning: true })
+        : await createWorld({ seed: params.seed, scene: 'clearing', sparringApe: params.sparringApe });
     // Developer builds check the sim's invariants as it runs (§4.1, RF-6): a weapon reaching a DS drop in world mode
     // throws. (Until P14/P15 nothing in the client can put a weapon in a hand, so it can't fire before the verbs exist.)
     world.combat.devChecks = DEV;
@@ -56,6 +65,12 @@ async function boot() {
       const { buildPanel } = await import('./debug/panel');
       game.setPanel(panelPort(buildPanel(game)));
       Object.assign(window, { game, world, loop });
+    }
+    if (import.meta.env.DEV && shot) {
+      // The loop's own pause (rule 8), a pinned camera and no HUD: presentation only, the sim is never written.
+      if (shot.paused) game.tuning.paused = true;
+      if (shot.cam) pinCamera(game.cams, shot.cam, shot.fov);
+      if (!shot.hud) hudRoot.style.display = 'none';
     }
     loop.start();
     loading?.remove();
