@@ -531,7 +531,7 @@ describe('hearing (§6.2)', () => {
       { type: 'verb', f: p, verb: 'place', ok: true, entity: stake },
       { type: 'verb', f: p, verb: 'place', ok: true, entity: log },
       { type: 'verb', f: p, verb: 'shape', ok: false, reason: 'tooHard', entity: log },
-      { type: 'joint', joint: 4, what: 'snap' },
+      { type: 'joint', joint: 4, what: 'snap', point: pt },
       { type: 'spawn', entity: 9 },
     ];
     w.noise.collect(w, ce, we);
@@ -549,7 +549,9 @@ describe('hearing (§6.2)', () => {
       ['heavyLand', heavyLandRadius(p.mass)], // the player coming down
       ['shape', T.shape],
       ['stakeDriven', T.stakeDriven],
-      // a log set down (not anchored), a refused verb, a joint with no record (P10's stub) and a spawn are silent
+      // a rope snapping, heard at the event's point (the joint is gone by phase 17b)
+      ['ropeSnap', T.ropeSnap],
+      // a log set down (not anchored), a refused verb and a spawn are silent
     ]);
     // The noises at the shape and stake are at their entities.
     const at = noisesOf(w.events, 'stakeDriven')[0].at;

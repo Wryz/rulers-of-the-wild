@@ -883,6 +883,8 @@ describe('sim/rules.ts', () => {
     expect(DAMAGE_TUNING).toEqual({
       kS: 3, K: 18, meleeJPerDmg: 18, throwCapJ: 400, leadingCos: 0.7, bladeSharpness: 0.8, tipRadiusM: 0.15, impactCooldownTicks: 6,
       minImpactJ: 5, hardLandingBluntOnly: true, zoneGraceTicks: 2,
+      // (Not in §9: the orchestrator's decision on P10's design conflict, an entity's integrity at its point mass.)
+      integrityPointMass: true,
     });
     expect(MOVE_TUNING).toMatchObject({
       sprintMul: 1.4, sprintStaminaPerS: 0.15, sprintMinStamina: 0.1, crouchSpeedMul: 0.5, jumpStamina: 0.05,

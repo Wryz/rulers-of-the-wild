@@ -152,10 +152,10 @@ describe('chops and the fall (§2.5)', () => {
     for (const e of landing!) expect(offLineDeg(e, { x: 1, y: 0, z: 0 })).toBeLessThan(1);
   });
 
-  // DESIGN CONFLICT (P09 m_eff for entity vs terrain = the whole mass, §4.3): expected to fail until the design decides
-  // (the effective mass at the contact point, 1/(1/m + (r×n)ᵀI⁻¹(r×n)), ≈ m/4 at the tip, would score ≈ 37 kJ and take
-  // ≈ 0.25 of its integrity). When it passes, `it.fails` fails: make it an ordinary `it`.
-  it.fails('a 30 cm × 15 m tree felled by 15 chops lands whole, within 1° of the fall line, and is felled (§13.1)', async () => {
+  // Whole because an entity's integrity reads its effective mass at the contact point (DAMAGE_TUNING.integrityPointMass,
+  // the orchestrator's decision on P10's design conflict): with the whole mass (§4.3's table) the tip's landing scored
+  // ≈ 133 kJ against E_b ≈ 29.5 kJ and the trunk shattered.
+  it('a 30 cm × 15 m tree felled by 15 chops lands whole, within 1° of the fall line, and is felled (§13.1)', async () => {
     const w = await make();
     const t = tree30(w);
     run(w, 5);

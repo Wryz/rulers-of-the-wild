@@ -23,6 +23,9 @@
 //   coverTripWindowTicks). Shoveable entities (dynamic, < shoveLimitKg, not anchored) the capsule overlaps are pushed
 //   aside with the ruler's momentum (step 5), applied in phase 4d (applyShoves). While a trip is pending the root keeps
 //   its height (the fall is the dynamic body's).
+// - legStrike (phase 9b, from the contact pipeline): a standing ruler's shin that meets a blocker before the capsule
+//   does gets step 6's rule for the leg (deflect left to the mover, else the trip band), so the strike trips it before
+//   the struck entity breaks or loses its lashings (SPEC:782, 344; a departure from steps 4-6, recorded there).
 // - The trip switch (phase 4c, outside every callback): the pose frozen pelvis-relative (tripPose 'freeze'), the colliders
 //   solid in RULER_SOLID, the body dynamic with the momentum fit of the zones' previous-tick velocities, damping, extra
 //   solver iterations and CCD; the fighter 'tripped' for getupAfterS; a `trip` event; the history reset (RF-1).
@@ -303,6 +306,56 @@ export class RulerBodies {
       c = cb.cause;
     }
     r.pendingTrip = { why: w, tick, cause: c ? copyCause(c) : null };
+  }
+
+  /**
+   * A standing ruler's shin met entity `e` (a new contact episode, phase 9b; `point` the contact, `n` its normal out of
+   * the shin): §4.7 step 6's rule for the leg itself, in D-11's order. A blocker (fixed, anchored, ≥ shoveLimitKg; not a
+   * fresh piece) met within deflectMaxDeg of its long axis is left to the mover, which deflects along it; otherwise,
+   * while the root moves faster than tripSpeed, an obstacle whose top lies between the ankle and the knee trips it
+   * 'obstacle', with the obstacle as the cause. Anything else (slow, a low or tall obstacle, a light one) is the mover's.
+   * DEVIATION (§4.7 steps 4-6 decide the trip from the root's capsule sweep alone): SPEC:782 trips a ruler "when its
+   * legs strike a blocking obstacle between ankle and knee height while it moves faster than 4 m/s", and a striding
+   * shin reaches an obstacle before the 1.65 m capsule does (AC-5's log: 0.34 m, 3-4 ticks ahead at 6 m/s). By then the
+   * strike has been scored on the obstacle (§4.10): a 300 kg dry log takes 18.5 kJ from an 859 kg shin at 6.56 m/s
+   * against its 9 kJ break energy and breaks into 100 kg pieces the capsule shoves aside, and a lashed log loses its
+   * lashings (600 J), so it is no blocker either. The strike trips the ruler before the struck entity breaks, as an
+   * impact's damage is applied before it breaks (SPEC:344).
+   */
+  legStrike(f: Fighter, e: Entity, point: V3, n: V3): void {
+    const rb = this.byId.get(f.id);
+    const r = f.ruler;
+    if (!rb || !r || rb.dynamic || f.state === 'tripped' || f.state === 'ko' || r.pendingTrip) return;
+    // A blocker whose top rises above its ankle (lower ones are stepped over, step 4), as the sweep's castBlocker.
+    if (e.grace || !this.blocks(e) || !(entityTop(e) > f.pos.y + rulerAnkleM(f))) return;
+    const T = RULER_BODY_TUNING;
+    const vx = f.vel.x + f.walkVel.x;
+    const vz = f.vel.z + f.walkVel.z;
+    const v = Math.hypot(vx, vz);
+    if (!(v > T.tripSpeed)) return;
+    const ux = vx / v;
+    const uz = vz / v;
+    // n̂: horizontal, from the leg into the obstacle (the motion when the normal is vertical).
+    let nx = n.x;
+    let nz = n.z;
+    const nl = Math.hypot(nx, nz);
+    if (nl > TINY) {
+      nx /= nl;
+      nz /= nl;
+    } else {
+      nx = ux;
+      nz = uz;
+    }
+    // 6.1: along the obstacle, the mover deflects it when its capsule meets it.
+    const t = deflectAxis(e, nx, nz);
+    const cos = Math.min(1, Math.abs(t.x * ux + t.z * uz));
+    if (Math.acos(cos) < T.deflectMaxDeg * DEG) return;
+    // 6.2: an obstacle whose top lies between the ankle and the knee.
+    const top = entityTop(e) - this.world.terrain.heightAt(point.x, point.z);
+    const band = legBand(f, f.pos.y);
+    if (top >= band.ankle && top <= band.knee) {
+      this.requestTrip(f, 'obstacle', { kind: 'entity', entityId: e.id, fighterId: null, credit: [...e.credit], held: false, feature: 'fall' });
+    }
   }
 
   /**
