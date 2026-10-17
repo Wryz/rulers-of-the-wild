@@ -2,9 +2,10 @@ import { Vector3 } from 'three';
 import { type BoneName, bonePoint, fistPoint, footPoint, SKELETON } from '../body/skeleton';
 import type { PoseName } from '../body/poses';
 import { AIDirector, type Brain, MAX_HEFT } from './ai';
-import { type Button, type Fighter } from './fighter';
+import { boolFromRecord, numFromRecord, readV3, strFromRecord, v3Record } from '../body/animator';
+import { type Button, type Fighter, type WeaponRecord } from './fighter';
 import { RectWalkable, type Walkable } from '../world/collision';
-import type { Finish, FighterMover, GroundQuery, ImpactCause, RulerZoneId, Work, WorldPort } from '../world/types';
+import type { Finish, FighterMover, GroundQuery, ImpactCause, RulerZoneId, V3, Work, WorldPort } from '../world/types';
 import { getTuningValue } from '../tuning/registry';
 import { type Command, COMMAND_STEPS, CommandQueue, MOVE_CROUCH, MOVE_SPRINT, moveVector } from './commands';
 import { boneMass, DAMAGE_TUNING, hpFromEnergy, impactEnergy, launchSpeed, MOVE_TUNING, reducedMass, zoneToughness } from './rules';
@@ -15,7 +16,7 @@ import { angleDelta, approachAngle, clamp, DT, Rng } from './math';
 import { aimBallistic, centreOfMass, integrate, type Projectile, projectileDir, projectilePoints, pointVelocity, substeps } from './projectiles';
 import { DEFENSES, type DefenseKind, type Height, type MoveDef, moveLength, spinProgress } from './moves';
 import { chooseDefense, moveContext, selectPlayerMove } from './select';
-import { bladePoints, GORE, heft, LIMB_TOUGHNESS, limbBones, sampleOffsets, SEVER_AT, selectWeaponMove, WEAPON_MOVES, type WeaponDef, type Wound } from './weapons';
+import { bladePoints, GORE, heft, LIMB_TOUGHNESS, limbBones, sampleOffsets, SEVER_AT, selectWeaponMove, WEAPON_MOVES, WEAPONS, type WeaponDef, type WeaponId, type Wound } from './weapons';
 
 /** A weapon lying on the arena floor. */
 export interface Drop {
@@ -367,6 +368,11 @@ export class CombatSim {
   /** Weapons lying around. */
   readonly drops: Drop[] = [];
   private dropSerial = 0;
+  /**
+   * Each swinging fighter's blade points at the end of last tick's hit detection: this tick's swing is swept from them
+   * (resolveHits, strikeWorld). Saved (toRecord): rebuilding it from the rig gives the same points but not always the
+   * same fighters (hit() can end a swing after the points were taken, MAP gap-7 §3.1).
+   */
   private readonly prevBlade = new Map<Fighter, Vector3[]>();
   /** Weapons in the air. */
   readonly projectiles: Projectile[] = [];
@@ -377,6 +383,7 @@ export class CombatSim {
   readonly rng: Rng;
   /** Player input, as tick-tagged commands applied at the start of their tick. */
   readonly commands = new CommandQueue();
+  /** Each fighter's walk this tick, for its pose: written by locomote for every fighter before it is read; never saved. */
   private readonly speeds = new Map<Fighter, { speed: number; lx: number; lz: number; turn: number }>();
 
   // ---------------------------------------------------------------------------
@@ -425,14 +432,6 @@ export class CombatSim {
     for (const f of this.fighters) f.ground = g === FLAT_GROUND ? null : g;
   }
 
-  /** @deprecated alias of physicsOwnsDowned, kept until P31 removes game.ts:181's write (RF-8). */
-  get externalKnockdown(): boolean {
-    return this.physicsOwnsDowned;
-  }
-  set externalKnockdown(v: boolean) {
-    this.physicsOwnsDowned = v;
-  }
-
   add(f: Fighter, ai?: Brain) {
     this.fighters.push(f);
     if (this.groundQuery !== FLAT_GROUND) f.ground = this.groundQuery;
@@ -449,7 +448,92 @@ export class CombatSim {
     if (i >= 0) this.fighters.splice(i, 1);
     this.ais.delete(f);
     this.sprinters.delete(f);
+    // (Its swept blade goes with it: kept, it would be the "last tick's" blade of a fighter added back later, and the
+    // save, which writes swept blades by the sim's fighters, would leave it out.)
+    this.prevBlade.delete(f);
     for (const o of this.fighters) if (o.target === f) o.target = null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Save record (docs/M1-DESIGN.md §8.3; MAP gap-7 §3.1, §6)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * CombatSim's own state that carries into the next tick, as plain data with a fixed key order (CombatSimRecord): the
+   * tick, its Rng's state, the drop and projectile serials, the weapons lying around and in flight (fighters by id,
+   * weapons by id), the swept blades of last tick (by the sim's fighters, in their order) and the pending commands.
+   * Numbers are as they are (−0 kept); P13's canonical writer turns a non-finite one into "$inf", "$-inf" or "$nan".
+   *
+   * Saved by their owners, not here: `fighters` (Fighter.toRecord, in this array's order: it is the step order),
+   * `ais` (BrawlerAI.toRecord / the minds), `director` (AIDirector.toRecord: lastAttack; its `frame` is this tick).
+   * Not saved: `events` (cleared at the start of every tick), `speeds` and `sprinters` (written for every fighter
+   * before they are read, every tick), and what the world sets when it builds the sim (`walkable`, `ground`, `mover`,
+   * `world`, `physicsOwnsDowned`, `playerFighter`, `devChecks`).
+   */
+  toRecord(): CombatSimRecord {
+    const prevBlade: [number, V3[]][] = [];
+    for (const f of this.fighters) {
+      const pts = this.prevBlade.get(f);
+      if (pts) prevBlade.push([f.id, pts.map(v3Record)]);
+    }
+    return {
+      frame: this.frame,
+      rng: this.rng.state,
+      dropSerial: this.dropSerial,
+      projSerial: this.projSerial,
+      drops: this.drops.map(dropRecord),
+      projectiles: this.projectiles.map(projectileRecord),
+      prevBlade,
+      pending: this.commands.toRecord(),
+    };
+  }
+
+  /**
+   * Puts back a toRecord() state, re-linking fighters by id against `fighters` (default: the sim's own, which a loader
+   * has already added). Call it after every fighter has been made (making one can draw from this Rng) and before
+   * Fighter.restoreRecord, which re-links a weapon being reached for to its drop here. The arrays, the map, the Rng and
+   * the command queue keep their identity (brains share `drops` and `rng`). A broken record (a field missing or of the
+   * wrong kind, a weapon that doesn't exist, a fighter id that isn't among `fighters`) throws a `save record:` error
+   * before anything is changed. (A pending command's own fields are the command queue's to check; TODO(P13).)
+   */
+  restoreRecord(rec: CombatSimRecord, fighters: readonly Fighter[] = this.fighters): void {
+    const byId = (id: unknown, field: string): Fighter => {
+      const n = numFromRecord(id, field);
+      const f = fighters.find((o) => o.id === n);
+      if (!f) throw new Error(`save record: ${field} is fighter ${n}, who isn't among the fighters`);
+      return f;
+    };
+    // Everything is read first, so a broken record leaves the sim as it was.
+    const r = objFromRecord(rec, 'combat');
+    const frame = numFromRecord(r.frame, 'frame');
+    const rng = numFromRecord(r.rng, 'rng');
+    const dropSerial = numFromRecord(r.dropSerial, 'dropSerial');
+    const projSerial = numFromRecord(r.projSerial, 'projSerial');
+    const drops = arrFromRecord(r.drops, 'drops').map((d, i) => dropFromRecord(d, `drops[${i}]`));
+    const projectiles = arrFromRecord(r.projectiles, 'projectiles').map((p, i) => projectileFromRecord(p, `projectiles[${i}]`, byId));
+    const blades = arrFromRecord(r.prevBlade, 'prevBlade').map((e, i): [Fighter, Vector3[]] => {
+      const at = `prevBlade[${i}]`;
+      const pair = arrFromRecord(e, at);
+      if (pair.length !== 2) throw brokenRecord(at, e, '[fighter id, points]');
+      return [byId(pair[0], `${at}[0]`), arrFromRecord(pair[1], `${at}[1]`).map((v, j) => vecFromRecord(v, `${at}[1][${j}]`))];
+    });
+    const pending = arrFromRecord(r.pending, 'pending').map((c, i) => objFromRecord(c, `pending[${i}]`)) as unknown as Command[];
+    this.commands.restoreRecord(pending);
+    this.frame = frame;
+    this.rng.state = rng;
+    this.dropSerial = dropSerial;
+    this.projSerial = projSerial;
+    this.drops.length = 0;
+    this.drops.push(...drops);
+    this.projectiles.length = 0;
+    this.projectiles.push(...projectiles);
+    this.prevBlade.clear();
+    for (const [f, pts] of blades) this.prevBlade.set(f, pts);
+    // As at the end of a tick: no events left from before, the director on this tick, the per-tick scratch empty.
+    this.events.length = 0;
+    this.director.frame = this.frame;
+    this.speeds.clear();
+    this.sprinters.clear();
   }
 
   opponents(f: Fighter): Fighter[] {
@@ -2104,6 +2188,192 @@ export class CombatSim {
   }
 }
 
+// ---------------------------------------------------------------------------
+// CombatSim's save records (docs/M1-DESIGN.md §8.3; MAP gap-7 §3.1, §6). Plain data, keys in a fixed order: fighters by
+// id, weapons by id, vectors as V3, sets as arrays in their insertion order. P13 places them in SaveV1: `frame` is
+// `tick`, `rng` is `rng.combat`, the serials are `counters.dropSerial`/`counters.projSerial`, `drops`, `projectiles`,
+// `pending` as they are, and `prevBlade` is a new field, `prevBlade: [number, V3[]][]` (MAP gap-7 §3.1: save it, or
+// resumes keep a different set of swept blades). TODO(P13): §8.3's SaveV1 doesn't list it yet; add it there, to
+// save/schema.ts's SaveV1 and to the save's completeness inventory.
+// ---------------------------------------------------------------------------
+
+/** A weapon in a record: P04's WeaponRecord (sim/fighter.ts), the one shape for a weapon in the save. */
+export type CombatWeaponRecord = WeaponRecord;
+
+// The records are type aliases, not interfaces, so they are assignable to the save's `{ id: number; [field: string]:
+// unknown }` placeholders (save/schema.ts's DropRecV1 and ProjRecV1) until P13 gives those their exact fields.
+
+/** A weapon lying around (Drop); `from` null when it was placed rather than let go of. */
+export type DropRecord = {
+  id: number;
+  weapon: CombatWeaponRecord;
+  pos: V3;
+  yaw: number;
+  from: V3 | null;
+};
+
+/** A weapon in flight (Projectile): its thrower by fighter id, `passed` as fighter ids in the order they got out of its way. */
+export type ProjectileRecord = {
+  id: number;
+  serial: number;
+  weapon: CombatWeaponRecord;
+  owner: number;
+  scale: number;
+  pos: V3;
+  vel: V3;
+  axis: V3;
+  omega: number;
+  angle: number;
+  dir0: V3;
+  com: number;
+  live: boolean;
+  age: number;
+  passed: number[] | null;
+};
+
+/** CombatSim's own state (CombatSim.toRecord), in this key order. */
+export type CombatSimRecord = {
+  /** The last tick run (the world's tick). */
+  frame: number;
+  /** CombatSim.rng's state (uint32); brains share this Rng, so it is restored in place. */
+  rng: number;
+  dropSerial: number;
+  projSerial: number;
+  drops: DropRecord[];
+  projectiles: ProjectileRecord[];
+  /** [fighter id, its blade points at the end of last tick], in the sim's fighter order. */
+  prevBlade: [number, V3[]][];
+  /** The command queue, in queue order (CommandQueue.toRecord). */
+  pending: Command[];
+};
+
+// The readers take a record as `unknown` and check every field they take back, with body/animator.ts's readers (P04):
+// anything missing or of the wrong kind throws a `save record:` error naming the field, never a TypeError.
+
+function brokenRecord(field: string, v: unknown, what: string): Error {
+  return new Error(`save record: ${field} is ${v === undefined ? 'missing' : JSON.stringify(v)}, not ${what}`);
+}
+
+/** A plain object read back from a record (not null, not an array); anything else throws. */
+function objFromRecord(v: unknown, field: string): Readonly<Record<string, unknown>> {
+  if (v !== null && typeof v === 'object' && !Array.isArray(v)) return v as Record<string, unknown>;
+  throw brokenRecord(field, v, 'an object');
+}
+
+/** An array read back from a record; anything else throws. */
+function arrFromRecord(v: unknown, field: string): readonly unknown[] {
+  if (Array.isArray(v)) return v;
+  throw brokenRecord(field, v, 'an array');
+}
+
+/** A V3 record read back into a new Vector3 (readV3 checks each of x, y and z). */
+function vecFromRecord(v: unknown, field: string): Vector3 {
+  return readV3(objFromRecord(v, field) as unknown as V3, new Vector3(), field);
+}
+
+/** An own property of a table (a weapon id never reaches the prototype). */
+function ownWeapon(id: string): WeaponDef | undefined {
+  return Object.prototype.hasOwnProperty.call(WEAPONS, id) ? WEAPONS[id as WeaponId] : undefined;
+}
+
+// TODO(P04): fighter.ts's weaponRecord/weaponFromRecord and clonePlain are these; use them once they are exported.
+function weaponRecord(w: WeaponDef): CombatWeaponRecord {
+  return { id: w.id, def: ownWeapon(w.id) === w ? null : plainCopy(w) };
+}
+
+/**
+ * A WEAPONS entry by id, or a synthesised tool's definition by value (whose id must be the record's). The definition's
+ * own fields are copied as they are: they are the WeaponDef type's, checked by P13's schema validation of the save
+ * (docs/M1-DESIGN.md §8.3), as P04's Fighter records leave them.
+ */
+function weaponFromRecord(v: unknown, field: string): WeaponDef {
+  const r = objFromRecord(v, field);
+  const id = strFromRecord(r.id, `${field}.id`);
+  if (r.def !== null) {
+    const def = objFromRecord(r.def, `${field}.def`);
+    if (def.id !== id) throw brokenRecord(`${field}.def.id`, def.id, `the record's weapon id ${JSON.stringify(id)}`);
+    return plainCopy(def) as unknown as WeaponDef;
+  }
+  const w = ownWeapon(id);
+  if (!w) throw new Error(`save record: ${field} is weapon ${JSON.stringify(id)}, which doesn't exist`);
+  return w;
+}
+
+/** A deep copy of plain data in its key order, leaving out undefined values (a WeaponDef is numbers, strings and a map). */
+function plainCopy<T>(v: T): T {
+  if (Array.isArray(v)) return v.map((x) => plainCopy(x)) as T;
+  if (v !== null && typeof v === 'object') {
+    const o: Record<string, unknown> = {};
+    for (const k of Object.keys(v)) {
+      const x = (v as Record<string, unknown>)[k];
+      if (x !== undefined) o[k] = plainCopy(x);
+    }
+    return o as T;
+  }
+  return v;
+}
+
+function dropRecord(d: Drop): DropRecord {
+  return { id: d.id, weapon: weaponRecord(d.weapon), pos: v3Record(d.pos), yaw: d.yaw, from: d.from ? v3Record(d.from) : null };
+}
+
+function dropFromRecord(v: unknown, at: string): Drop {
+  const r = objFromRecord(v, at);
+  return {
+    id: numFromRecord(r.id, `${at}.id`),
+    weapon: weaponFromRecord(r.weapon, `${at}.weapon`),
+    pos: vecFromRecord(r.pos, `${at}.pos`),
+    yaw: numFromRecord(r.yaw, `${at}.yaw`),
+    // (As addDrop makes it: the key is there, undefined for a placed weapon.)
+    from: r.from === null ? undefined : vecFromRecord(r.from, `${at}.from`),
+  };
+}
+
+function projectileRecord(p: Projectile): ProjectileRecord {
+  return {
+    id: p.id,
+    serial: p.serial,
+    weapon: weaponRecord(p.weapon),
+    owner: p.owner.id,
+    scale: p.scale,
+    pos: v3Record(p.pos),
+    vel: v3Record(p.vel),
+    axis: v3Record(p.axis),
+    omega: p.omega,
+    angle: p.angle,
+    dir0: v3Record(p.dir0),
+    com: p.com,
+    live: p.live,
+    age: p.age,
+    passed: p.passed ? [...p.passed].map((f) => f.id) : null,
+  };
+}
+
+function projectileFromRecord(v: unknown, at: string, byId: (id: unknown, field: string) => Fighter): Projectile {
+  const r = objFromRecord(v, at);
+  const n = (k: string) => numFromRecord(r[k], `${at}.${k}`);
+  const vec = (k: string) => vecFromRecord(r[k], `${at}.${k}`);
+  // (Keys in the order CombatSim.release makes them; `passed` only once someone has got out of its way.)
+  const p: Projectile = {
+    id: n('id'),
+    serial: n('serial'),
+    weapon: weaponFromRecord(r.weapon, `${at}.weapon`),
+    owner: byId(r.owner, `${at}.owner`),
+    scale: n('scale'),
+    pos: vec('pos'),
+    vel: vec('vel'),
+    axis: vec('axis'),
+    omega: n('omega'),
+    angle: n('angle'),
+    dir0: vec('dir0'),
+    com: n('com'),
+    live: boolFromRecord(r.live, `${at}.live`),
+    age: n('age'),
+  };
+  if (r.passed !== null) p.passed = new Set(arrFromRecord(r.passed, `${at}.passed`).map((id, i) => byId(id, `${at}.passed[${i}]`)));
+  return p;
+}
+
 /**
  * A VERB_TUNING value (world/verbs/tuning.ts, P14), read through the registry by name at use time: combat.ts never
  * imports a world module (docs/M1-DESIGN.md §4.4). Reached only in world mode, where the verb system has registered
@@ -2135,24 +2405,19 @@ function faceWork(f: Fighter, w: Work) {
 }
 
 /**
- * How sharp a blade without its own `sharpness` counts in the thrown rule (docs/M1-DESIGN.md §4.4: "default
- * `edge === 'blade' ? 0.8 : 0`"). TODO(P02a-fix): a §9 starting value with no table yet; it belongs in DAMAGE_TUNING
- * (sim/rules.ts) as `bladeSharpness` 0.8 (unit sharpness, source §4.4, D-12). Only DungeonStyle's weapons lack the
- * field; every tool the world makes carries its head's sharpness (synthWeapon, §5.2).
- */
-const BLADE_SHARPNESS = 0.8;
-
-/**
  * A thrown weapon's blow by the one damage rule (world mode; docs/M1-DESIGN.md §4.4, D-12): m_eff = the reduced mass of
  * the weapon and the struck bone, v = the arriving part's speed relative to the body, s = the weapon's sharpness when
  * its point or edge leads (DungeonStyle's leading test), else 0; HP = max(0, E − T) / K against the zone's toughness.
+ * A weapon without its own `sharpness` (only DungeonStyle's lack it; every tool the world makes carries its head's,
+ * synthWeapon §5.2) counts as DAMAGE_TUNING.bladeSharpness when it is a blade (§4.4: "default `edge === 'blade' ? 0.8 :
+ * 0`") and 0 when blunt.
  * A ruler's zone and toughness are its own rule's (rulerHit classifies the zone, §4.6), so for a ruler T = 0 here and
  * `hp` carries E / K: rulerHit recovers E = hp × K.
  */
 function thrownRule(d: Fighter, zone: HurtZone, bone: BoneName, w: WeaponDef, mass: number, vp: Vector3, leads: boolean): RuleBlow {
   const mEff = reducedMass(mass, boneMass(d, bone));
   const v = Math.hypot(vp.x - d.vel.x - d.walkVel.x, vp.y, vp.z - d.vel.z - d.walkVel.z);
-  const s = leads ? (w.sharpness ?? (w.edge === 'blade' ? BLADE_SHARPNESS : 0)) : 0;
+  const s = leads ? (w.sharpness ?? (w.edge === 'blade' ? DAMAGE_TUNING.bladeSharpness : 0)) : 0;
   const energy = impactEnergy(mEff, v, s);
   const toughness = d.ruler ? 0 : zoneToughness(d, zone);
   return { hp: hpFromEnergy(energy, toughness), energy, toughness };
