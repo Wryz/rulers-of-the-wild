@@ -192,19 +192,34 @@ export interface ContactRecV1 {
   cooldownUntil: number;
 }
 
-/** A creature mind (§6.8). */
+/**
+ * A creature mind (§6.8; CreatureMind.toRecord, world/creatures/mind.ts, in this key order). Additions to §6.8 (P19,
+ * each so a load continues exactly as the saving world would have):
+ * - `resume`: the state a creature knocked down goes back to once it is up (§6.3 `down`: "→ the previous state");
+ * - `mark`: a tick the current state measures from (the ape: when its look-around began, since when its fight's target
+ *   has been out of reach), −1 when unset;
+ * - `stimulus`: the senses' decision window (the awareness the strongest stimulus since the last decision added,
+ *   Infinity after a hurt; perception.ts);
+ * - `home`: the home point (the spawner's home, or where a creature made without one was made); `homeIdx` names the
+ *   spawn data's home it came from (−1 none);
+ * - `path.complete`: whether the path reaches its goal (a partial path's end counts as a failure, §6.5).
+ */
 export interface MindRecV1 {
   fighter: number;
   kind: 'ape' | 'giantApe';
   state: MindState;
   stateTick: number;
+  resume: MindState | null;
+  mark: number;
   paused: boolean;
   script: MindScript | null;
   awareness: [number, number][];
   lkp: V3 | null;
   lkpTick: number;
   lastSeenTick: number;
+  stimulus: number;
   hurt: { tick: number; point: V3 } | null;
+  home: { x: number; z: number };
   homeIdx: number;
   routeIdx: number;
   restUntil: number;
@@ -212,7 +227,7 @@ export interface MindRecV1 {
   fleeUntil: number;
   heading: number;
   charge: { heading: number; start: V3; travelled: number; close: boolean } | null;
-  path: { points: V3[]; i: number; goal: V3; tiles: number[]; versions: number[]; requestTick: number; pending: boolean } | null;
+  path: { points: V3[]; i: number; goal: V3; complete: boolean; tiles: number[]; versions: number[]; requestTick: number; pending: boolean } | null;
   stuck: { pos: V3; tick: number; count: number };
   rng: number;
   inner: BrawlerRecV1 | null;
