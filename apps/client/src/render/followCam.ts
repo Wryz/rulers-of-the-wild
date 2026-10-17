@@ -39,6 +39,8 @@ export const FOLLOW_TUNING = defineTuning(
     // Not a §9.1 row (P34 DEVIATIONS): a blend between cameras far apart (the giant's fight framing is ~16 m back) is
     // slowed so the view never moves faster than this, whatever blendS says (P34's test: no jump > 0.5 m a frame).
     blendMaxSpeed: 18,
+    /** And never turns faster than this (a fight behind you is a long swing round; P34's test: < 3° a frame). */
+    blendMaxTurnDegS: 120,
   },
   {
     distance: { unit: 'm', source: 'NEW (§10.6)', min: 1, max: 15, step: 0.1 },
@@ -64,6 +66,7 @@ export const FOLLOW_TUNING = defineTuning(
     aimFovMul: { unit: '×', source: 'NEW (§10.6)', min: 0.3, max: 1.5, step: 0.01 },
     fightRangeM: { unit: 'm', source: 'DS (lock-on camera range)', min: 1, max: 40, step: 0.5 },
     blendMaxSpeed: { unit: 'm/s', source: 'NEW (P34): caps the follow ↔ fight blend', min: 1, max: 100, step: 1, label: 'blend max speed' },
+    blendMaxTurnDegS: { unit: '°/s', source: 'NEW (P34): caps the follow ↔ fight blend', min: 10, max: 1000, step: 5, label: 'blend max turn' },
   },
 );
 
@@ -107,16 +110,16 @@ export class FollowCam {
 
   /** The chest point the boom turns about (eased toward the player). */
   private readonly pivot = new Vector3();
-  /** The point the view looks at: the pivot moved `shoulder` to the right. */
-  private readonly lookAt = new Vector3();
+  /** The point the view looks at: the pivot moved `shoulder` to the right (the boom's root). */
+  private readonly aimPoint = new Vector3();
   // Eased toward their targets (so zoom, aim and the giant's pull-back never pop):
   private dist = FOLLOW_TUNING.distance;
   private shoulder = FOLLOW_TUNING.shoulder;
   private fovMul = 1;
   private rulerPull = 0;
   private rulerTilt = 0;
-  /** How far the camera is raised over the boom so the boom clears the terrain (m; rises at once, settles eased). */
-  private lift = 0;
+  /** How much shorter than asked the boom is, pulled in by the terrain (m; in at once, back out eased). */
+  private pulledIn = 0;
   private snapNext = true;
   /** Rulers that have been on screen since they came within FOLLOW_TUNING.rulerRangeM. */
   private readonly seen = new Set<Fighter>();
@@ -173,33 +176,81 @@ export class FollowCam {
     const fx = Math.sin(this.yaw);
     const fz = Math.cos(this.yaw);
     const len = this.dist + this.rulerPull;
-    this.lookAt.set(this.pivot.x - fz * this.shoulder, this.pivot.y, this.pivot.z + fx * this.shoulder);
-    const cp = Math.cos(pitch);
-    _cam.set(this.lookAt.x - fx * cp * len, this.lookAt.y + Math.sin(pitch) * len, this.lookAt.z - fz * cp * len);
-
-    // Tested against the terrain at boomSamples points from the shoulder to the camera: raising the camera's end by h
-    // raises the sample at u by h·u, so the lift that clears every sample is the largest (shortfall / u).
+    const root = this.aimPoint.set(this.pivot.x - fz * this.shoulder, this.pivot.y, this.pivot.z + fx * this.shoulder);
     const clear = T.clearance;
     const n = Math.max(1, Math.round(T.boomSamples));
-    let need = 0;
+    /** The boom's direction at pitch `p`. */
+    const boomAt = (p: number, out: Vector3) => out.set(-fx * Math.cos(p), Math.sin(p), -fz * Math.cos(p));
+    /** How far over ground + clearance the boom along `dir` is, `sM` m out. */
+    const margin = (dir: Vector3, sM: number) => root.y + dir.y * sM - ground(root.x + dir.x * sM, root.z + dir.z * sM) - clear;
+    /** Are all boomSamples points of an `arm` m boom along `dir` clear of the terrain? */
+    const clearAlong = (dir: Vector3, arm: number) => {
+      for (let i = 1; i <= n; i++) if (margin(dir, (arm * i) / n) < 0) return false;
+      return true;
+    };
+
+    // 1. A spring arm: the boom comes in to where it first meets the terrain (found at boomSamples points along it,
+    //    then pinned down by bisection), no nearer than minDistance, at once; it goes back out eased. Its pitch is kept,
+    //    so the view turns where it is asked.
+    boomAt(pitch, _boom);
+    const minLen = Math.min(T.minDistance, len);
+    let reach = len;
+    for (let i = 1; i <= n; i++) {
+      const sM = (len * i) / n;
+      if (margin(_boom, sM) >= 0) continue;
+      let lo = (len * (i - 1)) / n;
+      let hi = sM;
+      for (let j = 0; j < BISECT; j++) {
+        const mid = (lo + hi) / 2;
+        if (margin(_boom, mid) >= 0) lo = mid;
+        else hi = mid;
+      }
+      reach = lo;
+      break;
+    }
+    reach = Math.max(minLen, reach);
+    this.pulledIn = this.snapNext ? len - reach : Math.max(len - reach, this.pulledIn * (1 - k));
+    const arm = clamp(len - this.pulledIn, minLen, reach);
+
+    // 2. In at minDistance and still under the hill: the boom tilts up (bisection on the pitch) until it clears, and the
+    //    pitch becomes that one, so looking further up doesn't pile up unseen and the next look down answers at once.
+    let p = pitch;
+    if (!clearAlong(_boom, arm)) {
+      if (clearAlong(boomAt(maxP, _probe), arm)) {
+        let lo = pitch;
+        let hi = maxP;
+        for (let j = 0; j < BISECT; j++) {
+          const mid = (lo + hi) / 2;
+          if (clearAlong(boomAt(mid, _probe), arm)) hi = mid;
+          else lo = mid;
+        }
+        p = hi;
+      } else p = maxP;
+      boomAt(p, _boom);
+    }
+    _cam.copy(root).addScaledVector(_boom, arm);
+
+    // 3. Whatever still doesn't clear (a pit's walls steeper than maxPitchDeg) is lifted, measured at the same points
+    //    from the shoulder to the camera: raising the camera's end by h raises the point at u by h·u, so the lift that
+    //    clears them all is the largest (shortfall / u). The floor only guards a degenerate table (boomSamples 0, NaN).
+    let lift = 0;
     for (let i = 1; i <= n; i++) {
       const u = i / n;
-      const x = this.lookAt.x + (_cam.x - this.lookAt.x) * u;
-      const z = this.lookAt.z + (_cam.z - this.lookAt.z) * u;
-      const y = this.lookAt.y + (_cam.y - this.lookAt.y) * u;
-      const short = ground(x, z) + clear - y;
-      if (short > 0) need = Math.max(need, short / u);
+      const short = ground(root.x + (_cam.x - root.x) * u, root.z + (_cam.z - root.z) * u) + clear - (root.y + (_cam.y - root.y) * u);
+      if (short > 0) lift = Math.max(lift, short / u);
     }
-    this.lift = this.snapNext ? need : Math.max(need, this.lift + (need - this.lift) * k);
-    _cam.y += this.lift;
-    // (The samples include the camera itself, so this only guards a degenerate table: boomSamples 0, a NaN.)
-    _cam.y = Math.max(_cam.y, ground(_cam.x, _cam.z) + clear);
+    const y0 = _cam.y;
+    _cam.y = Math.max(_cam.y + lift, ground(_cam.x, _cam.z) + clear);
+    if (p > pitch || _cam.y > y0) {
+      const achieved = Math.atan2(_cam.y - root.y, Math.hypot(_cam.x - root.x, _cam.z - root.z));
+      if (achieved + this.rulerTilt > this.pitch) this.pitch = clamp(achieved + this.rulerTilt, minP, maxP);
+    }
     this.snapNext = false;
 
     const cam = this.camera;
     cam.position.copy(_cam);
     cam.up.set(0, 1, 0);
-    cam.lookAt(this.lookAt);
+    cam.lookAt(root);
     setLens(cam, CAMERA_TUNING.fov * this.fovMul);
     cam.updateMatrixWorld();
   }
@@ -207,6 +258,11 @@ export class FollowCam {
   /** The ground forward/right of this camera (move commands are relative to it). */
   moveBasis(): { forward: Vector3; right: Vector3 } {
     return basisOf(this.yaw);
+  }
+
+  /** The point the view looks at (world; the shoulder point, the boom's root). Read-only. */
+  get lookPoint(): Readonly<Vector3> {
+    return this.aimPoint;
   }
 
   /** Behind `f` at once (a respawn): its facing, the default tilt, the pivot on its chest next frame. */
@@ -245,6 +301,10 @@ const wrap = (a: number) => Math.atan2(Math.sin(a), Math.cos(a));
 
 const _target = new Vector3();
 const _cam = new Vector3();
+const _boom = new Vector3();
+const _probe = new Vector3();
+/** Bisection steps for the boom's reach and tilt (a numerical device, not a starting value: 2⁻²⁴ of the interval). */
+const BISECT = 24;
 const _dir = new Vector3();
 const _m = new Matrix4();
 const _frustum = new Frustum();
