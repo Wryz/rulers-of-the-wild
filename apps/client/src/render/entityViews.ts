@@ -645,7 +645,9 @@ export class EntityViews {
       const placed = f.placed(e);
       if (placed) M.copy(placed);
       else lerpPoseMatrix(e.prevPose, e.pose, f.alpha, M);
-      const blood = f.blood(e);
+      // (In twentieths: blood dries a little every frame, and an entity with a mesh of its own is rebuilt on a colour
+      // change.)
+      const blood = Math.round(f.blood(e) * 20) / 20;
       entityColour(e, blood, _col);
       const bend = this.bendOf(e, f.capacity(e));
       if (bend || e.crossCut) this.drawOwn(e, M, bend);
@@ -750,7 +752,10 @@ export class EntityViews {
     const down = new Vector3(0, -1, 0).applyQuaternion(_q3);
     down.addScaledVector(axis, -down.dot(axis));
     // (An axis is a coordinate axis of the shape: any other coordinate axis is across it.)
-    if (down.lengthSq() < 0.1) down.set(axis.x !== 0 ? 0 : 1, axis.x !== 0 ? 0 : 0, axis.x !== 0 ? 1 : 0);
+    if (down.lengthSq() < 0.1) {
+      if (axis.x !== 0) down.set(0, 0, 1);
+      else down.set(1, 0, 0);
+    }
     down.normalize();
     const q = (v: number) => Math.round(v * 4) / 4;
     return { m: amount, dir: { x: down.x, y: down.y, z: down.z }, key: `${amount.toFixed(3)}:${q(down.x)},${q(down.y)},${q(down.z)}` };

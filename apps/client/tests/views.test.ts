@@ -37,7 +37,7 @@ import {
   type WorldOptions,
   type WoundRecord,
 } from '@wild/sim';
-import type { BodyPose, ViewFrame } from '../src/game/ports';
+import type { BodyPose, SimEvent, ViewFrame } from '../src/game/ports';
 import { entityColour, EntityViews, notchDepthAt, protoOf, unitPrism } from '../src/render/entityViews';
 import { FighterView } from '../src/render/fighterView';
 import { crownRadius } from '../src/render/forestView';
@@ -713,6 +713,34 @@ describe('held and stowed things', () => {
     views.sync(w, 0, new Vector3(0, 2, -4), frame({ gore: 'off' }));
     const clean = views.entities.slotOf(stick)!.inst.colorAt(views.entities.slotOf(stick)!.index);
     expect(bloody.r / Math.max(1e-6, bloody.g)).toBeGreaterThan(clean.r / Math.max(1e-6, clean.g) * 1.2);
+    views.dispose();
+  });
+});
+
+describe('blood on what struck', () => {
+  it('bloodies the entity a world impact wounded with, and not with gore off', async () => {
+    const w = await make({ player: true });
+    const stake = spawnStick(w, { p: { x: 2, y: 0.7, z: 0 }, q: { x: 0, y: 0, z: 0, w: 1 }, length: 1.4, r: 0.05, sharp: { end: 1, s: 0.6 } });
+    const scene = new Scene();
+    const views = new WorldViews(scene, w);
+    views.sync(w, 0, new Vector3(0, 2, -4), frame());
+    const colour = () => {
+      const s = views.entities.slotOf(stake)!;
+      return s.inst.colorAt(s.index);
+    };
+    const clean = colour();
+    const impact = {
+      type: 'impact',
+      defender: w.player!,
+      damage: 20,
+      cause: { kind: 'entity', entityId: stake, fighterId: null, credit: [], held: false, feature: 'sharpPoint' },
+    } as unknown as SimEvent;
+    views.handle(impact, w);
+    views.sync(w, 0, new Vector3(0, 2, -4), frame());
+    const bloody = colour();
+    expect(bloody.r / bloody.g).toBeGreaterThan((clean.r / clean.g) * 1.3);
+    views.sync(w, 0, new Vector3(0, 2, -4), frame({ gore: 'off' }));
+    expect(colour().r / colour().g).toBeCloseTo(clean.r / clean.g, 6);
     views.dispose();
   });
 });

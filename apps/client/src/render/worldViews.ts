@@ -55,6 +55,8 @@ export class WorldViews implements WorldViewsPort {
   private gore: GoreLevel = 'full';
   /** The world last synced (the held tools' tips). */
   private world: World | null = null;
+  /** Blood a world impact left on the entity that struck (a stake that wounded, a thrown spear): 0..1 by entity id. */
+  private readonly struck = new Map<number, number>();
 
   constructor(
     private readonly scene: Scene,
@@ -89,8 +91,9 @@ export class WorldViews implements WorldViewsPort {
       skip: (e) => this.forest.owns(e),
       placed: (e) => this.placed(e, holds),
       blood: (e) => {
+        if (this.gore === 'off') return 0;
         const h = holds.get(e.id);
-        return h && h.slot === 'hand' && this.gore !== 'off' ? h.v.weaponBlood : 0;
+        return Math.max(h && h.slot === 'hand' ? h.v.weaponBlood : 0, this.struck.get(e.id) ?? 0);
       },
       capacity: (e) => capacityOf(world, e),
     });
@@ -101,16 +104,25 @@ export class WorldViews implements WorldViewsPort {
       handOf: (id) => byId.get(id)?.fist() ?? null,
     });
     this.grass.sync(world, player ? player.pos : cam);
+    for (const id of this.struck.keys()) if (!world.entities.get(id)) this.struck.delete(id);
   }
 
   fighterView(f: Fighter): FighterViewAdapter | null {
     return this.fighters.get(f) ?? null;
   }
 
-  /** The views' own reactions to an event: DS's (blood on what hit, a hit flash, a torn piece, a skull blow), a chop's. */
+  /**
+   * The views' own reactions to an event: DS's (blood on what hit, a hit flash, a torn piece, a skull blow), a chop's,
+   * and blood on the entity a world impact wounded with (rule 12: none with gore off).
+   */
   handle(e: SimEvent, _world: World): void {
     if (e.type === 'chop') {
       this.forest.handle(e);
+      return;
+    }
+    if (e.type === 'impact') {
+      const id = e.cause.entityId;
+      if (id !== null && e.damage > 0 && this.gore !== 'off') this.struck.set(id, Math.min(1, (this.struck.get(id) ?? 0) + 0.2 + e.damage / 40));
       return;
     }
     if (e.type === 'respawn') {
@@ -241,7 +253,6 @@ export class WorldViews implements WorldViewsPort {
     if (fist && fist.distanceTo(start) > fist.distanceTo(end)) return start;
     return end;
   }
-
 }
 
 const ONE = new Vector3(1, 1, 1);
