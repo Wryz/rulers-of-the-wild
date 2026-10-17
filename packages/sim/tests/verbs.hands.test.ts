@@ -17,7 +17,7 @@ import { groundRestY, logPrism, LYING_ALONG_X, prismRForMass, spawnBox, spawnLog
 import { PHYSICS_TUNING, physicsReady } from '../src/world/physics';
 import type { Anchor, JointRecord, V3, WorldEvent } from '../src/world/types';
 import { type VerbStateRecord } from '../src/world/verbs/index';
-import { validateVerb, verbsFor } from '../src/world/verbs/targets';
+import { validateVerb, type VerbHandler, verbsFor, withVerbHandler } from '../src/world/verbs/targets';
 import { heldMembers, verbGeom } from '../src/world/verbs/tools';
 import { VERB_TUNING } from '../src/world/verbs/tuning';
 import { createWorld, type World } from '../src/world/world';
@@ -693,6 +693,104 @@ describe('the radial (§5.13) and validation (§5.0)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Continuous verbs (§5.0, §5.4, §5.12): the machinery P15 and P16 plug into, on stand-in handlers
+// ---------------------------------------------------------------------------
+
+describe('continuous verbs (the shared machinery, on stand-in handlers)', () => {
+  it('a repeating verb strokes while on, stops when the player moves, on charge 0, and on a knockdown', async () => {
+    const w = await make();
+    const p = w.player!;
+    w.step();
+    let strokes = 0;
+    let stops = 0;
+    const handler: VerbHandler = {
+      verb: 'shape',
+      target: 'none',
+      continuous: 'repeat',
+      validate: () => null,
+      start: (_w, f) => ({ frames: 10, actAt: 5, faceAt: { x: f.pos.x, y: f.pos.y, z: f.pos.z }, keys: [] }),
+      land: () => {
+        strokes++;
+      },
+      stop: () => {
+        stops++;
+      },
+    };
+    withVerbHandler(handler, () => {
+      // On: a stroke every 10 frames while free and still.
+      verb(w, { verb: 'shape', target: 0, charge: 1 });
+      run(w, 45);
+      expect(strokes).toBe(4);
+      expect(w.verbs.continuousOf(p)?.verb).toBe('shape');
+      // Off (charge 0), in any state: the stroke under way finishes, no other starts.
+      verb(w, { verb: 'shape', target: 0, charge: 0 });
+      run(w, 40);
+      expect(strokes).toBeLessThanOrEqual(5);
+      expect(w.verbs.continuousOf(p)).toBeNull();
+      expect(stops).toBe(1);
+      // On again, then the player walks off: it stops at the next restart.
+      const before = strokes;
+      verb(w, { verb: 'shape', target: 0, charge: 1 });
+      run(w, 12);
+      run(w, 30, () => w.commands.push(moveCommand(w.tick + 1, 1, 1, 0)));
+      expect(w.verbs.continuousOf(p)).toBeNull();
+      expect(stops).toBe(2);
+      expect(strokes - before).toBeLessThanOrEqual(2);
+      // On again, then knocked down: off at once.
+      run(w, 10, () => w.commands.push(moveCommand(w.tick + 1, 1, 0, 0)));
+      verb(w, { verb: 'shape', target: 0, charge: 1 });
+      run(w, 3);
+      expect(w.verbs.continuousOf(p)).not.toBeNull();
+      p.enterKnockdown();
+      w.step();
+      expect(w.verbs.continuousOf(p)).toBeNull();
+      expect(stops).toBe(3);
+    });
+  });
+
+  it('a held verb runs every phase 4d while on, counts its ticks, and stops when its hold says so or on charge 0', async () => {
+    const w = await make();
+    const p = w.player!;
+    w.step();
+    const seen: number[] = [];
+    let stops = 0;
+    const handler: VerbHandler = {
+      verb: 'pull',
+      target: 'none',
+      continuous: 'hold',
+      validate: () => null,
+      start: () => null,
+      hold: (_w, _f, s) => {
+        seen.push(s.ticks);
+        s.data.n = (s.data.n ?? 0) + 1;
+        return s.data.n < 5;
+      },
+      stop: () => {
+        stops++;
+      },
+    };
+    withVerbHandler(handler, () => {
+      verb(w, { verb: 'pull', target: 0, charge: 255 });
+      run(w, 10);
+      expect(seen).toEqual([1, 2, 3, 4, 5]);
+      expect(w.verbs.continuousOf(p)).toBeNull();
+      expect(stops).toBe(1);
+      // While walking (a held verb is no work action), then off by charge 0.
+      verb(w, { verb: 'pull', target: 0, charge: 255 });
+      run(w, 2, () => w.commands.push(moveCommand(w.tick + 1, 1, 0, 1)));
+      expect(w.verbs.continuousOf(p)?.ticks).toBe(2);
+      expect(p.state).not.toBe('pickup');
+      verb(w, { verb: 'pull', target: 0, charge: 0 });
+      w.step();
+      expect(w.verbs.continuousOf(p)).toBeNull();
+      expect(stops).toBe(2);
+    });
+    // Outside the stand-in, the verb is P16's again (refused until P16 registers it).
+    expect(validateVerb(w, p, { tick: 0, player: 1, kind: 'verb', verb: 'pull', target: 0, charge: 255 }).ok).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // The save record (§8.3) and the creature tug (§6.6)
 // ---------------------------------------------------------------------------
 
@@ -723,6 +821,10 @@ describe('the verb system’s record', () => {
     w.verbs.restoreRecord([]);
     expect(w.verbs.toRecord()).toEqual([]);
     expect(() => w.verbs.restoreRecord([{ fighter: 1 }])).toThrow(/no focus/);
+    // A removed fighter's state goes with it.
+    w.verbs.restoreRecord(JSON.parse(json));
+    w.removeFighter(p);
+    expect(w.verbs.toRecord()).toEqual([]);
   });
 
   it('a creature’s tug hauls its bait with the drag code at creature strength', async () => {

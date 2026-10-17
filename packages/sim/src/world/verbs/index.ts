@@ -283,13 +283,14 @@ export class VerbSystem {
   // Save records (§8.3)
   // -------------------------------------------------------------------------
 
-  /** One record per fighter with any verb state, by fighter id. */
+  /** One record per fighter in the world with any verb state, by fighter id (a removed fighter's state is gone). */
   toRecord(): VerbStateRecV1[] {
     const out: VerbStateRecord[] = [];
+    const present = new Set(this.world.combat.fighters.map((f) => f.id));
     const ids = [...this.byFighter.keys()].sort((a, b) => a - b);
     for (const id of ids) {
       const s = this.byFighter.get(id)!;
-      if (!s.focus && !s.cont && !s.tug) continue;
+      if (!present.has(id) || (!s.focus && !s.cont && !s.tug)) continue;
       out.push({
         fighter: id,
         focus: s.focus ? { target: s.focus.target, at: s.focus.at ? copy3(s.focus.at) : null } : null,

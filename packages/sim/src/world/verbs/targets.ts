@@ -115,6 +115,21 @@ export function verbHandler(verb: VerbId): VerbHandler | undefined {
   return HANDLERS.get(verb);
 }
 
+/**
+ * Tests only: runs `run` with `h` standing in for its verb's handler (registered or not), then puts back what was there,
+ * so the shared machinery can be tested on a stand-in verb without registering one for good.
+ */
+export function withVerbHandler<T>(h: VerbHandler, run: () => T): T {
+  const was = HANDLERS.get(h.verb);
+  HANDLERS.set(h.verb, h);
+  try {
+    return run();
+  } finally {
+    if (was) HANDLERS.set(h.verb, was);
+    else HANDLERS.delete(h.verb);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Points: the chest, the hand, rope anchors and segments
 // ---------------------------------------------------------------------------
