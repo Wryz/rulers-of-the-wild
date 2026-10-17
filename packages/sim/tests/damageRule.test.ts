@@ -101,6 +101,14 @@ describe('calibration (§4.3, SPEC:292-301 with bone m_eff, D-3: 1 %)', () => {
     near(hpFromEnergy(E.full, RULER_ZONE_TUNING.defaultJ), 3713);
   });
 
+  it('an axe perfect counter of 73.98 dmg on a knee: 1,331.7 J, 40.65 HP (melee through the rule, §4.4)', () => {
+    // E = dmg × meleeJPerDmg (SPEC:283); a knee is a soft zone (softJ 600 J, SPEC:875); HP = (E − T) / K.
+    const E = 73.98 * DAMAGE_TUNING.meleeJPerDmg;
+    near(E, 1331.7);
+    near(hpFromEnergy(E, RULER_ZONE_TUNING.softJ), 40.65);
+    expect(hpFromEnergy(E, RULER_ZONE_TUNING.softJ)).toBeCloseTo(Math.max(0, E - RULER_ZONE_TUNING.softJ) / DAMAGE_TUNING.K, 12);
+  });
+
   it('players and apes: a 300 kg log dropped 4 m on a head is 11.8 HP and pressed (Δv 7.1 m/s down); on an ape’s chest 40.8 HP', () => {
     const p = human();
     const mEff = reducedMass(boneMass(p, 'head'), 300);

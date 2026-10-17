@@ -2,10 +2,11 @@
 // Δv, a standing push, hitstun, a knockdown, a launch or a press, lastKnock, a KO by 'impact' (once), and an `impact`
 // event with DungeonStyle's presentation hints; a downed or KO'd body takes Δv on its slab, never hitstun; a ruler takes
 // the HP through its own rule and no Δv; a hard landing (world/characters.ts) now goes through it for real.
+import { Vector3 } from 'three';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { CombatSim, type CombatEvent } from '../src/sim/combat';
 import { type Fighter, IdCounter, KNOCKDOWN_FRAMES } from '../src/sim/fighter';
-import { applyImpact, freeDv, IMPACT_TUNING, impactReaction, impactWeight } from '../src/sim/impact';
+import { applyImpact, freeDv, IMPACT_TUNING, impactReaction, impactWeight, isEnvironmental } from '../src/sim/impact';
 import { createPlayer } from '../src/sim/roster';
 import { DAMAGE_TUNING } from '../src/sim/rules';
 import { restoreTuning, tuningSnapshot } from '../src/tuning/registry';
@@ -83,6 +84,24 @@ describe('applyImpact on a standing fighter (§4.4)', () => {
     expect(r.reaction).toEqual({ x: -p.mass * 1.2, y: p.mass * 0.3, z: -p.mass * 0.4 });
   });
 
+  it('a knock remembers the knocker’s player in its credit: a thrown stone that names nobody still credits its thrower with the fall', async () => {
+    const w = await world();
+    const p = w.player!;
+    expect(p.playerId).toBe('p1');
+    const ape = createPlayer({ ids: w.ids.fighter });
+    w.addFighter(ape, null);
+    w.step();
+    const stone: ImpactCause = { kind: 'entity', entityId: 9, fighterId: p.id, credit: [], held: true, feature: 'falling' };
+    applyImpact(w.combat, impact(ape, { energy: 18, dv: { x: 2, y: 0, z: 0 }, cause: stone }));
+    expect(ape.lastKnock).toEqual({ tick: w.tick, cause: { ...stone, credit: ['p1'] }, by: p.id });
+    const fall: ImpactCause = { kind: 'terrain', entityId: null, fighterId: null, credit: [], held: false, feature: 'fall' };
+    expect(isEnvironmental(ape, { by: 'impact', killer: null, cause: fall, point: new Vector3() }, w.tick + 60)).toEqual({ environmental: true, credit: ['p1'] });
+    // A cause that already credits the knocker is kept as it is.
+    const log: ImpactCause = { ...stone, credit: ['p1', 'p2'] };
+    applyImpact(w.combat, impact(ape, { energy: 18, dv: { x: 2, y: 0, z: 0 }, cause: log }));
+    expect(ape.lastKnock!.cause).toBe(log);
+  });
+
   it('toughness first: an armoured zone takes E − T; minHp holds', () => {
     const { sim, p } = legacy();
     p.minHp = 95;
@@ -151,6 +170,39 @@ describe('applyImpact on a standing fighter (§4.4)', () => {
     vi.spyOn(w.kcc, 'grounded').mockReturnValue(false);
     const r = applyImpact(w.combat, impact(p, { energy: 36 }));
     expect(r.knockdown).toBe(true);
+  });
+
+  it('the table’s readings: out of poise or airborne only an impact that reacts knocks down; rising, a smaller Δv slides and a press puts it down again', async () => {
+    const w = await world();
+    const p = w.player!;
+    for (let t = 0; t < 3; t++) w.step();
+    // Airborne (the controller off the ground), 0 HP and Δv under flinchDv: nothing reacts, nobody goes down.
+    const grounded = vi.spyOn(w.kcc, 'grounded').mockReturnValue(false);
+    let r = applyImpact(w.combat, impact(p, { energy: 0, dv: { x: 0.3, y: 0, z: 0 } }));
+    expect(r.knockdown).toBe(false);
+    expect(p.state).toBe('idle');
+    grounded.mockRestore();
+    // Out of poise, an impact under an armoured zone's toughness (0 HP) and no Δv: the same.
+    p.poise = 0;
+    r = applyImpact(w.combat, impact(p, { energy: 30, toughness: 40 }));
+    expect(r).toMatchObject({ damage: 0, knockdown: false });
+    expect(p.state).toBe('idle');
+    // Rising (getup: the zones are back, the slab is off): a Δv under launchDv slides the body, never hitstun.
+    p.poise = 100;
+    p.vel.set(0, 0, 0);
+    p.enterGetup();
+    const queue = vi.spyOn(w.downed, 'queueDv');
+    r = applyImpact(w.combat, impact(p, { energy: 18, dv: { x: 1, y: 0, z: 0 } }));
+    expect(r.knockdown).toBe(false);
+    expect(p.state).toBe('getup');
+    expect(p.vel.x).toBeCloseTo(1, 12);
+    expect(queue).not.toHaveBeenCalled();
+    expect(r.reaction.x).toBeCloseTo(-p.mass, 9);
+    // A press puts it down again, the slab taking the Δv.
+    r = applyImpact(w.combat, impact(p, { energy: 18, dv: { x: 0, y: -6, z: 0 } }));
+    expect(r).toMatchObject({ knockdown: true, launched: false });
+    expect(p.state).toBe('knockdown');
+    expect(queue).toHaveBeenCalledWith(p, { x: 0, y: -6, z: 0 });
   });
 
   it('a ruler takes the HP through rulerDamage (§4.6), no Δv, no lastKnock', async () => {

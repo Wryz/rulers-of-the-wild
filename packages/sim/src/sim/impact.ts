@@ -152,13 +152,14 @@ export function freeDv(dv: V3): number {
  * | HP | hpFromEnergy(E, T); d.hp = max(d.minHp, d.hp − hp); rulers: rulerDamage (§4.6) |
  * | launched | freeDv(dv) ≥ launchDv |
  * | pressed | dv·up ≤ −launchDv (a crush from above): knockdown, no launch |
- * | knockdown | poise ≤ 0, launched, pressed or airborne (DS's authored jump, or the controller in the air) |
- * | hitstun | otherwise when hp > 0 or |dv| ≥ flinchDv |
+ * | knockdown | launched or pressed; or, when it reacts, poise ≤ 0 or airborne (DS's jump, or the controller aloft) |
+ * | hitstun | otherwise when it reacts: hp > 0 or |dv| ≥ flinchDv |
  * | standing push | not launched or pressed: d.vel += dv_xz (DS slide); launched or pressed: the slab takes dv |
  * | reaction | −M·dv whenever dv was applied (the caller queues it on a dynamic impactor) |
  * | already down | HP applies; dv goes to the slab; never hitstun; a second launch restarts the knockdown |
+ * | rising | getup (the slab off): a launch or a press puts it down again, a smaller dv slides it; never hitstun |
  * | KO'd | no HP, no second `ko`; dv to the corpse slab; the `impact` event says `corpse` |
- * | lastKnock | { tick, cause, by: cause.fighterId } when |dv| > 0 |
+ * | lastKnock | { tick, cause (its credit with the knocker's player), by: cause.fighterId } when |dv| > 0 |
  */
 export function applyImpact(sim: CombatSim, i: Impact): ImpactResult {
   const T = IMPACT_TUNING;
@@ -219,6 +220,9 @@ export function applyImpact(sim: CombatSim, i: Impact): ImpactResult {
       }
     } else if (d.state === 'getup') {
       // Rising (the zones are back, the slab is not): only a launch or a press puts it down again; never hitstun.
+      // INTERPRETATION (§4.4's "already down" row sends getup's Δv to the slab): the slab is off while rising, and
+      // DownedBodies drops a Δv queued for a fighter that isn't going down, so a smaller Δv slides the body (DS slide)
+      // instead of putting it down again for any Δv at all.
       if (launchedDv || pressed) {
         knockdown = true;
         launched = launchedDv;
@@ -233,7 +237,12 @@ export function applyImpact(sim: CombatSim, i: Impact): ImpactResult {
     } else {
       // Standing.
       d.poise -= T.poisePerHp * damage * (i.sharpness === 0 ? T.bluntPoiseMul : 1) * (1 - d.stats.staggerResist);
+      // INTERPRETATION (§4.4's knockdown row says isAirborne()): DS's authored jump, or the controller off the ground
+      // (a fall, a world-mode jump), which isAirborne() doesn't see.
       const airborne = d.isAirborne() || (w ? !w.kcc.grounded(d) : false);
+      // INTERPRETATION (§4.4's knockdown row has no such condition): a poise ≤ 0 or airborne knockdown needs an impact
+      // that reacts at all (hp > 0 or |Δv| ≥ flinchDv, the hitstun row's test); a 0 HP, Δv-less touch (E under an
+      // armoured zone's T) moves nobody. Launched and pressed always react (their |Δv| ≥ launchDv).
       const reacts = damage > 0 || dvLen >= T.flinchDv;
       if (reacts && (d.poise <= 0 || launchedDv || pressed || airborne)) {
         knockdown = true;
@@ -260,8 +269,10 @@ export function applyImpact(sim: CombatSim, i: Impact): ImpactResult {
     }
   }
   // Every world knock is remembered (environmental kills, §4.4), after the KO's own classification read the knock
-  // before it.
-  if (hasDv && !d.ruler) d.lastKnock = { tick: sim.frame, cause: i.cause, by: i.cause.fighterId };
+  // before it. Its cause credits the knocker as DS's knock() does ([attacker.playerId]): the entity's credit plus the
+  // player of the fighter that holds or threw it, so a thrown stone whose own credit doesn't name its thrower still
+  // credits him with the fall that follows (isEnvironmental reads the knocker's player id from lastKnock.cause.credit).
+  if (hasDv && !d.ruler) d.lastKnock = { tick: sim.frame, cause: knockCause(sim, i.cause), by: i.cause.fighterId };
 
   const reaction = applied ? { x: -d.mass * dv.x, y: -d.mass * dv.y, z: -d.mass * dv.z } : { x: 0, y: 0, z: 0 };
   if (w) w.events.push(impactEvent(sim.frame, i, damage, knockdown, launched, ko, corpse, wound));
@@ -274,6 +285,8 @@ export function applyImpact(sim: CombatSim, i: Impact): ImpactResult {
  * 1. by 'impact' of an entity nobody holds (stakes, logs, boulders, felled trees, swinging logs; a thrown object is held
  *    until its first contact or rest) → environmental; credit = the entity's ∪ the knocker's when knocked within W;
  * 2. by 'impact' of the terrain (a fall, the ledge) with a knock within W → environmental; credit = the knocker's;
+ *    (the knocker's player id is lastKnock.cause.credit: DS's knock() writes [attacker.playerId] there, and applyImpact
+ *    the entity's credit plus the player of the fighter holding or throwing it)
  * 3. everything else (strikes, thrown weapons, fatal and severing blows, bleeding, a creature's body) → not; credit =
  *    the cause's ∪ the killer's player id.
  * Credit is sorted and de-duplicated.
@@ -300,6 +313,13 @@ export function isEnvironmental(d: Fighter, finish: Finish, tick: number): { env
 function impactorFighter(sim: CombatSim, cause: ImpactCause): Fighter | null {
   if (cause.fighterId === null) return null;
   return sim.fighters.find((f) => f.id === cause.fighterId) ?? null;
+}
+
+/** The cause a knock remembers: `cause` with the knocker's player id in its credit (unchanged when it is already there). */
+function knockCause(sim: CombatSim, cause: ImpactCause): ImpactCause {
+  const player = impactorFighter(sim, cause)?.playerId;
+  if (!player || cause.credit.includes(player)) return cause;
+  return { ...cause, credit: credits(cause.credit, [player]) };
 }
 
 /** d.vel += dv_xz (DS's knockback slide). */
