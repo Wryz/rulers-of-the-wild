@@ -467,7 +467,7 @@ export class World implements WorldPort {
 
   /** The environmental classification and credit (sim/impact.ts), then parts and death (deaths.ts). */
   onKO(d: Fighter, finish: Finish): { environmental: boolean; credit: string[] } {
-    const r = classifyKO(d, finish, this.tick);
+    const r = isEnvironmental(d, finish, this.tick);
     this.deaths.onKO(this, d, finish);
     return r;
   }
@@ -533,20 +533,4 @@ export class World implements WorldPort {
 
   /** Phase 17, 1 Hz: territory, decay, traplines (M3, M4). */
   private slowSystems(): void {}
-}
-
-/**
- * isEnvironmental (sim/impact.ts), or the legacy answer (not environmental, nobody's credit) while that function is
- * still P01's placeholder, which throws. Any KO in a world (a DS fight in P08's or P13's tests) reaches it, not only a
- * ruler's (RF-8), and packages before P09 must not throw from inside step() for it.
- * TODO(P09): once sim/impact.ts is filled the placeholder's error never occurs and this fallback is dead; world.ts's
- * owner (P05) folds it back into a plain call then, so P09 never has to edit this file for it.
- */
-function classifyKO(d: Fighter, finish: Finish, tick: number): { environmental: boolean; credit: string[] } {
-  try {
-    return isEnvironmental(d, finish, tick);
-  } catch (e) {
-    if (e instanceof Error && e.message.startsWith('sim/impact.ts: isEnvironmental is not implemented yet')) return { environmental: false, credit: [] };
-    throw e;
-  }
 }
