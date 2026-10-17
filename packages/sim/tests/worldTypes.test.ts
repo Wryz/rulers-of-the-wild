@@ -133,7 +133,7 @@ describe('world types', () => {
       { type: 'deflect', ruler: f, along: v3(1) },
       { type: 'land', entity: 3, f: null, point: v3(), energy: 10, mass: 300 },
       { type: 'break', entity: 3, pieces: [4, 5], point: v3(), energy: 800 },
-      { type: 'joint', joint: 1, what: 'snap' },
+      { type: 'joint', joint: 1, what: 'snap', point: v3() },
       { type: 'chop', tree: 2, point: v3(), remaining: 0.9 },
       { type: 'fell', tree: 2, dir: v3(1) },
       { type: 'crossCut', entity: 3, pieces: null },

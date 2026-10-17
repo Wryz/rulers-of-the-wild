@@ -15,7 +15,7 @@ import { newRulerState, RULER_TUNING, rulerDamage, rulerDown, rulerHeld, rulerHp
 import { SPECIES_BODY } from '../src/sim/species';
 import { resetTuning } from '../src/tuning/registry';
 import { NOISE_TUNING } from '../src/world/creatures/defs';
-import { spawnBox, spawnLog } from '../src/world/factory';
+import { spawnBox, spawnLog, spawnRopeCoil, spawnStick } from '../src/world/factory';
 import { physicsReady } from '../src/world/physics';
 import { RULER_BODY_TUNING, rulerAnkleM, stepPinned } from '../src/world/rulerBody';
 import type { ImpactCause, Quat, V3, WorldEvent } from '../src/world/types';
@@ -217,7 +217,9 @@ describe('the body (§4.7)', () => {
 describe("AC-5's numbers on a fixture log (§4.7, §11.5)", () => {
   it('trips at 6 m/s, rises at +4.00 s and is up by +5.57 s, no NaN, every part under 30 m/s, all still within 10 s', async () => {
     const w = await make();
-    // A fixed 300 kg log across the path, its top at the giant's shin (between its ankle and knee).
+    // A fixed 300 kg log across the path, its top at the giant's shin (between its ankle and knee): §11.5's log (dry
+    // wood, 4.4 m, static for m_eff and a blocker like the design's lashed one). The first shin to strike it (859.5 kg at
+    // 6.56 m/s, 18.5 kJ against its 9 kJ break energy) trips the giant and breaks the log (legStrike, SIM-fix).
     spawnLog(w, { p: { x: 0, y: 1.0, z: 0 }, q: LOG_Z, length: 4.4, mass: 300, state: 'fixed' });
     const g = giant(w, -20, 0.3, EAST);
     g.drive = { heading: EAST, speed: 6, accel: 50, climb: false };
@@ -266,6 +268,92 @@ describe("AC-5's numbers on a fixture log (§4.7, §11.5)", () => {
     expect(lastMoving).toBeGreaterThan(rise);
     expect((lastMoving - trip) * DT).toBeLessThan(10);
     expect(g.state).not.toBe('tripped');
+  });
+});
+
+describe('the shin that strikes an obstacle (§4.7 step 6 for the leg, SPEC:782; SIM-fix)', () => {
+  it("trips it 'obstacle' at the first shin contact with the design's staked log (§11.5: lashed with vine to two driven stakes), though the strike snaps the lashings and breaks the log", async () => {
+    const w = await make();
+    // A 300 kg dry hex log, 4.4 m, across the path, centre 1.0 m up, lashed at its ends to two 1.4 m stakes driven
+    // 0.3 m point-up just beyond them: anchored by its lashings, so a blocker (§2.3).
+    const log = spawnLog(w, { p: { x: 0, y: 1.0, z: 0 }, q: LOG_Z, length: 4.4, mass: 300 });
+    const stakes = [-2.3, 2.3].map((z) => spawnStick(w, { p: { x: 0, y: 0.4, z }, q: UP, length: 1.4, r: 0.05, sharp: { end: 1, s: 0.6 } }));
+    for (const s of stakes) w.entities.anchor(w.entities.get(s)!, 0.3);
+    const lashes = stakes.map((s, i) => {
+      const coil = spawnRopeCoil(w, { at: { x: 20, y: 0, z: 20 + 2 * i }, material: 'vine', lengthM: 1 });
+      return w.joints.lash({ entity: log, local: { x: 0, y: i === 0 ? -2.2 : 2.2, z: 0 } }, { entity: s, local: { x: 0, y: 0.7, z: 0 } }, { entity: coil, lengthM: 1 }, []);
+    });
+    run(w, 2);
+    expect(w.entities.isAnchored(w.entities.get(log)!)).toBe(true);
+    const g = giant(w, -20, 0.3, EAST);
+    g.drive = { heading: EAST, speed: 6, accel: 50, climb: false };
+    const shin = (bone: 'shinL' | 'shinR') => w.contacts.touching({ kind: 'fighter', id: g.id, part: 'ruler', bone }, { kind: 'entity', id: log });
+    let strike = -1;
+    let trip: Extract<WorldEvent, { type: 'trip' }> | null = null;
+    let tripTick = -1;
+    let speed = 0;
+    const snapped: number[] = [];
+    run(w, 400, (ev) => {
+      for (const e of ev) {
+        if (e.type === 'joint' && e.what === 'snap') snapped.push(e.joint);
+        if (e.type === 'trip' && e.f === g && !trip) {
+          trip = { ...e };
+          tripTick = w.tick;
+        }
+      }
+      if (strike < 0 && (shin('shinL') > 0 || shin('shinR') > 0)) strike = w.tick;
+      if (!trip) speed = Math.hypot(g.walkVel.x, g.walkVel.z);
+      return trip !== null;
+    });
+    expect(strike).toBeGreaterThan(0);
+    expect(trip).not.toBeNull();
+    expect(trip!.why).toBe('obstacle');
+    expect(trip!.cause).toMatchObject({ kind: 'entity', entityId: log });
+    // The strike's tick asks for it; the next phase 4c switches the body.
+    expect(tripTick).toBe(strike + 1);
+    expect(speed).toBeCloseTo(6, 1);
+    // The strike snapped the lashings (600 J each, §4.9), and its 18.5 kJ broke the 9 kJ log (§4.10).
+    expect(snapped.sort()).toEqual([...lashes].sort());
+    expect(w.entities.get(log)).toBeUndefined();
+  });
+
+  it('legStrike: a blocker whose top lies between ankle and knee trips a ruler moving faster than tripSpeed; slower, met along its axis, low, tall or light: no trip', async () => {
+    const w = await make();
+    const g = giant(w, 0, 0, EAST);
+    run(w, 2);
+    const across = spawnLog(w, { p: { x: 3, y: 1.0, z: 0 }, q: LOG_Z, length: 4.4, mass: 300, state: 'fixed' });
+    // Its axis 20° off the motion (+x): met on its side, the mover deflects along it (6.1).
+    const a20 = (20 * Math.PI) / 180;
+    // Local +y onto world x (−90° about z), then turned −20° about y: the axis (cos 20°, 0, sin 20°).
+    const s = -Math.sin(a20 / 2);
+    const c = Math.cos(a20 / 2);
+    const q = { x: s * -Math.SQRT1_2, y: s * Math.SQRT1_2, z: c * -Math.SQRT1_2, w: c * Math.SQRT1_2 };
+    const along = spawnLog(w, { p: { x: 3, y: 1.0, z: 10 }, q, length: 4.4, mass: 300, state: 'fixed' });
+    const low = spawnBox(w, { p: { x: 3, y: 0.15, z: 20 }, size: [0.4, 0.3, 4], material: 'stone', state: 'fixed', look: 'slab' });
+    const tall = spawnBox(w, { p: { x: 3, y: 2.25, z: 30 }, size: [0.5, 4.5, 4], material: 'stone', state: 'fixed', look: 'wall' });
+    const light = spawnLog(w, { p: { x: 3, y: 1.0, z: 40 }, q: LOG_Z, length: 4.4, mass: 100 });
+    const ax = w.entities.get(along)!;
+    const axis = { x: 2 * (ax.pose.q.x * ax.pose.q.y - ax.pose.q.w * ax.pose.q.z), z: 2 * (ax.pose.q.y * ax.pose.q.z + ax.pose.q.w * ax.pose.q.x) };
+    expect(Math.atan2(axis.z, axis.x)).toBeCloseTo(a20, 6);
+    const tries = (id: number, speed: number, n: V3) => {
+      g.ruler!.pendingTrip = null;
+      g.vel.set(0, 0, 0);
+      g.walkVel.set(speed, 0, 0);
+      const e = w.entities.get(id)!;
+      w.rulers.legStrike(g, e, { x: e.pose.p.x - 0.2, y: 1.0, z: e.pose.p.z }, n);
+      return g.ruler!.pendingTrip;
+    };
+    const X = { x: 1, y: 0, z: 0 };
+    expect(tries(across, 6, X)).toMatchObject({ why: 'obstacle', cause: { kind: 'entity', entityId: across } });
+    expect(tries(across, RULER_BODY_TUNING.tripSpeed, X)).toBeNull();
+    expect(tries(along, 6, { x: Math.sin(a20), y: 0, z: -Math.cos(a20) })).toBeNull();
+    expect(tries(low, 6, X)).toBeNull();
+    expect(tries(tall, 6, X)).toBeNull();
+    expect(tries(light, 6, X)).toBeNull();
+    // A fresh piece (in its grace) is no blocker.
+    w.entities.setGrace(w.entities.get(across)!, { from: { kind: 'terrain' }, minUntil: w.tick + 10, maxUntil: w.tick + 600 });
+    expect(tries(across, 6, X)).toBeNull();
+    g.ruler!.pendingTrip = null;
   });
 });
 
@@ -623,6 +711,10 @@ describe('pinned (D-38, with hysteresis)', () => {
         lid = spawnBox(w, { p: { x: c.x, y: top + 0.3, z: c.z }, size: [10, 0.04, 10], material: 'dryWood', look: 'lid' });
       }
       if (trip > 0 && w.tick === trip + 360 && g.ruler!.pinned) {
+        // Still whole: the giant, tripped standing still, topples at ≈ +5 s with the lid on it, and the lid's corner
+        // meets the ground at ≈ 11.5 m/s. At its whole mass that scored 146 kJ against its 66 kJ break energy and broke
+        // it; at its effective mass at the corner (DAMAGE_TUNING.integrityPointMass) it is ≈ 34 kJ, and it lies on.
+        expect(w.entities.get(lid)!.integrity).toBeGreaterThan(0);
         causeWhilePinned = g.ruler!.downCause ? { ...g.ruler!.downCause } : null;
         removedAt = w.tick;
         w.removeEntity(lid);

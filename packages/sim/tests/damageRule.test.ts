@@ -16,7 +16,7 @@ import { RULER_ZONE_TUNING } from '../src/sim/ruler';
 import { boneMass, DAMAGE_TUNING, hpFromEnergy, impactEnergy, reducedMass } from '../src/sim/rules';
 import { SPECIES_BODY } from '../src/sim/species';
 import { restoreTuning, tuningSnapshot } from '../src/tuning/registry';
-import { contactEnergy, contactMeff, hardLandingJ, impactDv, leadingSharpness, selfMotion, sideMass } from '../src/world/damage';
+import { contactEnergy, contactMeff, hardLandingJ, impactDv, integrityMeff, leadingSharpness, pointMass, selfMotion, sideMass } from '../src/world/damage';
 import type { Finish, ImpactCause, Pose3, SharpPoint } from '../src/world/types';
 
 const snapshot = tuningSnapshot();
@@ -69,6 +69,50 @@ describe('m_eff by pair kind (§4.3 table, orchestrator decision 2)', () => {
     // With the lever at 10×: 2,865 ≥ 10 × 73.3, so the player's side is 73.3 kg (71.5 kg m_eff, §4.4).
     near(contactMeff(self, bone, 10), 71.47);
     expect(contactMeff(self, bone, 100)).toBeCloseTo(14.92, 2);
+  });
+});
+
+describe("an entity's integrity at its effective mass at the contact point (orchestrator decision on P10's conflict)", () => {
+  const Q0 = { x: 0, y: 0, z: 0, w: 1 };
+  const UP = { x: 0, y: 1, z: 0 };
+  /** A thin rod of mass m and length L along local y: principal moments (mL²/12, ~0, mL²/12). */
+  const rod = (m: number, L: number) => ({ x: (m * L * L) / 12, y: 0, z: (m * L * L) / 12 });
+
+  it('pointMass is 1/(1/m + (r×n)ᵀI⁻¹(r×n)): m through the centre of mass, m/4 at a rod end struck across it, m/7 at a square plate corner', () => {
+    const m = 738;
+    const L = 14.5;
+    // Struck through its centre of mass, or along its axis at the end: the whole mass.
+    expect(pointMass(m, rod(m, L), Q0, { x: 0, y: 0, z: 0 }, UP)).toBe(m);
+    expect(pointMass(m, rod(m, L), Q0, { x: 0, y: L / 2, z: 0 }, UP)).toBeCloseTo(m, 9);
+    // Across its axis at the end (the tip of a felled trunk landing): m/4.
+    near(pointMass(m, rod(m, L), Q0, { x: 0, y: L / 2, z: 0 }, { x: 1, y: 0, z: 0 }), m / 4, 1e-9);
+    // The same rod lying along world x (local y turned onto x), its end met from below: m/4.
+    const alongX = { x: 0, y: 0, z: -Math.SQRT1_2, w: Math.SQRT1_2 };
+    near(pointMass(m, rod(m, L), alongX, { x: L / 2, y: -0.15, z: 0 }, UP), m / 4, 1e-9);
+    // A thin square plate a × a (2.2 t, 10 m) met flat at a corner: m/7.
+    const a = 10;
+    const plate = { x: (2200 * a * a) / 12, y: (2200 * a * a) / 6, z: (2200 * a * a) / 12 };
+    near(pointMass(2200, plate, Q0, { x: a / 2, y: 0, z: a / 2 }, UP), 2200 / 7, 1e-9);
+    // The normal's sign doesn't matter.
+    expect(pointMass(m, rod(m, L), Q0, { x: 0, y: L / 2, z: 0 }, { x: -1, y: 0, z: 0 })).toBeCloseTo(m / 4, 9);
+  });
+
+  it('integrityMeff: the reduced mass of the two sides at the point; static sides and the terrain infinite, a creature its bone', () => {
+    const log = { kind: 'entity' as const, massKg: 738, static: false, pointKg: 738 / 4 };
+    const other = { kind: 'entity' as const, massKg: 300, static: false, pointKg: 120 };
+    expect(DAMAGE_TUNING.integrityPointMass).toBe(true);
+    expect(integrityMeff(log, { kind: 'terrain' })).toBe(738 / 4);
+    expect(integrityMeff(log, { kind: 'entity', massKg: 50, static: true, pointKg: 50 })).toBe(738 / 4);
+    expect(integrityMeff(log, other)).toBe(reducedMass(738 / 4, 120));
+    expect(integrityMeff(log, { kind: 'creature', boneKg: 859, bodyKg: 14000 })).toBe(reducedMass(738 / 4, 859));
+    // A fixed entity's integrity against a bone is the bone (AC-5's log against the giant's shin).
+    expect(integrityMeff({ kind: 'entity', massKg: 300, static: true, pointKg: 300 }, { kind: 'creature', boneKg: 859.5, bodyKg: 14000 })).toBe(859.5);
+    // No point mass given: the whole mass.
+    expect(integrityMeff({ kind: 'entity', massKg: 40, static: false }, { kind: 'terrain' })).toBe(40);
+    // The lever off: §4.3's table (whole masses), as contactMeff.
+    DAMAGE_TUNING.integrityPointMass = false;
+    expect(integrityMeff(log, { kind: 'terrain' })).toBe(738);
+    expect(integrityMeff(log, other)).toBe(contactMeff(log, other, Infinity));
   });
 });
 

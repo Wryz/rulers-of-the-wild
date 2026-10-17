@@ -21,7 +21,7 @@
 import type RAPIER from '@dimforge/rapier3d-compat';
 import { defineTuning } from '../tuning/registry';
 import { breakEnergyJ, MATERIALS } from './materials';
-import { crossCut, fracture, GEOM_EPS, principalAxis, shapeContains, type ShapePiece, triangulate } from './shapes';
+import { crossCut, fracture, GEOM_EPS, principalAxis, shapeContains, type ShapePiece } from './shapes';
 import type { Entity, Owner, Pose3, Quat, Shape, SharpPoint, V3 } from './types';
 import type { World } from './world';
 
@@ -158,8 +158,9 @@ export class Breaking {
     pieces.forEach((pc, i) => {
       const c = add(pose.p, rotate(pose.q, pc.offset));
       const lin = add(v, cross(omega, sub(c, com)));
-      // A piece of a stake that was driven in starts inside the ground: lifted out, as a stake knocked loose is.
-      c.y += groundDepth(w, pc.shape, { p: c, q: pose.q });
+      // A piece of a stake that was driven in starts inside the ground: lifted out, as a stake knocked loose is
+      // (EntityStore.unanchor's measure).
+      c.y += w.entities.depthBelowGround(pc.shape, { p: c, q: pose.q });
       const sharpPoints: SharpPoint[] = [];
       parent.sharp.forEach((s, k) => {
         if (owner[k] === i) sharpPoints.push({ local: sub(s.local, pc.offset), dir: s.dir, sharpness: s.sharpness });
@@ -237,33 +238,11 @@ export class Breaking {
 
 /**
  * A stake knocked or pulled loose (§2.3, §4.9: an impact above capacity × loadLeverM, a haul or a tripwire share above
- * its capacity): free and awake, then lifted straight up until no vertex is below the terrain. Returns the lift (m).
- * DEVIATION (P10): EntityStore.unanchor (P06) leaves the driven end inside the heightfield, and Rapier pushes a dynamic
- * body that deep down through the heightfield's triangles about half the time (a 6 kg stake 0.15 m in, measured: it
- * falls out of the world); the lift is the smallest move that clears the ground. The fix belongs in unanchor.
+ * its capacity): EntityStore.unanchor, which makes it free and awake and lifts its driven end out of the ground.
+ * Returns the lift (m).
  */
 export function knockLoose(w: World, e: Entity): number {
-  w.entities.unanchor(e);
-  const lift = groundDepth(w, e.shape, e.pose);
-  if (lift > 0) w.entities.setPose(e, { p: { x: e.pose.p.x, y: e.pose.p.y + lift, z: e.pose.p.z }, q: e.pose.q });
-  return lift;
-}
-
-/** Floats per vertex in triangulate()'s positions (x, y, z): a layout, not a tuning value. */
-const XYZ_STRIDE = 3;
-
-/** How far a shape at `pose` reaches below the terrain (m; 0 when it doesn't): its deepest vertex under the surface. */
-export function groundDepth(w: World, shape: Shape, pose: Pose3): number {
-  const { positions } = triangulate(shape, pose);
-  let d = 0;
-  for (let i = 0; i < positions.length; i += XYZ_STRIDE) {
-    const x = positions[i];
-    const y = positions[i + 1];
-    const z = positions[i + 2];
-    const below = w.terrain.heightAt(x, z) - y;
-    if (below > d) d = below;
-  }
-  return d;
+  return w.entities.unanchor(e);
 }
 
 // ---------------------------------------------------------------------------
