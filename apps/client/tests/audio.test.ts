@@ -369,6 +369,18 @@ describe('SfxAdapter', () => {
     expect(calls.slice(-2).map((c) => c[0])).toEqual(['chop', 'creak']);
     a.handle(ev({ type: 'joint', joint: 3, what: 'snap', point: { x: 0, y: 1, z: 0 } }), w);
     expect(calls.at(-1)).toEqual(['snap']);
+    // A rope that snapped or was cut is gone from the world: its sound is placed at the event's point (40 m to the
+    // left here), and so is a tripwire's, at its crossing point.
+    for (const e of [
+      { type: 'joint', joint: 3, what: 'snap', point: { x: 40, y: 1, z: 0 } },
+      { type: 'tripwire', joint: 3, by: { kind: 'terrain' }, loadN: 9000, snapped: true, loosed: [], point: { x: 40, y: 1, z: 0 } },
+    ]) {
+      a.handle(ev(e), w);
+      expect(calls.at(-1)).toEqual(['snap']);
+      const snap = emits.at(-1)!;
+      expect(snap.gain).toBeCloseTo(distanceGain(Math.hypot(40, 1), FEEL_TUNING.loud.snap), 10);
+      expect(Math.abs(snap.pan)).toBeCloseTo(FEEL_TUNING.space.pan, 10);
+    }
     a.handle(ev({ type: 'dig', point: { x: 1, y: 0, z: 1 }, volumeM3: 0.04, pile: null }), w);
     expect(calls.at(-1)).toEqual(['dig']);
     a.handle(ev({ type: 'break', entity: 9, pieces: [6], point: { x: 2, y: 0, z: 0 }, energy: 500 }), w);
@@ -556,7 +568,7 @@ describe('SfxAdapter', () => {
       { type: 'land', entity: null, f: me.f, point: { x: 0, y: 0, z: 0 }, energy: 200, mass: 73 },
       { type: 'chop', tree: 6, point: { x: 0, y: 1, z: 0 }, remaining: 0.1 },
       { type: 'respawn', f: me.f, at: { x: 0, y: 0, z: 0 } },
-      { type: 'tripwire', joint: 1, by: { kind: 'terrain' }, loadN: 10, snapped: false, loosed: [] },
+      { type: 'tripwire', joint: 1, by: { kind: 'terrain' }, loadN: 10, snapped: false, loosed: [], point: { x: 0, y: 0.3, z: 0 } },
     ];
     for (const e of events) expect(() => a.handle(e as WorldEvent, w)).not.toThrow();
     expect(() => a.ambience(w, 1 / 60, 1 / 60)).not.toThrow();

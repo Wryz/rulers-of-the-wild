@@ -649,7 +649,7 @@ export type WorldEvent =
   /** ruler.inPit changed (§4.7). */
   | { type: 'pit'; f: Fighter; on: boolean }
   /** §4.9. */
-  | { type: 'tripwire'; joint: number; by: Owner; loadN: number; snapped: boolean; loosed: number[] }
+  | { type: 'tripwire'; joint: number; by: Owner; loadN: number; snapped: boolean; loosed: number[]; point: V3 }
   | { type: 'pinned'; f: Fighter; on: boolean }
   | { type: 'shove'; ruler: Fighter; entity: number }
   | { type: 'deflect'; ruler: Fighter; along: V3 }

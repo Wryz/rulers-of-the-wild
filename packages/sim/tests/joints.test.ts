@@ -394,6 +394,10 @@ describe('tripwires (§4.9)', () => {
     expect(ent(w, stake2).state).toBe('anchored');
     expect(t1).toMatchObject({ joint: vine, snapped: false, loosed: [stake] });
     expect(t1.loadN).toBeCloseTo(3902.4, 6);
+    // Where: the crossing point, the rope's point nearest the ape (the rope runs along x from the post to the stake).
+    expect(t1.point.z).toBeCloseTo(0, 6);
+    expect(Math.abs(t1.point.x - ape.pos.x)).toBeLessThan(0.1);
+    expect(t2.point.z).toBeCloseTo(6, 6);
     const s = ent(w, stake);
     expect(s.state).toBe('free');
     expect(s.anchor).toBeNull();

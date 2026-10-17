@@ -158,8 +158,7 @@ export class NoiseBus {
           break;
         case 'joint': {
           if (e.what !== 'snap') break;
-          const at = e.point ? v3(e.point) : jointPoint(w, byId, e.joint);
-          if (at) this.emit({ at, radius: T.ropeSnap, kind: 'ropeSnap', source: null });
+          this.emit({ at: v3(e.point), radius: T.ropeSnap, kind: 'ropeSnap', source: null });
           break;
         }
         case 'land':
@@ -262,38 +261,3 @@ function fighterIndex(w: World): Map<number, Fighter> {
   return m;
 }
 
-/**
- * Where a rope or joint is: the middle of its two anchors' world points (an entity anchor through the entity's pose, a
- * held end at its holder, a loose end or a world point as given). null once the record is gone. The fallback for a
- * `joint` event without its `point` (P10's JointStore always gives one: a snapped joint is gone by phase 17b).
- */
-function jointPoint(w: World, byId: ReadonlyMap<number, Fighter>, id: number): V3 | null {
-  const j = w.joints.get(id);
-  if (!j) return null;
-  const pts: V3[] = [];
-  for (const a of [j.a, j.b]) {
-    if (a.fighter !== undefined) {
-      const f = byId.get(a.fighter);
-      if (f) pts.push(v3(f.pos));
-    } else if (a.entity !== null) {
-      const e = w.entities.get(a.entity);
-      if (e) pts.push(rotateAdd(e.pose.q, a.local, e.pose.p));
-    } else pts.push(v3(a.local));
-  }
-  if (pts.length === 0) return null;
-  const s = pts.reduce((acc, p) => ({ x: acc.x + p.x, y: acc.y + p.y, z: acc.z + p.z }), { x: 0, y: 0, z: 0 });
-  return { x: s.x / pts.length, y: s.y / pts.length, z: s.z / pts.length };
-}
-
-/** p + q·v (a unit quaternion rotating v). */
-function rotateAdd(q: { x: number; y: number; z: number; w: number }, v: V3, p: V3): V3 {
-  // t = 2 (q.xyz × v); v' = v + w t + q.xyz × t
-  const tx = 2 * (q.y * v.z - q.z * v.y);
-  const ty = 2 * (q.z * v.x - q.x * v.z);
-  const tz = 2 * (q.x * v.y - q.y * v.x);
-  return {
-    x: p.x + v.x + q.w * tx + (q.y * tz - q.z * ty),
-    y: p.y + v.y + q.w * ty + (q.z * tx - q.x * tz),
-    z: p.z + v.z + q.w * tz + (q.x * ty - q.y * tx),
-  };
-}
