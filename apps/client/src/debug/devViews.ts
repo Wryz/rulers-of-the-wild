@@ -137,7 +137,7 @@ export class DevViews implements DevViewsPort {
         const g = new BufferGeometry();
         const p = Float32Array.from(positions);
         // The ruler's layer a little higher than the human's, so both read where they overlap.
-        const lift = D.navLiftM * (layer === 'ruler' ? 2 : 1);
+        const lift = D.navLiftM * (layer === 'ruler' ? D.navRulerLiftMul : 1);
         for (let i = 1; i < p.length; i += 3) p[i] += lift;
         g.setAttribute('position', new BufferAttribute(p, 3));
         g.setIndex(new BufferAttribute(Uint32Array.from(indices), 1));
@@ -156,7 +156,7 @@ export class DevViews implements DevViewsPort {
       fm.opacity = D.navOpacity;
       const em = v.edges.material as LineBasicMaterial;
       em.color.set(colour);
-      em.opacity = Math.min(1, D.navOpacity * 3);
+      em.opacity = Math.min(1, D.navOpacity * D.navEdgeOpacityMul);
     }
   }
 
@@ -266,7 +266,13 @@ export class DevViews implements DevViewsPort {
     const key = s.kind === 'capsule' ? `capsule|${s.r.toFixed(4)}|${s.halfHeight.toFixed(4)}` : s.kind;
     let g = this.zoneGeo.get(key);
     if (!g) {
-      g = s.kind === 'ball' ? new SphereGeometry(1, 10, 8) : s.kind === 'box' ? new BoxGeometry(2, 2, 2) : new CapsuleGeometry(s.r, 2 * s.halfHeight, 3, 8);
+      const D = GAME_TUNING.devViews;
+      g =
+        s.kind === 'ball'
+          ? new SphereGeometry(1, D.zoneSphereSegments, D.zoneSphereRings)
+          : s.kind === 'box'
+            ? new BoxGeometry(2, 2, 2)
+            : new CapsuleGeometry(s.r, 2 * s.halfHeight, D.zoneCapsuleCapSegments, D.zoneCapsuleRadialSegments);
       this.zoneGeo.set(key, g);
     }
     return g;

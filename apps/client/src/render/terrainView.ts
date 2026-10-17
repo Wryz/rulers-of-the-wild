@@ -15,11 +15,13 @@
 import {
   BufferAttribute,
   BufferGeometry,
+  type Camera,
   Color,
   Group,
   Mesh,
   MeshStandardMaterial,
   type Scene,
+  Vector3,
 } from 'three';
 import { defineTuning, type FieldMeta, MATERIAL_IDS, type MaterialId, type Terrain } from '@wild/sim';
 
@@ -102,20 +104,20 @@ export const RENDER_TUNING = defineTuning(
       dugM: 0.05,
       rockSlopeDeg: 35,
       variation: 0.06,
-      rockVariation: 0.16,
+      rockVariation: 0.08,
       skirtM: 0.6,
     },
     sky: {
       sky: '#a9c6d6',
       hemiSky: '#d9e8f2',
       hemiGround: '#4f5a34',
-      hemiIntensity: 1.8,
+      hemiIntensity: 1.05,
       sun: '#ffe6c2',
-      sunIntensity: 1.8,
+      sunIntensity: 2.3,
       sunAzimuthDeg: 215,
       sunElevationDeg: 48,
       fill: '#c4d2e0',
-      fillIntensity: 0.9,
+      fillIntensity: 3.0,
       fillAzimuthDeg: 35,
       fillElevationDeg: 22,
       shadowBias: -0.0004,
@@ -191,6 +193,7 @@ export const RENDER_TUNING = defineTuning(
       linkColor: '#5e4b33',
       linkRadiusM: 0.014,
       linkSides: 5,
+      linkRoughness: 0.95,
     },
     wounds: {
       scarLengthM: 0.1,
@@ -245,7 +248,7 @@ export const RENDER_TUNING = defineTuning(
       variation: { unit: '± brightness', source: 'NEW: P32 (per-vertex shade so flat ground reads as ground)', min: 0, max: 0.5, step: 0.01 },
       rockVariation: {
         unit: '± brightness',
-        source: 'NEW: C-fix (rock\'s per-vertex shade: stronger than the grass\'s, so a cliff reads as faceted rock, rule 3)',
+        source: 'NEW: C-fix (rock\'s per-vertex shade, a little above the grass\'s: the facets differ without speckle, rule 3)',
         min: 0,
         max: 0.5,
         step: 0.01,
@@ -256,19 +259,19 @@ export const RENDER_TUNING = defineTuning(
       sky: colour('NEW: P32 (background and fog)'),
       hemiSky: colour('NEW: P32 (hemisphere light from above)'),
       hemiGround: colour('NEW: P32 (hemisphere light from below)'),
-      hemiIntensity: {
-        unit: '×',
-        source: 'NEW: P32 (C-fix: 1.05 → 1.8; three.js\'s physical lights divide ambient by π, which left faces turned from the sun near-black)',
-        min: 0,
-        max: 5,
-        step: 0.05,
-      },
+      hemiIntensity: { unit: '×', source: 'NEW: P32', min: 0, max: 5, step: 0.05 },
       sun: colour('NEW: P32 (a warm sun, SPEC:840)'),
-      sunIntensity: { unit: '×', source: 'NEW: P32 (C-fix: 2.3 → 1.8 as the sky and fill rose, so sunlit ground stays as bright)', min: 0, max: 10, step: 0.05 },
+      sunIntensity: { unit: '×', source: 'NEW: P32', min: 0, max: 10, step: 0.05 },
       sunAzimuthDeg: { unit: '°', source: 'NEW: P32 (where the sun stands, from +z toward +x)', min: 0, max: 360, step: 1 },
       sunElevationDeg: { unit: '°', source: 'NEW: P32 (an afternoon sun: long-ish shadows, SPEC:840)', min: 1, max: 90, step: 1 },
-      fill: colour('NEW: C-fix (a cool sky-bounce light opposite the sun: shaded rock and canopies read as lit facets, not black)'),
-      fillIntensity: { unit: '×', source: 'NEW: C-fix (no shadow; 0 turns it off)', min: 0, max: 5, step: 0.05 },
+      fill: colour('NEW: C-fix (a cool sky-bounce light opposite the sun on the terrain\'s steep faces: the rim reads as lit faceted rock, not black)'),
+      fillIntensity: {
+        unit: '×',
+        source: 'NEW: C-fix (terrain only, × steepness: trees, bodies and flat ground keep P32\'s light; no shadow; 0 turns it off)',
+        min: 0,
+        max: 10,
+        step: 0.05,
+      },
       fillAzimuthDeg: { unit: '°', source: 'NEW: C-fix (where the fill comes from, from +z toward +x: opposite the sun)', min: 0, max: 360, step: 1 },
       fillElevationDeg: { unit: '°', source: 'NEW: C-fix (low, so the faces of cliffs turned from the sun catch it)', min: 1, max: 90, step: 1 },
       shadowBias: { unit: 'depth', source: 'NEW: P32 (DS −0.0005)', min: -0.01, max: 0.01, step: 0.0001 },
@@ -363,6 +366,7 @@ export const RENDER_TUNING = defineTuning(
       linkColor: colour('NEW: C-fix (the link drawn from a dragging hand to the grip it pulls by, rule 3)'),
       linkRadiusM: { unit: 'm', source: 'NEW: C-fix (the drag link\'s thickness)', min: 0.002, max: 0.1, step: 0.002 },
       linkSides: { unit: 'sides', source: 'NEW: C-fix (a faceted cord, like the ropes)', min: 3, max: 16, step: 1 },
+      linkRoughness: { unit: '0-1', source: 'NEW: C-fix (the drag link: matte)', min: 0, max: 1, step: 0.01 },
     },
     wounds: {
       scarLengthM: { unit: 'm (bone frame)', source: 'NEW: SPEC:845 (a healed ruler wound: a scar)', min: 0.01, max: 0.5, step: 0.01 },
@@ -419,9 +423,54 @@ interface TileView {
   version: number;
 }
 
+/** The unit vector toward the terrain's fill light (RENDER_TUNING.sky.fill*). */
+export function fillDirection(out = new Vector3()): Vector3 {
+  const S = RENDER_TUNING.sky;
+  const az = (S.fillAzimuthDeg * Math.PI) / 180;
+  const el = (S.fillElevationDeg * Math.PI) / 180;
+  return out.set(Math.sin(az) * Math.cos(el), Math.sin(el), Math.cos(az) * Math.cos(el)).normalize();
+}
+
+const _fillDir = new Vector3();
+const _upView = new Vector3();
+const _fillCol = new Color();
+
+/**
+ * The terrain's material: flat-shaded vertex colours, plus a fill light of its own (C-fix). With the sun and the
+ * hemisphere alone, a cliff turned from the sun (the valley rim, a pit wall) took only the hemisphere's ambient, which
+ * three.js's physical lighting divides by π: near-black, no facets showing (rule 3: the rim must read as rock). A
+ * scene-wide fill light bright enough to fix it doubled the crowns' brightness and halved their facet contrast, so the
+ * fill lights only the terrain, and only its steep faces (× 1 − n·up): flat ground, trees and bodies keep P32's light.
+ */
+function terrainMaterial(): MeshStandardMaterial {
+  const m = new MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: 0.95, metalness: 0 });
+  const uniforms = { uFillDir: { value: new Vector3() }, uUpView: { value: new Vector3() }, uFillColor: { value: new Color() } };
+  m.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, uniforms);
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', '#include <common>\nuniform vec3 uFillDir;\nuniform vec3 uUpView;\nuniform vec3 uFillColor;')
+      .replace(
+        '#include <lights_fragment_end>',
+        `#include <lights_fragment_end>
+        {
+          float fillSteep = clamp(1.0 - dot(normal, uUpView), 0.0, 1.0);
+          reflectedLight.directDiffuse += max(dot(normal, uFillDir), 0.0) * fillSteep * uFillColor * BRDF_Lambert(material.diffuseColor);
+        }`,
+      );
+  };
+  // The fill's direction and world up in the view space the fragment's normal is in, read live from RENDER_TUNING.
+  m.onBeforeRender = (_r, _s, camera: Camera) => {
+    const S = RENDER_TUNING.sky;
+    uniforms.uFillDir.value.copy(fillDirection(_fillDir)).transformDirection(camera.matrixWorldInverse);
+    uniforms.uUpView.value.copy(_upView.set(0, 1, 0)).transformDirection(camera.matrixWorldInverse);
+    uniforms.uFillColor.value.copy(_fillCol.set(S.fill)).multiplyScalar(S.fillIntensity);
+  };
+  return m;
+}
+
 export class TerrainView {
   readonly group = new Group();
-  readonly material = new MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: 0.95, metalness: 0 });
+  readonly material = terrainMaterial();
   private tiles: (TileView | null)[] = [];
 
   /**
@@ -538,7 +587,7 @@ export function tileGeometry(t: Terrain, tile: number, spacing: number, cover: (
         // Dug or heaped: fresh dirt, darker the deeper it goes.
         _c.copy(_dirt).multiplyScalar(off < 0 ? Math.max(0.6, 1 + off * 0.12) : 1.05);
       } else if (up < rockCos) {
-        // Rock: a stronger per-vertex shade than the grass's, so the faces of a cliff differ (faceted rock).
+        // Rock: a little more per-vertex shade than the grass's (rockVariation in all), so a cliff's faces differ.
         _c.copy(_rock).multiplyScalar(1 + (T.rockVariation - T.variation) * (hash2(tz * n1 + r + 7919, tx * n1 + c) * 2 - 1));
       } else {
         const cv = Math.min(1, Math.max(0, cover(x, z)));

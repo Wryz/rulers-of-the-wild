@@ -50,7 +50,7 @@ const _yAxis = new Vector3(0, 1, 0);
  */
 export class DragLinks {
   private readonly links = new Map<Fighter, Mesh>();
-  private readonly material: MeshStandardMaterial = flatMaterial({ roughness: 0.95 });
+  private readonly material: MeshStandardMaterial = flatMaterial({ roughness: RENDER_TUNING.drag.linkRoughness });
   private geo: CylinderGeometry | null = null;
   private sides = 0;
 
@@ -86,6 +86,7 @@ export class DragLinks {
       this.links.set(f, m);
     }
     this.material.color.set(D.linkColor);
+    this.material.roughness = D.linkRoughness;
     const len = _w.subVectors(to, from).length();
     m.visible = len > 1e-4;
     if (!m.visible) return;

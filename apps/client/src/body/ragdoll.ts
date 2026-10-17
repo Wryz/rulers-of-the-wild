@@ -43,6 +43,7 @@ export const GROUP_MIRROR = 0x8000;
 export const groups = (membership: number, filter: number) => (membership << 16) | filter;
 
 /** Each ragdoll gets its own collision bit (bits 2..14) so bodies can touch each other. */
+// DEVIATION (C-fix): SLOT_COUNT 14 → 13, as bit 15 became GROUP_MIRROR (maxRagdolls defaults to 8, so nothing is lost).
 export const SLOT_BITS = 0x7ffc;
 /** How many ragdolls one presentation world can hold (one bit each). */
 export const SLOT_COUNT = 13;
