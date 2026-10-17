@@ -165,6 +165,8 @@ export class World implements WorldPort {
     this.terrain = new Terrain(this.physics, this.options.size);
     this.physics.primeQueries();
 
+    // Every system gets the world while it is still being built: a constructor may read what is already set (options,
+    // ids, rngs, physics, terrain) but nothing after it; the rest is read from create(), update() or a phase call.
     this.cover = new GroundCover(this);
     this.entities = new EntityStore(this);
     this.joints = new JointStore(this);
