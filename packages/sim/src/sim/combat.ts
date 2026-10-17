@@ -296,6 +296,14 @@ function loadRegen(f: Fighter): number {
 }
 
 /**
+ * Hauling on a rope (§5.12): a rope end in the hands and braced (posture haulRope, which the pull verb holds while it is
+ * on). Its stamina is the pull's to drain, as a sprint's is the sprint's: no rest regen. Never true without a world.
+ */
+function hauling(f: Fighter): boolean {
+  return f.load?.mode === 'rope' && f.posture?.id === 'haulRope';
+}
+
+/**
  * A standing ruler `r` bearing down on `o`: its own horizontal velocity (walk and slide) along the line to `o` above
  * RULER_TUNING.separateSkipSpeed (docs/M1-DESIGN.md §3 phase 3: "a standing ruler whose closing speed exceeds" it;
  * RF-5). The ruler's own speed, not the pair's: someone walking into a standing ruler is still pushed out of its body
@@ -659,7 +667,8 @@ export class CombatSim {
     if (sprint) {
       // Sprinting (§5.5): a steady drain and no regen.
       f.stamina = Math.max(0, f.stamina - MOVE_TUNING.sprintStaminaPerS * DT);
-    } else if (f.alive) {
+    } else if (f.alive && !hauling(f)) {
+      // (Hauling on a rope, §5.12, the pull verb drains VERB_TUNING.pullStaminaPerS in phase 4d instead: no regen.)
       const run = f.footwork.run * f.motion.gait;
       const resting = f.free ? (run > 0.3 ? -0.035 * run : 0.085) : f.state === 'attack' ? 0 : 0.03;
       const hurt = 0.5 + 0.5 * (f.hp / f.stats.maxHp);

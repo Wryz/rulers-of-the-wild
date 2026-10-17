@@ -343,6 +343,17 @@ export class JointStore implements TripwireSink {
   }
 
   /**
+   * Pay `dl` more rope into the joint's free length (a splice knotted on at a held or loose end, §5.8). Only rope is
+   * added: the rope entity's own length is its caller's. The Rapier rope, if any, is made again at the next sync.
+   */
+  lengthen(joint: number, dl: number): void {
+    const j = this.byId.get(joint);
+    if (!j?.rope || !(dl > 0)) return;
+    j.rope.lengthM += dl;
+    this.markStale(j);
+  }
+
+  /**
    * The held end becomes tied to `to` at the current distance (tie, §5.8, §4.9); tying ends the pull.
    *
    * DEVIATION (P10 review finding 3; needs design approval): a rigid Rapier rope made around a load that still runs
@@ -1065,14 +1076,14 @@ export class JointStore implements TripwireSink {
    * length never grows.
    */
   private reelAndHaul(j: JointRecord, other: Anchor, hand: V3): void {
-    const V = VERB_TUNING;
     const A = this.anchorPoint(other);
     if (!A || !j.rope) return;
     const D = dist(hand, A);
     // Reeling in, then (the same tick) hauling once the slack is in (I-2: a haul skipped on reel-in ticks creeps).
-    if (D < j.rope.lengthM - JOINT_TUNING.tautEps) j.rope.lengthM = Math.max(D, j.rope.lengthM - V.pullHandSpeedMps * DT);
-    const L = j.rope.lengthM;
-    if (D < L - V.haulTautM || !(D > 0)) return;
+    const r = reelIn(D, j.rope.lengthM);
+    j.rope.lengthM = r.lengthM;
+    const L = r.lengthM;
+    if (!r.taut) return;
     const u = scale(sub(hand, A), 1 / D);
     this.haul(j, other, A, u);
     j.rope.lengthM = Math.min(L, D);
@@ -1366,6 +1377,22 @@ function wrapLimits(lo: number, hi: number): [number, number] {
     b += turn;
   }
   return [Math.max(-Math.PI, a), Math.min(Math.PI, b)];
+}
+
+// ---------------------------------------------------------------------------
+// The haul model's reel-in (§4.9)
+// ---------------------------------------------------------------------------
+
+/**
+ * One tick of the haul model's reel-in, pure (§4.9): a hand `handDist` m from the far anchor and a free length `lengthM`.
+ * The free length after it (shortened toward the hand's distance by at most pullHandSpeedMps × DT when the rope is
+ * slack by more than tautEps; it never grows), and whether the hand hauls this tick (the hand within haulTautM of that
+ * free length). JointStore's haul and the Pull verb's yank count (verbs/pull.ts) both ask it, so they agree.
+ */
+export function reelIn(handDist: number, lengthM: number): { lengthM: number; taut: boolean } {
+  const V = VERB_TUNING;
+  const L = handDist < lengthM - JOINT_TUNING.tautEps ? Math.max(handDist, lengthM - V.pullHandSpeedMps * DT) : lengthM;
+  return { lengthM: L, taut: handDist > 0 && !(handDist < L - V.haulTautM) };
 }
 
 // ---------------------------------------------------------------------------

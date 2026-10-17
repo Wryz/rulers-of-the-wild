@@ -374,6 +374,16 @@ export function tetherTo(proposal: Vector3, to: V3, maxH: number): void {
  * The hands' tether on the mover's proposal (§5.1, §5.12): dragging, the player stays within tetherM of the grip, so
  * he walks at the speed the load allows; holding a rope end, the hand stays within the rope's free length of its other
  * end.
+ *
+ * The rope end is measured at the hand, where the haul model measures it (§4.9): the hand's offset from the position the
+ * controller holds now (the pose the rig was made at) is carried onto the proposal, and the hand kept within
+ * √(L² − dy²) horizontally of the far anchor. Hauling (the pull verb on, §5.12) the tether is one-sided: the hauler
+ * stands braced, as the design's haul lab holds the hand still while the load swings [I-rev ran: swing_light.ts], so it
+ * never draws him toward the anchor; with the hand beyond √(L² − dy²) it only stops a step that would take him farther
+ * from the anchor than he stands now. (Two-sided, with the free length shortened to the hand's distance every taut
+ * tick, a hauler was drawn 2.9 m to a post he pulled on in 5 s, and 2.9-4.1 m toward a swinging log in 8 s: P16
+ * review.) Only holding, he is drawn along when the rope's far end goes beyond its free length (§4.9: the hand only
+ * holds).
  */
 export function tetherHands(w: World, f: Fighter, proposal: Vector3): void {
   const h = f.inventory?.hands;
@@ -390,9 +400,36 @@ export function tetherHands(w: World, f: Fighter, proposal: Vector3): void {
   if (!other || other.fighter !== undefined) return;
   const a = anchorPoint(w, other);
   if (!a) return;
+  const hand = handPoint(f);
+  const now = w.kcc.capsulePose(f)?.p ?? { x: f.pos.x, y: f.pos.y, z: f.pos.z };
+  const ox = hand.x - now.x;
+  const oz = hand.z - now.z;
   const L = j.rope.lengthM;
-  const dy = proposal.y + WORLD_TUNING.chestHeightM * f.scale - a.y;
-  tetherTo(proposal, a, Math.sqrt(Math.max(0, L * L - dy * dy)));
+  const dy = hand.y - a.y;
+  const maxH = Math.sqrt(Math.max(0, L * L - dy * dy));
+  // The proposal's hand: within reach, nothing to do.
+  const hx = proposal.x + ox - a.x;
+  const hz = proposal.z + oz - a.z;
+  const d = Math.hypot(hx, hz);
+  if (!(d > maxH)) return;
+  if (w.verbs.continuousOf(f)?.verb === 'pull') {
+    // Hauling, beyond reach: the body may come no farther from the anchor than it is now (measured at the body, so the
+    // arm's swing can't walk him outward), and is never drawn in.
+    const nx = now.x - a.x;
+    const nz = now.z - a.z;
+    const px = proposal.x - a.x;
+    const pz = proposal.z - a.z;
+    const dNow = Math.hypot(nx, nz);
+    const dProp = Math.hypot(px, pz);
+    if (!(dProp > dNow)) return;
+    proposal.x = a.x + (px * dNow) / dProp;
+    proposal.z = a.z + (pz * dNow) / dProp;
+    return;
+  }
+  // Holding: the hand back onto the circle, the body with it.
+  const k = maxH / d;
+  proposal.x = a.x + hx * k - ox;
+  proposal.z = a.z + hz * k - oz;
 }
 
 // ---------------------------------------------------------------------------
