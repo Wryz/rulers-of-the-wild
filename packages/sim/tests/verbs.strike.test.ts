@@ -16,17 +16,18 @@ import type { CombatEvent } from '../src/sim/combat';
 import { createEnemy } from '../src/sim/enemies';
 import type { Button } from '../src/sim/fighter';
 import { Rng } from '../src/sim/math';
-import { DAMAGE_TUNING, reducedMass } from '../src/sim/rules';
+import { PLAYER_MOVES } from '../src/sim/moves';
+import { boneMass, DAMAGE_TUNING, reducedMass } from '../src/sim/rules';
 import { SPECIES_BODY } from '../src/sim/species';
-import { resetTuning } from '../src/tuning/registry';
+import { resetTuning, setTuningValue } from '../src/tuning/registry';
 import { FELL_TUNING } from '../src/world/felling';
 import { LYING_ALONG_X, spawnBox, spawnLog, spawnRopeCoil, spawnStarterAxe, spawnStick, spawnStone, spawnTree } from '../src/world/factory';
 import { MATERIALS } from '../src/world/materials';
 import { physicsReady } from '../src/world/physics';
 import { principalAxis, shapeVolume } from '../src/world/shapes';
 import type { Entity, Quat, V3, WorldEvent, WorldStrike } from '../src/world/types';
-import { crossCutStrike, strokeDepthM } from '../src/world/verbs/cut';
-import { STRIKE_TUNING } from '../src/world/verbs/strike';
+import { crossCutStrike, STRIKE_TUNING, strokeDepthM } from '../src/world/verbs/cut';
+import { strikerMassKg } from '../src/world/verbs/strike';
 import { chestPoint, ropeNearest } from '../src/world/verbs/targets';
 import { freshChopEnergy } from '../src/world/verbs/tools';
 import { VERB_TUNING } from '../src/world/verbs/tuning';
@@ -467,22 +468,26 @@ function qmul(a: Quat, b: Quat): Quat {
   };
 }
 
+/** §11.2(a)'s staged deadfall: a 14 cm prop upright at x 5.07 under a 6 m, 170 kg log, its one end on the ground at x 0 and its underside on the prop's top 5.6 m along it (25°). */
+function deadfall(w: World): { prop: number; log: number } {
+  const prop = spawnStick(w, { p: { x: 5.07, y: 1.191, z: 0 }, q: { x: 0, y: 0, z: 0, w: 1 }, length: 2.38, r: 0.07 });
+  const L = 6;
+  const r = Math.sqrt(170 / MATERIALS.dryWood.density / L / (1.5 * Math.sqrt(3)));
+  const inr = r * Math.cos(Math.PI / 6);
+  const ang = 25 * DEG;
+  const d = { x: Math.cos(ang), y: Math.sin(ang) };
+  const n = { x: -Math.sin(ang), y: Math.cos(ang) };
+  const s0 = { x: 5.07 - 5.6 * d.x + inr * n.x, y: 2.38 - 5.6 * d.y + inr * n.y };
+  const q = qmul({ x: 0, y: 0, z: Math.sin(ang / 2), w: Math.cos(ang / 2) }, LYING_ALONG_X);
+  const log = spawnLog(w, { p: { x: s0.x + (L / 2) * d.x, y: s0.y + (L / 2) * d.y + 0.003, z: 0 }, q, length: L, mass: 170 });
+  return { prop, log };
+}
+
 describe('pushing free things (§5.2)', () => {
-  it('kicks knock a 14 cm prop from under a 170 kg log (each a push J = √(2·E·μ) along the facing, crediting the kicker)', async () => {
+  it('ONE kick knocks a 14 cm prop from under a 170 kg log: a push J = √(2·E·μ(m_prop, the leg)) along the facing, crediting the kicker', async () => {
     const w = await make();
     const p = w.player!;
-    // §11.2(a)'s staged scene: the prop upright at x 5.07, a 6 m log of 170 kg with one end on the ground at x 0 and its
-    // underside on the prop's top 5.6 m along it (25°).
-    const prop = spawnStick(w, { p: { x: 5.07, y: 1.191, z: 0 }, q: { x: 0, y: 0, z: 0, w: 1 }, length: 2.38, r: 0.07 });
-    const L = 6;
-    const r = Math.sqrt(170 / MATERIALS.dryWood.density / L / (1.5 * Math.sqrt(3)));
-    const inr = r * Math.cos(Math.PI / 6);
-    const ang = 25 * DEG;
-    const d = { x: Math.cos(ang), y: Math.sin(ang) };
-    const n = { x: -Math.sin(ang), y: Math.cos(ang) };
-    const s0 = { x: 5.07 - 5.6 * d.x + inr * n.x, y: 2.38 - 5.6 * d.y + inr * n.y };
-    const q = qmul({ x: 0, y: 0, z: Math.sin(ang / 2), w: Math.cos(ang / 2) }, LYING_ALONG_X);
-    const log = spawnLog(w, { p: { x: s0.x + (L / 2) * d.x, y: s0.y + (L / 2) * d.y + 0.003, z: 0 }, q, length: L, mass: 170 });
+    const { prop, log } = deadfall(w);
     expect(ent(w, log).mass).toBeCloseTo(170, 6);
     expect(ent(w, prop).mass).toBeGreaterThan(17);
     w.step();
@@ -494,37 +499,63 @@ describe('pushing free things (§5.2)', () => {
     expect(Math.abs(ent(w, log).pose.p.y - set)).toBeLessThan(0.01);
     const met = strikes(w);
     const queued = vi.spyOn(w.entities, 'queueImpulse');
-    let kicks = 0;
-    for (; kicks < 5 && ent(w, log).pose.p.y > set - 0.5; kicks++) {
-      const pp = ent(w, prop).pose.p;
-      standAt(w, pp.x, pp.z - 1.05, { x: pp.x, z: pp.z });
+    p.stamina = 1;
+    swing(w, 'rkick');
+    expect(p.lastMoveId).toBe('lowKick');
+    run(w, 120);
+    expect(met().map((m) => [m.effect, m.reaction.mode])).toEqual([['push', 'rebound']]);
+    // Down: the log's middle more than 0.5 m lower, after one kick.
+    expect(ent(w, log).pose.p.y).toBeLessThan(set - 0.5);
+    expect(ent(w, prop).credit).toEqual(['p1']);
+    // The push: E = DS's low kick (6 × 18 = 108 J), μ with the kicking leg's mass (shin + thigh, boneMass): ≈ 41 N·s,
+    // §5.2's "J 40 N·s" kick.
+    const E = 6 * p.stats.damageMul * DAMAGE_TUNING.meleeJPerDmg;
+    const leg = boneMass(p, 'shinR') + boneMass(p, 'thighR');
+    expect(strikerMassKg(p, PLAYER_MOVES.lowKick, false)).toBeCloseTo(leg, 12);
+    const J = Math.sqrt(2 * E * reducedMass(ent(w, prop).mass, leg));
+    console.info(`one low kick: E ${E.toFixed(1)} J, leg ${leg.toFixed(2)} kg, J ${J.toFixed(2)} N·s`);
+    expect(J).toBeGreaterThan(39);
+    // The kick's push (the impulse queued at the struck point; the contact pipeline queues reactions of its own later).
+    const hit = met()[0].point;
+    const pushes = queued.mock.calls.filter((c) => c[0] === prop && c[2] !== null && Math.hypot(c[2].x - hit.x, c[2].y - hit.y, c[2].z - hit.z) < 1e-9);
+    expect(pushes).toHaveLength(1);
+    const [, j, at] = pushes[0];
+    expect(Math.hypot(j.x, j.y, j.z)).toBeCloseTo(J, 6);
+    expect(j.z / J).toBeCloseTo(1, 6);
+    expect(at).not.toBeNull();
+  });
+
+  it('a kick can’t pass through a prop between ticks: the foot is swept over its forward path (low kicks from 0.7-1.2 m all meet it)', async () => {
+    for (const dz of [0.7, 0.8, 0.9, 1.0, 1.1, 1.2]) {
+      const w = await make();
+      const p = w.player!;
+      const { prop, log } = deadfall(w);
       w.step();
-      // A fresh kick each time (a tired one has less behind it, DS's swing stamina).
+      standAt(w, 5.07, -dz, { x: 5.07, z: 0 });
+      run(w, 120);
+      const set = ent(w, log).pose.p.y;
+      const met = strikes(w);
       p.stamina = 1;
       swing(w, 'rkick');
-      expect(p.lastMoveId).toBe('lowKick');
-      run(w, 60);
-      console.info(`kick ${kicks + 1}: log middle ${ent(w, log).pose.p.y.toFixed(2)} m, prop at z ${ent(w, prop).pose.p.z.toFixed(2)}`);
+      run(w, 120);
+      expect(met().map((m) => m.effect), `${dz} m`).toEqual(['push']);
+      expect(met()[0].owner, `${dz} m`).toEqual({ kind: 'entity', id: prop });
+      expect(ent(w, log).pose.p.y, `${dz} m`).toBeLessThan(set - 0.5);
     }
-    console.info(`kick out a prop: the 170 kg log came down after ${kicks} low kicks`);
-    expect(met().length).toBe(kicks);
-    expect(met().every((m) => m.effect === 'push' && m.reaction.mode === 'rebound')).toBe(true);
-    // The log came down (its middle more than 0.5 m lower) within 5 kicks of 108 J each (DS's low kick: 6 × 18 J; 4 measured).
-    // DEVIATION (§13.1 P15 "a kick knocks a 14 cm prop from under a 170 kg log"): one such kick moves the loaded prop
-    // only 7-11 cm (the log's weight pins both its ends by friction); it took 4 here, 2-3 from other stand-offs.
-    expect(ent(w, log).pose.p.y).toBeLessThan(set - 0.5);
-    expect(kicks).toBeLessThanOrEqual(5);
-    expect(ent(w, prop).credit).toEqual(['p1']);
-    // Each push: J = √(2·E·μ(m_prop, strikeMassKg)) along the facing (+z here), at the struck point.
-    const E = 6 * p.stats.damageMul * DAMAGE_TUNING.meleeJPerDmg;
-    const J = Math.sqrt(2 * E * reducedMass(ent(w, prop).mass, VERB_TUNING.strikeMassKg));
-    const pushes = queued.mock.calls.filter((c) => c[0] === prop);
-    expect(pushes).toHaveLength(kicks);
-    for (const [, j, at] of pushes) {
-      expect(Math.hypot(j.x, j.y, j.z)).toBeCloseTo(J, 6);
-      expect(j.z / J).toBeCloseTo(1, 6);
-      expect(at).not.toBeNull();
-    }
+  });
+
+  it('the striker’s mass: an unarmed blow’s limb (boneMass), an armed one strikeMassKg × scale³ (a giant’s swat isn’t a man’s)', async () => {
+    const w = await make();
+    const p = w.player!;
+    expect(strikerMassKg(p, PLAYER_MOVES.lowKick, false)).toBeCloseTo(boneMass(p, 'shinR') + boneMass(p, 'thighR'), 12);
+    expect(strikerMassKg(p, PLAYER_MOVES.jab, false)).toBeCloseTo(boneMass(p, 'foreArmL') + boneMass(p, 'upperArmL'), 12);
+    expect(strikerMassKg(p, PLAYER_MOVES.jab, true)).toBeCloseTo(VERB_TUNING.strikeMassKg, 12);
+    const giant = w.spawnCreature('giantApe', { x: 20, z: 20 });
+    expect(strikerMassKg(giant, PLAYER_MOVES.jab, true)).toBeCloseTo(VERB_TUNING.strikeMassKg * giant.scale ** 3, 9);
+    // One bone of the chain when tuned so.
+    setTuningValue('STRIKE_TUNING', 'unarmedLimbBones', 1);
+    expect(strikerMassKg(p, PLAYER_MOVES.lowKick, false)).toBeCloseTo(boneMass(p, 'shinR'), 12);
+    resetTuning('STRIKE_TUNING');
   });
 
   it('an axe clangs off a fixed stone block (§5.2: anything fixed)', async () => {
@@ -606,21 +637,51 @@ describe('digging by strike (§5.10)', () => {
 // ---------------------------------------------------------------------------
 
 describe('the cut verb (§5.3)', () => {
-  it('{ verb: cut, target } plays the committed swing at the target: the same chop as a press of E', async () => {
+  it('{ verb: cut, target } turns to the target at faceTurnRate, then plays the committed swing: the same chop as a press of E', async () => {
     const w = await make();
     const p = w.player!;
     const { tree } = spawnTree(w, { at: { x: 0, z: 0 }, diameter: 0.3, height: 12 });
     wieldAxe(w);
     standToChop(w, tree, 150);
-    // Facing away: the verb turns the player to the target.
+    // Facing 90° away: the verb turns the player to the target (§5.0's work-action turn), never in one snap.
+    const want = p.yaw;
     p.yaw += Math.PI / 2;
     run(w, 2);
     verb(w, { verb: 'cut', target: tree });
-    const out = run(w, 2);
-    for (let t = 0; t < 200 && !p.free; t++) out.world.push(...w.step().world);
+    const yaws: number[] = [p.yaw];
+    const out = { world: [] as WorldEvent[], combat: [] as CombatEvent[] };
+    let swungAt = -1;
+    let aim = NaN;
+    let choppedFrom: V3 | null = null;
+    for (let t = 0; t < 260 && (t < 3 || !p.free); t++) {
+      const r = w.step();
+      // The aim the verb set (the trunk's surface point nearest the player's focus height), as the turn begins.
+      if (t === 0) aim = Math.atan2(p.verbAim!.x - p.pos.x, p.verbAim!.z - p.pos.z);
+      out.world.push(...r.world);
+      out.combat.push(...r.combat);
+      if (swungAt < 0 && r.combat.some((c) => c.type === 'attackStart')) swungAt = t;
+      if (swungAt < 0) yaws.push(p.yaw);
+      if (!choppedFrom && r.world.some((e) => e.type === 'chop')) choppedFrom = { x: p.pos.x, y: p.pos.y, z: p.pos.z };
+    }
+    expect(Math.abs(angleDiff(aim / DEG, want / DEG))).toBeLessThan(1);
+    const left = yaws.map((y) => Math.abs(angleDiff(y / DEG, aim / DEG)));
+    expect(Math.abs(left[0] - 90)).toBeLessThan(1);
+    // Each tick the turn takes faceTurnRate of what is left (no tick much more: never a snap); the swing starts once
+    // under aimTurnTolDeg.
+    for (let k = 1; k < left.length; k++) {
+      if (left[k - 1] < 1e-9) continue;
+      expect(left[k] / left[k - 1]).toBeGreaterThanOrEqual(1 - VERB_TUNING.faceTurnRate - 1e-6);
+    }
+    expect(left[1]).toBeGreaterThan(70);
+    expect(swungAt).toBeGreaterThan(10);
+    expect(left[left.length - 1]).toBeLessThanOrEqual(STRIKE_TUNING.aimTurnTolDeg);
     expect(of(out.world, 'chop')).toHaveLength(1);
     expect(out.combat.filter((c) => c.type === 'attackStart')).toHaveLength(1);
-    expect(Math.abs(angleDiff(bearingOf(ent(w, tree).plant!.cut!.fromDir), 150))).toBeLessThan(0.5);
+    // The notch is on the side the chopper stood at the chop (the swing came within aimTurnTolDeg of the trunk).
+    const side = bearingOf(ent(w, tree).plant!.cut!.fromDir);
+    const t0 = ent(w, tree).pose.p;
+    expect(Math.abs(angleDiff(side, bearingOf({ x: choppedFrom!.x - t0.x, y: 0, z: choppedFrom!.z - t0.z })))).toBeLessThan(1e-6);
+    expect(Math.abs(angleDiff(side, 150))).toBeLessThan(STRIKE_TUNING.aimTurnTolDeg);
     // The focus stays on the target as the client's highlight would.
     expect(w.verbs.focusedEntity(p)).toBe(tree);
   });
@@ -695,18 +756,30 @@ describe('projectile world hits and landings (§5.11)', () => {
       expect(w.combat.drops, into).toEqual([]);
       expect(w.entities.all().filter((x) => x.state === 'projectile'), into).toEqual([]);
       // From there the contact pipeline scores what it meets: a dry spear into a wall at 20 m/s (340 J against its
-      // 51 J break energy) shatters, its pieces still the thrower's.
+      // 51 J break energy) shatters, its pieces still the thrower's; one thrown down onto the dirt lands whole.
       const broke = of(world, 'break').find((b) => b.entity === spear);
-      const now = broke ? broke.pieces.map((id) => ent(w, id)) : [ent(w, spear)];
-      for (const e of now) expect(e.credit, into).toEqual(['p1']);
+      if (into === 'wall') {
+        expect(broke, into).toBeDefined();
+        expect(w.entities.get(spear), into).toBeUndefined();
+        expect(broke!.pieces.length, into).toBeGreaterThan(1);
+        for (const id of broke!.pieces) expect(ent(w, id).credit, into).toEqual(['p1']);
+      } else {
+        expect(broke, into).toBeUndefined();
+        expect(ent(w, spear).state, into).toBe('free');
+        expect(ent(w, spear).credit, into).toEqual(['p1']);
+      }
       if (wall !== null) {
         // Stopped by the world in flight (projectileHit: a `thud` off a wall), as the entity again where it met it.
         const thuds = combat.filter((c): c is Extract<CombatEvent, { type: 'thud' }> => c.type === 'thud' && c.wall);
         expect(thuds.length, into).toBeGreaterThan(0);
         expect(Math.abs(thuds[0].point.z - (6 - 0.2))).toBeLessThan(0.1);
       }
-      run(w, 120);
+      const later = run(w, 120).world;
       expect(w.combat.drops, into).toEqual([]);
+      if (into === 'ground') {
+        expect(of(later, 'break').filter((b) => b.entity === spear), into).toEqual([]);
+        expect(ent(w, spear).state, into).toBe('free');
+      }
     }
   });
 });
@@ -731,6 +804,14 @@ describe('determinism (§8.1)', () => {
         verb(w, { verb: 'cut', target: tree });
         for (let t = 0; t < 200 && (t < 3 || !w.player!.free); t++) w.step();
       }
+      // A branch cut part-way through (Entity.crossCut goes through the save).
+      spawnBox(w, { p: { x: -4, y: 0.45, z: 1.5 }, size: [0.4, 0.9, 0.4], material: 'stone', state: 'fixed', look: 'block' });
+      const br = spawnStick(w, { p: { x: -4, y: 0.94, z: 1.5 }, q: LYING_ALONG_X, length: 2, r: 0.03 });
+      run(w, 30);
+      standAt(w, -3.5, 0.25, { x: -3.5, z: 1.5 });
+      verb(w, { verb: 'focus', target: br });
+      w.step();
+      swing(w);
       w.verbs.letGo(w.player!);
       w.step();
       wieldDiggingStick(w);
@@ -748,6 +829,10 @@ describe('determinism (§8.1)', () => {
     expect(a.w.entities.all().some((e) => e.material === 'dirt')).toBe(true);
     expect(ent(a.w, 1).plant?.cut?.chops).toBe(3);
     expect(a.w.entities.all().filter((e) => e.material === 'vine' && e.state === 'free')).toHaveLength(1);
+    const cut = a.w.entities.all().filter((e) => e.crossCut !== null);
+    expect(cut).toHaveLength(1);
+    expect(cut[0].crossCut!.remaining).toBeGreaterThan(0);
+    expect(cut[0].crossCut!.remaining).toBeLessThan(1);
     expect(Buffer.from(a.bytes).equals(Buffer.from(b.bytes))).toBe(true);
     // Save → load → save gives the same entity, joint, terrain (with the dug mask) and felling records (the M1 loader's
     // scope, §8.3): the piles, the severed vine's pieces and the notched tree come back as they were.

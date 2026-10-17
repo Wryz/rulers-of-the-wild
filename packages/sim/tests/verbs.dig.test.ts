@@ -10,13 +10,13 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { moveCommand, type VerbCommand } from '../src/sim/commands';
 import { resetTuning, setTuningValue } from '../src/tuning/registry';
 import { NOISE_TUNING } from '../src/world/creatures/defs';
-import { spawnLog, spawnStarterAxe, spawnStick, stickPrism } from '../src/world/factory';
+import { groundRestY, spawnLog, spawnStarterAxe, spawnStick, stickPrism } from '../src/world/factory';
 import { MATERIALS } from '../src/world/materials';
 import { physicsReady } from '../src/world/physics';
 import { shapeVolume } from '../src/world/shapes';
 import { Terrain, TERRAIN_TUNING } from '../src/world/terrain';
 import type { Entity, WorldEvent } from '../src/world/types';
-import { DIG_TUNING, digAt, dirtPileShape, isDirtPile, placeSpoil } from '../src/world/verbs/dig';
+import { DIG_TUNING, digAt, dirtPileShape, isDirtPile, placeSpoil, spoilLostM3 } from '../src/world/verbs/dig';
 import { VERB_TUNING } from '../src/world/verbs/tuning';
 import { createWorld, type World } from '../src/world/world';
 
@@ -131,6 +131,8 @@ describe('where the dirt goes (§4.13)', () => {
     const first = placeSpoil(w, 0, 0, 0.0391, ['p1']);
     expect(first.pile).not.toBeNull();
     const pile = ent(w, first.pile!);
+    // Set down at rest on the ground, VERB_TUNING.placeDropM clear (as Place sets a thing down).
+    expect(pile.pose.p.y - groundRestY(w, pile.pose.p.x, pile.pose.p.z, pile.shape, pile.pose.q)).toBeCloseTo(VERB_TUNING.placeDropM, 5);
     expect(pile.material).toBe('dirt');
     expect(pile.state).toBe('free');
     expect(pile.credit).toEqual(['p1']);
@@ -187,6 +189,9 @@ describe('where the dirt goes (§4.13)', () => {
     // Nothing lost: the terrain's net change plus the piles' volume is zero (float32 heights aside).
     const pileVolume = piles(w).reduce((s, e) => s + shapeVolume(e.shape), 0);
     expect(Math.abs(netTerrainVolume(t, 0, 0, 16) + pileVolume)).toBeLessThan(1e-4);
+    // Only float32 rounding of the raised heights went unplaced (grams of dirt), and it was counted.
+    expect(spoilLostM3(w)).toBeLessThan(1e-5);
+    expect(Math.abs(netTerrainVolume(t, 0, 0, 16) + pileVolume + spoilLostM3(w))).toBeLessThan(1e-4);
   });
 
   it('a 3 × 2 × 1.5 m pit dug with piles and spoil finishes within 1.2 × its no-spoil strike count (RT-2)', async () => {
@@ -228,11 +233,65 @@ describe('where the dirt goes (§4.13)', () => {
     expect(r.passes).toBeLessThan(2000);
     expect(r.strikes).toBeLessThanOrEqual(3822); // GATE (RT-2)
     expect(crowded).toBe(0);
-    // Bounded by the rule's 10 m reach, not 1,180 bodies (the spoil ring round an 8 × 6 m pit is wider than 10 m, so
-    // its far side may hold piles of its own: 20 in all here, a finding for AC-2(b)'s "≤ 12 piles", reported).
-    expect(piles(w).length).toBeLessThanOrEqual(2 * TERRAIN_TUNING.maxPilesNear);
+    // The per-pit budget (§4.13, AC-2(b): "≤ 12 piles"): pilesNearR (15 m) takes in the pit's whole spoil ring.
+    expect(piles(w).length).toBeLessThanOrEqual(TERRAIN_TUNING.maxPilesNear);
+    expect(spoilLostM3(w)).toBeLessThan(1e-4);
     const pileVolume = piles(w).reduce((s, e) => s + shapeVolume(e.shape), 0);
     expect(Math.abs(netTerrainVolume(w.terrain, 0, 0, 25) + pileVolume)).toBeLessThan(1e-3);
+  });
+});
+
+describe('where a new pile goes, and dirt never lost (§4.13)', () => {
+  it('a new pile is never set down on another entity, nor past the terrain’s edge', async () => {
+    // Where the first pile of a dig at (0, 0) goes in an empty world: S.
+    const bare = await make(43);
+    bare.teleport(bare.player!, -15, -15, 0);
+    const S = digAt(bare, 0, 0, 1, null).spoil[0];
+    // The same dig with a log lying across S: the pile goes beside it, overlapping nothing.
+    const w = await make(43);
+    w.teleport(w.player!, -15, -15, 0);
+    const log = spawnLog(w, { p: { x: S.x, y: 0.12, z: S.z }, length: 1.2, mass: 20 });
+    run(w, 30);
+    const r = digAt(w, 0, 0, 1, null);
+    expect(r.spoil[0]).toEqual(S);
+    const pile = ent(w, r.pile!);
+    expect(Math.hypot(pile.pose.p.x - S.x, pile.pose.p.z - S.z)).toBeGreaterThan(0.3);
+    w.step();
+    expect(w.queries.overlaps(pile.shape, pile.pose, { terrain: false, entities: 'all', exclude: { entities: [pile.id] } })).toEqual([]);
+    expect(ent(w, log).pose.p.y).toBeLessThan(0.2);
+    // At the edge: a dig whose spoil point is the terrain's last vertex sets its pile down inside the terrain.
+    const t = w.terrain;
+    const edge = t.minX + t.tilesX * t.tileSize;
+    const e = digAt(w, edge - 2, 5, 1, null);
+    expect(e.spoil[0].x).toBeGreaterThan(edge - 0.3);
+    const ep = ent(w, e.pile!);
+    const a = ep.shape.kind === 'hull' ? ep.shape.points[3] : NaN;
+    expect(ep.pose.p.x + a).toBeLessThanOrEqual(edge + 1e-9);
+  });
+
+  it('dirt the berm can’t take (no spoil point within reach) is set down as a pile beyond the dug ground, not lost', async () => {
+    const w = await make();
+    w.teleport(w.player!, -15, -15, 0);
+    // The spoil search reaches only its first ring (1.0 m out), inside the setback of any dig's own dug ground: no spoil
+    // point lies within reach of a dig (§4.13 would leave its dirt nowhere).
+    setTuningValue('TERRAIN_TUNING', 'spoilSearchMaxM', TERRAIN_TUNING.digRadiusM + TERRAIN_TUNING.spoilMinGapM);
+    const r = digAt(w, 3, 3, 1, null);
+    expect(w.terrain.findSpoilPoint(3, 3)).toBeNull();
+    // Its dirt: a pile at the nearest free spot beyond the dug ground and its setback.
+    expect(r.pile).not.toBeNull();
+    const far = ent(w, r.pile!);
+    const rho = MATERIALS[TERRAIN_TUNING.material].density;
+    expect(far.mass).toBeCloseTo(r.volumeM3 * rho, 9);
+    const t = w.terrain;
+    const v = t.vertexIndex(far.pose.p.x, far.pose.p.z);
+    expect(t.isNearDug(v.gi, v.gj)).toBe(false);
+    // The next dig's dirt grows it (it lies within pileMergeR of the next free spot and stays under the cap).
+    const r2 = digAt(w, 3, 3, 1, null);
+    expect(r2.pile).toBe(r.pile);
+    expect(far.mass).toBeCloseTo((r.volumeM3 + r2.volumeM3) * rho, 9);
+    expect(spoilLostM3(w)).toBe(0);
+    const pileVolume = piles(w).reduce((s, e) => s + shapeVolume(e.shape), 0);
+    expect(Math.abs(netTerrainVolume(t, 3, 3, 10) + pileVolume)).toBeLessThan(1e-6);
   });
 });
 
@@ -275,28 +334,33 @@ describe('the dig verb (§5.10)', () => {
     const ref = new Terrain(null, 50);
     const scoop = ref.lower(0, 0.6, VERB_TUNING.handDigDepthMul).volumeM3;
     verb(w, { verb: 'dig', target: 0, at: [0, 0, 60], charge: 1 });
-    const evs = run(w, 3 * VERB_TUNING.handDigFrames + 10);
+    // Three scoops, one each handDigFrames (each a committed work action, the dirt moving at handDigActFrac of it).
+    const evs: WorldEvent[] = [];
+    const at: number[] = [];
+    for (let t = 0; t < 4 * VERB_TUNING.handDigFrames && at.length < 3; t++) {
+      const r = w.step();
+      evs.push(...r.world);
+      if (r.world.some((e) => e.type === 'dig')) at.push(w.tick);
+    }
+    expect(at).toHaveLength(3);
+    expect([at[1] - at[0], at[2] - at[1]]).toEqual([VERB_TUNING.handDigFrames, VERB_TUNING.handDigFrames]);
     const digs = of(evs, 'dig');
-    expect(digs).toHaveLength(3);
     for (const d of digs) {
       expect(d.volumeM3).toBeCloseTo(scoop, 9);
       expect(d.point.x).toBeCloseTo(0, 9);
       expect(d.point.z).toBeCloseTo(0.6, 9);
     }
     expect(of(evs, 'verb').filter((v) => v.verb === 'dig' && v.ok)).toHaveLength(3);
-    // Each scoop is a work action (state 'pickup'), one every handDigFrames.
-    const ticks = digs.map((d) => evs.indexOf(d));
-    expect(ticks.length).toBe(3);
     // The noise bus heard each (§6.2: a dig carries NOISE_TUNING.dig).
     expect(of(evs, 'noise').filter((n) => n.kind === 'dig').map((n) => n.radius)).toEqual([NOISE_TUNING.dig, NOISE_TUNING.dig, NOISE_TUNING.dig]);
-    // The player walks off: no more scoops.
-    for (let t = 0; t < 2 * VERB_TUNING.handDigFrames; t++) {
+    // The player walks off as the third scoop lands: that scoop's action plays out (committed, §5.0), the next never
+    // starts ("strokes until … the player moves", §5.4): exactly three scoops.
+    const after: WorldEvent[] = [];
+    for (let t = 0; t < 3 * VERB_TUNING.handDigFrames; t++) {
       w.commands.push(moveCommand(w.tick + 1, 1, 1, 0));
-      const r = w.step();
-      evs.push(...r.world);
+      after.push(...w.step().world);
     }
-    const after = of(evs, 'dig').length;
-    expect(after).toBeLessThanOrEqual(4);
+    expect(of(after, 'dig')).toEqual([]);
     expect(w.verbs.continuousOf(p)).toBeNull();
     expect(of(run(w, 2 * VERB_TUNING.handDigFrames), 'dig')).toEqual([]);
   });
