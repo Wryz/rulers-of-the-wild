@@ -635,8 +635,10 @@ describe('severe effects and wounds (§6.4)', () => {
     expect(big.severe).toBe(true);
     const t0 = w.tick;
     mind.onWound(big);
-    expect(mind.state).toBe('flee');
     expect(mind.fleeUntil).toBe(t0 + secs(G.fleeSevereS));
+    // The next decision (phase 2) takes it up.
+    w.step();
+    expect(mind.state).toBe('flee');
     let top = 0;
     until(w, () => mind.state !== 'flee', secs(G.fleeSevereS) + 5, 'fled', () => {
       top = Math.max(top, speedOf(g));
@@ -646,6 +648,27 @@ describe('severe effects and wounds (§6.4)', () => {
     expect(flat(g.pos, lair)).toBeLessThanOrEqual(G.arriveM + 0.5);
     expect(mind.state).toBe('rest');
     expect(mind.restUntil).toBe(w.tick + secs(G.lairRestS));
+  });
+
+  it('a severe wound as it trips: down while tripped and rising, then it flees on (not recover)', async () => {
+    const w = await make({ player: false });
+    const lair = { x: 0, z: 30 };
+    const { g, mind } = giantAt(w, lair.x, lair.z, Math.PI);
+    w.teleport(g, 0, -10, 0);
+    steps(w, 2);
+    const cause: ImpactCause = { kind: 'entity', entityId: null, fighterId: null, credit: [], held: false, feature: 'fall' };
+    const big = rulerDamage(w, g, RULER_TUNING.severeFrac * g.ruler!.maxHp + 1, 'flanks', 'abdomen', cause, g.rig.abdomen.pos.clone())!;
+    mind.onWound(big);
+    w.rulers.requestTrip(g, 'impact', cause);
+    const states = trace(w, mind, (note) => {
+      until(w, () => mind.state === 'down', 5, 'down', note);
+      until(w, () => mind.state === 'flee', secs(10), 'fleeing again', note);
+    });
+    // It takes up the flee at the next decision (the body trips at that tick's phase 4c), is down while tripped and
+    // rising, and flees on once up.
+    expect(states.map((s) => s.state)).toEqual(['rest', 'flee', 'down', 'flee']);
+    expect(g.state).not.toBe('tripped');
+    expect(w.tick).toBeLessThan(mind.fleeUntil);
   });
 
   it('winded: the cooldown × windedCooldownMul and the chase × windedChaseMul', async () => {
@@ -893,6 +916,23 @@ describe('determinism and the record (§6.8, §8)', () => {
     expect(m2.route(w2)).toEqual(r.route);
     const { route: _route, ...noRoute } = r;
     expect(() => m2.restoreRecord(noRoute as MindRecV1)).toThrow(/route/);
+  });
+
+  it("the loader takes a giant's record only with its route, and an ape's only without one", async () => {
+    const w = await make({ player: false, nav: 'off' });
+    giantAt(w, -10, 0, 0);
+    createCreature(w, 'ape', { x: 10, z: 0 }, 0);
+    steps(w, 3);
+    const bytes = serializeWorld(w);
+    const edit = (fn: (s: SaveV1) => void): Uint8Array => {
+      const s = parsed(bytes);
+      fn(s);
+      return new TextEncoder().encode(canonicalJson(s));
+    };
+    track(await loadWorld(bytes, { nav: 'off' }));
+    await expect(loadWorld(edit((s) => delete s.minds.find((m) => m.kind === 'giantApe')!.route), { nav: 'off' })).rejects.toThrow(/route/);
+    await expect(loadWorld(edit((s) => (s.minds.find((m) => m.kind === 'ape')!.route = null)), { nav: 'off' })).rejects.toThrow(/route/);
+    await expect(loadWorld(edit((s) => (s.minds.find((m) => m.kind === 'giantApe')!.route = [{ x: 1 } as never])), { nav: 'off' })).rejects.toThrow(/route\[0\]/);
   });
 
   it('save → load → save taken mid-charge is byte-identical for the minds, fighters and rulers, and the loaded giant charges on', async () => {

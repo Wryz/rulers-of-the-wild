@@ -126,30 +126,33 @@ export function rimHeading(w: World, f: Fighter): number | null {
   const maxX = t.minX + t.tilesX * t.tileSize;
   const maxZ = t.minZ + t.tilesZ * t.tileSize;
   const rings = Math.ceil(Math.max(maxX - t.minX, maxZ - t.minZ) / s);
-  let best: { d2: number; h: number; i: number; j: number } | null = null;
-  const consider = (i: number, j: number): void => {
-    const x = x0 + i * s;
-    const z = z0 + j * s;
-    if (x < t.minX || x > maxX || z < t.minZ || z > maxZ) return;
-    const h = t.heightAt(x, z);
-    if (t.originalHeightAt(x, z) - h > outDepth || h - floor > T.climbMaxM) return;
-    const d2 = i * i + j * j;
-    if (!best || d2 < best.d2 || (d2 === best.d2 && h < best.h)) best = { d2, h, i, j };
-  };
+  let bestD2 = Infinity;
+  let bestH = Infinity;
+  let bestI = 0;
+  let bestJ = 0;
+  const ring: [number, number][] = [];
   for (let k = 1; k <= rings; k++) {
     // The ring's nearest points are k away: once that is farther than the best found, nothing nearer is left.
-    if (best && k * k > (best as { d2: number }).d2) break;
-    for (let i = -k; i <= k; i++) {
-      consider(i, -k);
-      consider(i, k);
-    }
-    for (let j = -k + 1; j <= k - 1; j++) {
-      consider(-k, j);
-      consider(k, j);
+    if (k * k > bestD2) break;
+    ring.length = 0;
+    for (let i = -k; i <= k; i++) ring.push([i, -k], [i, k]);
+    for (let j = -k + 1; j <= k - 1; j++) ring.push([-k, j], [k, j]);
+    for (const [i, j] of ring) {
+      const x = x0 + i * s;
+      const z = z0 + j * s;
+      if (x < t.minX || x > maxX || z < t.minZ || z > maxZ) continue;
+      const h = t.heightAt(x, z);
+      if (t.originalHeightAt(x, z) - h > outDepth || h - floor > T.climbMaxM) continue;
+      const d2 = i * i + j * j;
+      if (d2 < bestD2 || (d2 === bestD2 && h < bestH)) {
+        bestD2 = d2;
+        bestH = h;
+        bestI = i;
+        bestJ = j;
+      }
     }
   }
-  const b = best as { i: number; j: number } | null;
-  return b ? Math.atan2(b.i, b.j) : null;
+  return bestD2 < Infinity ? Math.atan2(bestI, bestJ) : null;
 }
 
 export class RulerMind extends CreatureMind {
@@ -201,11 +204,11 @@ export class RulerMind extends CreatureMind {
       }
       return;
     }
-    if (this.state === 'down') {
-      // Up and out of the pit: recover (§6.4), or flee on when a severe wound's flee was cut short (INTERPRETATION:
-      // "any severe wound → flee"; a trip on the wounding tick must not cancel it).
-      return this.enter(w, tick < this.fleeUntil ? 'flee' : 'recover');
-    }
+    // A severe wound's flee (§6.4): onWound opened it; it runs until fleeUntil, ignoring the player. A knock-down inside
+    // it flees on once up (INTERPRETATION: "any severe wound → flee"; the trip on the wounding tick doesn't cancel it).
+    if (tick < this.fleeUntil && this.state !== 'flee') return this.enter(w, 'flee');
+    // Up and out of the pit: recover (§6.4).
+    if (this.state === 'down') return this.enter(w, 'recover');
     const target = this.huntTarget(w);
     const hunting = target !== null && this.senses.of(target.id) >= G.chaseAt && this.senses.seenWithin(tick);
     switch (this.state) {
@@ -467,8 +470,9 @@ export class RulerMind extends CreatureMind {
 
   /**
    * A wound (phase 17b, after the bus's roar): awareness of what wounded it (the attacker when a fighter of another team
-   * did it, else "something") at least woundAwareness; lkp the wound's point; a severe wound sends it to its lair for
-   * fleeSevereS (a knock-down meanwhile flees on once up).
+   * did it, else "something") at least woundAwareness; lkp the wound's point; a severe wound opens a flee to its lair
+   * for fleeSevereS, which the next decision takes up (transitions are phase 2's; a script or the pause suspends them,
+   * and a knock-down defers it until the giant is up).
    * INTERPRETATION (§6.4 "lkp = the wound's point"): for a fighter's own blow the bus has just set lkp to the attacker
    * (being hurt, §6.2), which says where the threat is better than a point on its own body; that stays.
    */
@@ -487,10 +491,7 @@ export class RulerMind extends CreatureMind {
       this.senses.lkpTick = w.tick;
       this.senses.stimulus = Infinity;
     }
-    if (wd.severe) {
-      this.fleeUntil = w.tick + Math.round(G.fleeSevereS / DT);
-      if (!bodyDown(self) && !self.ruler?.inPit) this.enter(w, 'flee');
-    }
+    if (wd.severe) this.fleeUntil = w.tick + Math.round(G.fleeSevereS / DT);
   }
 
   // -------------------------------------------------------------------------
@@ -818,8 +819,10 @@ function legAim(f: Fighter, h: number, at: { x: number; z: number }): number {
     const p = f.footwork.foot(side).pos;
     a += Math.abs((p.x - f.pos.x) * c - (p.z - f.pos.z) * s) / 2;
   }
+  // Nearer than its feet stand out, he is between or at its legs already: straight at him.
+  if (!(d > a)) return b;
   const left = dx * c - dz * s;
-  return b - (left >= 0 ? 1 : -1) * Math.asin(Math.min(1, a / d));
+  return b - (left >= 0 ? 1 : -1) * Math.asin(a / d);
 }
 
 /** The world point of a wound (its bone's frame at the rig's pose; WoundRecord.local is in bone units, × scale). */
