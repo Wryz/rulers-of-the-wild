@@ -20,9 +20,10 @@ import type { Fighter } from '../src/sim/fighter';
 import { createPlayer } from '../src/sim/roster';
 import { resetTuning } from '../src/tuning/registry';
 import { spawnBox, spawnLog, spawnRopeCoil, spawnSapling, spawnStarterAxe, spawnStick, spawnTree } from '../src/world/factory';
-import { JOINT_TUNING, nnls } from '../src/world/joints';
+import { bendAngle, JOINT_TUNING, nnls, revoluteAngle } from '../src/world/joints';
 import { MATERIALS } from '../src/world/materials';
 import { physicsReady } from '../src/world/physics';
+import { VERB_TUNING } from '../src/world/verbs/tuning';
 import type { Anchor, Entity, JointRecord, Quat, V3, WorldEvent } from '../src/world/types';
 import { createWorld, type World, type WorldOptions } from '../src/world/world';
 
@@ -344,6 +345,75 @@ describe('tripwires (§4.9)', () => {
     expect(tripwires(w.events)).toEqual([]);
   });
 
+  it('a crossing whose load beats an anchored stake’s capacity pulls it loose (an ape’s 3,902 N against 1,200 N): `loosed`, free, dynamic, its half of p queued; a player’s 1,099 N leaves it driven', async () => {
+    const w = await make();
+    const postId = spawnBox(w, { p: { x: -2.2, y: 0.3, z: 0 }, size: [0.4, 0.6, 0.4], material: 'dryWood', state: 'fixed', look: 'post' });
+    const stakeAt = (z: number): number => spawnLog(w, { p: { x: 2.2, y: 0.2, z }, q: { x: 0, y: 0, z: 0, w: 1 }, length: 1, r: 0.04, state: 'anchored' });
+    const stake = stakeAt(0);
+    const post2 = spawnBox(w, { p: { x: -2.2, y: 0.3, z: 6 }, size: [0.4, 0.6, 0.4], material: 'dryWood', state: 'fixed', look: 'post' });
+    const stake2 = stakeAt(6);
+    expect(ent(w, stake).anchor!.capacityN).toBe(1200);
+    run(w, 5);
+    const vine = tieRope(w, { entity: postId, local: { x: 0.2, y: 0, z: 0 } }, { entity: stake, local: { x: 0, y: 0.3, z: 0 } }, 'vine');
+    const vine2 = tieRope(w, { entity: post2, local: { x: 0.2, y: 0, z: 0 } }, { entity: stake2, local: { x: 0, y: 0.3, z: 0 } }, 'vine', 24);
+    const ape = body(w, 97.56, 0, 0);
+    const man = body(w, 73.3, 0, 6);
+    run(w, 3);
+    w.events.length = 0;
+    man.vel.set(0, 0, 0);
+    man.walkVel.set(0, 0, 1.5);
+    w.joints.tripwire(w, vine2, { kind: 'fighter', id: man.id, part: 'zone' });
+    ape.vel.set(0, 0, 0);
+    ape.walkVel.set(0, 0, 4);
+    w.joints.tripwire(w, vine, { kind: 'fighter', id: ape.id, part: 'zone' });
+    const [t2, t1] = tripwires(w.events);
+    expect(t2).toMatchObject({ joint: vine2, snapped: false, loosed: [] });
+    expect(t2.loadN).toBeCloseTo(1099.5, 6);
+    expect(ent(w, stake2).state).toBe('anchored');
+    expect(t1).toMatchObject({ joint: vine, snapped: false, loosed: [stake] });
+    expect(t1.loadN).toBeCloseTo(3902.4, 6);
+    const s = ent(w, stake);
+    expect(s.state).toBe('free');
+    expect(s.anchor).toBeNull();
+    expect(s.body!.isDynamic()).toBe(true);
+    // Its share: half of p, along the rope toward the crossing point (−x), queued for the next 4d.
+    const q = w.entities.pendingImpulses().filter((x) => x.id === stake);
+    expect(q).toHaveLength(1);
+    expect(Math.hypot(q[0].j.x, q[0].j.y, q[0].j.z)).toBeCloseTo((97.56 * 4) / 2, 6);
+    expect(q[0].j.x).toBeLessThan(0);
+    expect(w.entities.pendingImpulses().filter((x) => x.id === stake2)).toEqual([]);
+    // Lifted clear of the ground (knockLoose: its driven end out of the heightfield).
+    expect(s.pose.p.y - 0.5).toBeGreaterThanOrEqual(w.terrain.heightAt(s.pose.p.x, s.pose.p.z) - 1e-6);
+    // The vine holds (3,902 N < 6 kN). Not asserted past the next 4d: §4.9's share (half of p, 195 N·s) sends this
+    // 2.3 kg stake off at ≈ 85 m/s and it shatters on the post (reported to the design as a risk, not a rule of P10's).
+    const ev = run(w, 1);
+    expect(snaps(ev)).toEqual([]);
+    expect(w.joints.get(vine)).toBeDefined();
+  });
+
+  it('a fighter attacking the entity it has focused is no tripwire for a rope tied to it (RT-5); idle, or attacking something else, it is', async () => {
+    const w = await make();
+    const { joint: rope, a } = wire(w, 2, 0.3);
+    const f = body(w, 97.56, 0, 0);
+    run(w, 3);
+    const focus = vi.spyOn(w.verbs, 'focusedEntity').mockReturnValue(a);
+    const crossing = (): number => {
+      newCrossings(w);
+      w.events.length = 0;
+      f.vel.set(0, 0, 0);
+      f.walkVel.set(0, 0, 0.8);
+      w.joints.tripwire(w, rope, { kind: 'fighter', id: f.id, part: 'zone' });
+      return tripwires(w.events).length;
+    };
+    f.setState('attack');
+    expect(crossing()).toBe(0);
+    focus.mockReturnValue(9999);
+    expect(crossing()).toBe(1);
+    focus.mockReturnValue(a);
+    f.setState('idle');
+    expect(crossing()).toBe(1);
+  });
+
   it('a player running across a vine between two posts trips it through the contact pipeline, once, by his root momentum; the vine holds', async () => {
     const w = await make({ player: true });
     const { joint: rope } = wire(w, 2, 0.3);
@@ -443,12 +513,45 @@ describe('held ends and the haul model (§4.9)', () => {
     expect(peak).toBeGreaterThanOrEqual(30);
     // The kinematic hand pulls; nothing pulls it (SPEC:268).
     expect(Math.hypot(p.pos.x - start.x, p.pos.z - start.z)).toBeLessThan(0.05);
-    // The pull is spent every tick.
+    // The last pull stays in the record until the next 4d (a tie landing in phase 3 still sees it), which spends a pull
+    // nobody set again: one tick without setPull and it is gone.
+    expect(joint(w, j).pullN).toBe(500);
+    w.step();
     expect(joint(w, j).pullN).toBe(0);
+    // setPull is a held end's: on a rope with no held end it does nothing.
+    const other = tieRope(w, { entity: log, local: { x: 0, y: 0, z: 0 } }, { entity: null, local: { x: 0, y: 8, z: 0 } }, 'vine', 26);
+    w.joints.setPull(other, 500);
+    expect(joint(w, other).pullN).toBe(0);
+    w.joints.remove(other, 'untie');
     // The held rope's tension reads the hand's pull while it hauls (max(pullN, fitted)).
     w.joints.setPull(j, 500);
     w.step();
     expect(Math.max(...joint(w, j).tension)).toBeGreaterThanOrEqual(500);
+  });
+
+  it('a haul whose pull beats an anchored stake’s capacity (1,200 N) pulls it loose; 1,000 N leaves it driven', async () => {
+    for (const [pull, loose] of [
+      [1000, false],
+      [1500, true],
+    ] as const) {
+      const w = await make({ player: true });
+      const p = w.player!;
+      w.teleport(p, -3, 0, Math.PI / 2);
+      const stake = spawnLog(w, { p: { x: 2, y: 0.2, z: 0 }, q: { x: 0, y: 0, z: 0, w: 1 }, length: 1, r: 0.04, state: 'anchored' });
+      run(w, 10);
+      const hand = w.joints.anchorPoint({ entity: null, local: { x: 0, y: 0, z: 0 }, fighter: p.id })!;
+      const j = tieRope(w, { entity: stake, local: { x: 0, y: 0.4, z: 0 } }, { entity: null, local: hand }, 'vine', 24);
+      w.joints.holdEnd(j, 'b', p.id);
+      run(w, 5, () => w.joints.setPull(j, pull));
+      const s = ent(w, stake);
+      expect(s.state, `${pull} N`).toBe(loose ? 'free' : 'anchored');
+      if (loose) {
+        expect(s.anchor).toBeNull();
+        expect(s.body!.isDynamic()).toBe(true);
+        // Pulled toward the hand.
+        expect(s.pose.p.x).toBeLessThan(2);
+      } else expect(s.body!.isFixed()).toBe(true);
+    }
   });
 
   it('tieHeldEnd: the held end becomes a rope joint to a post at that tick’s distance, and the log stays there', async () => {
@@ -459,14 +562,15 @@ describe('held ends and the haul model (§4.9)', () => {
     const postId = spawnBox(w, { p: { x: -8.8, y: 3, z: 0.6 }, size: [0.3, 6, 0.3], material: 'dryWood', state: 'fixed', look: 'post' });
     run(w, 30);
     const j = takeEnd(w, log);
-    // Hauled, then tied at a turning point of its swing about the 500 N equilibrium, level with the log (a rope that
-    // holds a pendulum across its arc). A rope made while the log still moves along it would catch it in one step, and
-    // the fit reads that catch (a 30 kg log at 2 m/s: ≈ 16 kN): see the joint store's notes on rigid catches.
+    // Hauled, then tied with the haul off at a turning point of its swing about the 500 N equilibrium, level with the log
+    // (a rope that holds a pendulum across its arc): tied at once. A tie made while the haul is on and the log still
+    // runs along the rope cinches first (the next test).
     const speed = (): number => Math.hypot(ent(w, log).vel.lin.x, ent(w, log).vel.lin.y, ent(w, log).vel.lin.z);
     for (let t = 0; t < 480 && (t < 120 || speed() > 0.3); t++) run(w, 1, () => w.joints.setPull(j, 500));
     expect(speed()).toBeLessThan(0.3);
     const top: Anchor = { entity: postId, local: { x: 0.15, y: ent(w, log).pose.p.y - 3, z: -0.6 } };
     const d = dist(worldOf(ent(w, log), { x: 0, y: 0, z: 0 }), worldOf(ent(w, postId), top.local));
+    w.joints.setPull(j, 0);
     w.joints.tieHeldEnd(j, top);
     const rec = joint(w, j);
     expect(rec.b).toEqual(top);
@@ -482,6 +586,92 @@ describe('held ends and the haul model (§4.9)', () => {
     const th = (swingDeg(w, log, beamY) * Math.PI) / 180;
     const m = ent(w, log).body!.mass();
     expect(Math.abs(joint(w, j).tension[2] - m * G * Math.tan(th)) / (m * G * Math.tan(th))).toBeLessThan(0.05);
+  });
+
+  it('a held end tied off while the haul is on, at any phase of the swing, cinches until the log stops along the rope: nothing snaps and the log stays hauled back', async () => {
+    // P10 review finding 3: a rigid rope made around a log still running along it caught it in one step (a 30 kg log tied
+    // at ≈ 2 m/s snapped its vine tie, 6 of 39 to 8 of 39 phases); one tied while coming in came back to the tie's length
+    // at that speed. The tie lands in phase 3 (§5.8), so the pull it keeps is the one the last 4d applied.
+    const out: { va: number; cinchTicks: number; peak: number; drift: number }[] = [];
+    for (let k = 150; k <= 320; k += 17) {
+      const w = await make({ player: true });
+      const { log, beamY } = hungLog(w);
+      const p = w.player!;
+      w.teleport(p, -9, 0, Math.PI / 2);
+      const postId = spawnBox(w, { p: { x: -8.8, y: 3, z: 0.6 }, size: [0.3, 6, 0.3], material: 'dryWood', state: 'fixed', look: 'post' });
+      run(w, 30);
+      const j = takeEnd(w, log);
+      run(w, k, () => w.joints.setPull(j, 500));
+      const A = worldOf(ent(w, log), { x: 0, y: 0, z: 0 });
+      const top: Anchor = { entity: postId, local: { x: 0.15, y: A.y - 3, z: -0.6 } };
+      const T = worldOf(ent(w, postId), top.local);
+      const u = { x: (T.x - A.x) / dist(A, T), y: (T.y - A.y) / dist(A, T), z: (T.z - A.z) / dist(A, T) };
+      const b = ent(w, log).body!;
+      const v = b.linvel();
+      const va = v.x * u.x + v.y * u.y + v.z * u.z;
+      const tiedAt = swingDeg(w, log, beamY);
+      expect(joint(w, j).pullN).toBe(500);
+      w.joints.tieHeldEnd(j, top);
+      const rec = joint(w, j);
+      expect(rec.b).toEqual(top);
+      expect(rec.pullN, `phase ${k}`).toBe(Math.abs(va) > JOINT_TUNING.tieStillMps ? 500 : 0);
+      let len = rec.rope!.lengthM;
+      let cinchTicks = 0;
+      let peak = 0;
+      const ev = run(w, 240, () => {
+        const r = joint(w, j);
+        if (r.pullN > 0) {
+          cinchTicks++;
+          // Cinching: no rigid rope yet (the two hanging vines only), and the free length never grows.
+          expect(w.physics.rapier.impulseJoints.len()).toBe(2);
+          expect(r.rope!.lengthM).toBeLessThanOrEqual(len + 1e-9);
+          len = r.rope!.lengthM;
+        } else peak = Math.max(peak, r.tension[2]);
+      });
+      expect(snaps(ev), `phase ${k}`).toEqual([]);
+      // The cinch ended (within 1 s) and the tie is a rope joint at the distance it ended at.
+      expect(cinchTicks, `phase ${k}`).toBeLessThan(60);
+      expect(joint(w, j).pullN).toBe(0);
+      expect(w.physics.rapier.impulseJoints.len()).toBe(3);
+      out.push({ va, cinchTicks, peak, drift: Math.abs(swingDeg(w, log, beamY) - tiedAt) });
+    }
+    // Not vacuous: ties made while the log ran out, while it came in, and every one cinched.
+    expect(out.some((o) => o.va < -1)).toBe(true);
+    expect(out.some((o) => o.va > 1)).toBe(true);
+    expect(out.every((o) => o.cinchTicks > 0)).toBe(true);
+    // Held by statics afterwards, well under a vine's 6 kN, near the angle it was tied at.
+    for (const o of out) {
+      expect(o.peak).toBeLessThan(3000);
+      expect(o.drift).toBeLessThan(8);
+    }
+  });
+
+  it('a cinching tie is saved: its pull stays in the record, the store rebuilt from the records goes on cinching without a rigid rope', async () => {
+    const w = await make({ player: true });
+    const { log } = hungLog(w);
+    const p = w.player!;
+    w.teleport(p, -9, 0, Math.PI / 2);
+    const postId = spawnBox(w, { p: { x: -8.8, y: 3, z: 0.6 }, size: [0.3, 6, 0.3], material: 'dryWood', state: 'fixed', look: 'post' });
+    run(w, 30);
+    const j = takeEnd(w, log);
+    // A phase where the log runs out from the post (the test above: va ≈ −2 m/s after 235 ticks of haul).
+    run(w, 235, () => w.joints.setPull(j, 500));
+    w.joints.tieHeldEnd(j, { entity: postId, local: { x: 0.15, y: ent(w, log).pose.p.y - 3, z: -0.6 } });
+    expect(joint(w, j).pullN).toBe(500);
+    run(w, 2);
+    const rec = w.joints.toRecord().find((r) => r.id === j)!;
+    expect(rec.pullN).toBe(500);
+    w.joints.restoreRecord(w.joints.toRecord());
+    expect(w.physics.rapier.impulseJoints.len()).toBe(2);
+    let ticks = 0;
+    while (joint(w, j).pullN > 0 && ticks < 120) {
+      w.step();
+      ticks++;
+    }
+    expect(joint(w, j).pullN).toBe(0);
+    expect(w.physics.rapier.impulseJoints.len()).toBe(2);
+    w.step();
+    expect(w.physics.rapier.impulseJoints.len()).toBe(3);
   });
 
   it('dropEnd lets a held end lie loose; with both ends loose the joint is gone and the rope a coil on the ground', async () => {
@@ -591,6 +781,123 @@ describe('lashings, bends and coils', () => {
     expect(s.plant!.phase).toBe('standing');
     expect(s.state).toBe('fixed');
     expect(w.joints.get(bend)).toBeUndefined();
+  });
+
+  it('revoluteAngle reads 0 for bodies turned alike and the turn between them about the axis otherwise', () => {
+    const z = { x: 0, y: 0, z: 1 };
+    const id: Quat = { x: 0, y: 0, z: 0, w: 1 };
+    const turnZ = (a: number): Quat => ({ x: 0, y: 0, z: Math.sin(a / 2), w: Math.cos(a / 2) });
+    expect(revoluteAngle(id, z, id, z)).toBeCloseTo(0, 12);
+    // A body turned by a about z, with its local axis the same world axis: it reads ±a.
+    for (const a of [0.3, -1.2, 2.5]) expect(Math.abs(revoluteAngle(id, z, turnZ(a), z))).toBeCloseTo(Math.abs(a), 9);
+    // Both turned alike: 0, whatever the turn.
+    expect(revoluteAngle(turnZ(1), z, turnZ(1), z)).toBeCloseTo(0, 9);
+  });
+
+  it('a hinge is a revolute about its axis that stops at its limits; with no limits it swings down free', async () => {
+    /** A 2 m plank sticking out horizontally along +x from a fixed post, hinged at the post's face about z. */
+    const droop = async (limits: [number, number] | null): Promise<number> => {
+      const w = await make();
+      const top = post(w, 0, 3, 0);
+      const ALONG_X: Quat = { x: 0, y: 0, z: -Math.SQRT1_2, w: Math.SQRT1_2 };
+      const plank = spawnLog(w, { p: { x: 1.2, y: 3.2, z: 0 }, q: ALONG_X, length: 2, r: 0.05, mass: 10 });
+      const h = w.joints.hinge({ entity: top, local: { x: 0.2, y: 0, z: 0 } }, { entity: plank, local: { x: 0, y: -1, z: 0 } }, { x: 0, y: 0, z: 1 }, limits, { entity: coil(w, 'vine', 1), lengthM: 1 }, []);
+      expect(joint(w, h)).toMatchObject({ kind: 'hinge', breakEnergyJ: 600 });
+      // Kept in Rapier's reference: the plank is turned a quarter turn about the axis from the post, so the record's
+      // limits are the asked ones moved by that angle (the same width).
+      const rec = joint(w, h).limits;
+      if (limits) {
+        expect(rec![1] - rec![0]).toBeCloseTo(limits[1] - limits[0], 9);
+        expect(Math.abs(rec![0] - limits[0])).toBeCloseTo(Math.PI / 2, 5);
+      } else expect(rec).toBeNull();
+      // The largest angle of the plank's axis (local +y) below the horizontal over 3 s, rad.
+      let most = 0;
+      run(w, 180, () => {
+        const q = ent(w, plank).pose.q;
+        most = Math.max(most, Math.asin(-(1 - 2 * (q.x * q.x + q.z * q.z))));
+      });
+      return most;
+    };
+    const held = await droop([-0.3, 0.3]);
+    expect(held).toBeGreaterThan(0.2);
+    expect(held).toBeLessThan(0.3 + 0.03);
+    const free = await droop(null);
+    expect(free).toBeGreaterThan(1.2);
+  });
+
+  it('shorten reels in a slack rope by dl, never shorter than the distance between its ends; nothing for dl ≤ 0', async () => {
+    const w = await make();
+    const a = spawnBox(w, { p: { x: -1.7, y: 1, z: 0 }, size: [0.4, 2, 0.4], material: 'dryWood', state: 'fixed', look: 'post' });
+    const b = spawnBox(w, { p: { x: 1.7, y: 1, z: 0 }, size: [0.4, 2, 0.4], material: 'dryWood', state: 'fixed', look: 'post' });
+    const j = w.joints.rope({ entity: a, local: { x: 0.2, y: 0, z: 0 } }, { entity: b, local: { x: -0.2, y: 0, z: 0 } }, 5, { entity: coil(w, 'vine', 6), lengthM: 5 }, []);
+    const len = (): number => joint(w, j).rope!.lengthM;
+    w.joints.shorten(j, 0.5);
+    expect(len()).toBeCloseTo(4.5, 12);
+    w.joints.shorten(j, 0);
+    w.joints.shorten(j, -1);
+    expect(len()).toBeCloseTo(4.5, 12);
+    w.joints.shorten(j, 10);
+    expect(len()).toBeCloseTo(3, 6);
+    w.joints.shorten(j, 1);
+    expect(len()).toBeCloseTo(3, 6);
+    run(w, 2);
+    expect(w.joints.view().find((v) => v.joint === j)!.taut).toBe(true);
+  });
+
+  it('a bend’s holding rope that loses an end (its anchor end lying loose, or taken in hand) releases the bend: `release`, it springs back and roots again', async () => {
+    for (const how of ['loose', 'hold'] as const) {
+      const w = await make({ player: how === 'hold' });
+      const sap = spawnSapling(w, { at: { x: 0, z: 0 }, diameter: 0.06, height: 3 });
+      const stake = spawnLog(w, { p: { x: 2, y: 0.2, z: 0 }, q: { x: 0, y: 0, z: 0, w: 1 }, length: 1, r: 0.04, state: 'anchored' });
+      run(w, 5);
+      const { bend, hold: rope } = w.joints.bend(sap, { entity: sap, local: { x: 0, y: 1.5, z: 0 } }, { entity: stake, local: { x: 0, y: 0.5, z: 0 } }, { entity: coil(w, 'vine', 2), lengthM: 2 }, []);
+      run(w, 30);
+      w.events.length = 0;
+      if (how === 'loose') w.joints.loosen(rope, 'b', w.joints.anchorPoint(joint(w, rope).b)!);
+      else w.joints.holdEnd(rope, 'b', w.player!.id);
+      const what = w.events.filter((e) => e.type === 'joint').map((e) => [(e as { joint: number }).joint, (e as { what: string }).what]);
+      expect(what, how).toEqual(how === 'loose' ? [[rope, 'loose'], [bend, 'release']] : [[bend, 'release']]);
+      expect(joint(w, rope).holdsBend).toBeNull();
+      run(w, 600);
+      const s = ent(w, sap);
+      expect(s.plant!.phase, how).toBe('standing');
+      expect(s.state).toBe('fixed');
+      expect(w.joints.get(bend)).toBeUndefined();
+    }
+  });
+
+  it('bendAngle is the angle bend() poses a sapling at, and says when the force at its top limits it (§5.9)', async () => {
+    const w = await make();
+    const thin = spawnSapling(w, { at: { x: 0, z: 0 }, diameter: 0.06, height: 3 });
+    const stiff = spawnSapling(w, { at: { x: 0, z: 6 }, diameter: 0.12, height: 3 });
+    const stakeA = spawnLog(w, { p: { x: 2, y: 0.2, z: 0 }, q: { x: 0, y: 0, z: 0, w: 1 }, length: 1, r: 0.04, state: 'anchored' });
+    const stakeB = spawnLog(w, { p: { x: 2, y: 0.2, z: 6 }, q: { x: 0, y: 0, z: 0, w: 1 }, length: 1, r: 0.04, state: 'anchored' });
+    run(w, 5);
+    const top = { x: 0, y: 1.5, z: 0 };
+    const holdA = w.joints.anchorPoint({ entity: stakeA, local: { x: 0, y: 0.5, z: 0 } })!;
+    const holdB = w.joints.anchorPoint({ entity: stakeB, local: { x: 0, y: 0.5, z: 0 } })!;
+    const a = bendAngle(ent(w, thin), top, holdA)!;
+    expect(a.stiffness).toBeCloseTo(864, 9);
+    // k θ / L ≤ 500 N: the 6 cm sapling isn't held back by the force (1.74 rad > its reach); the 12 cm one is (0.43 rad).
+    expect(a.forceTheta).toBeCloseTo((VERB_TUNING.bendMaxForceN * 3) / 864, 6);
+    expect(a.forceLimited).toBe(false);
+    expect(a.theta).toBeCloseTo(Math.min(a.reachTheta, Math.PI / 2), 12);
+    const b = bendAngle(ent(w, stiff), top, holdB)!;
+    expect(b.stiffness).toBeCloseTo(4 * 864, 6);
+    expect(b.forceLimited).toBe(true);
+    expect(b.theta).toBeCloseTo((VERB_TUNING.bendMaxForceN * 3) / (4 * 864), 6);
+    expect((b.theta * 180) / Math.PI).toBeGreaterThan(VERB_TUNING.bendMinDeg);
+    // Straight above its base: no direction to bend in.
+    expect(bendAngle(ent(w, thin), top, { x: ent(w, thin).pose.p.x, y: 5, z: ent(w, thin).pose.p.z })).toBeNull();
+    // bend() poses each at that angle.
+    const tilt = (id: number): number => {
+      const q = ent(w, id).pose.q;
+      return Math.acos(Math.max(-1, Math.min(1, 1 - 2 * (q.x * q.x + q.z * q.z))));
+    };
+    w.joints.bend(thin, { entity: thin, local: top }, { entity: stakeA, local: { x: 0, y: 0.5, z: 0 } }, { entity: coil(w, 'vine', 2), lengthM: 2 }, []);
+    w.joints.bend(stiff, { entity: stiff, local: top }, { entity: stakeB, local: { x: 0, y: 0.5, z: 0 } }, { entity: coil(w, 'vine', 2, 24), lengthM: 2 }, []);
+    expect(tilt(thin)).toBeCloseTo(a.theta, 6);
+    expect(tilt(stiff)).toBeCloseTo(b.theta, 6);
   });
 
   it('remove: the joint event carries its point; untied, the rope becomes a coil on the ground under it; an unknown id does nothing', async () => {

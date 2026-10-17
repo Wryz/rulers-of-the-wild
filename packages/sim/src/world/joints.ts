@@ -20,9 +20,10 @@
 //   the ground under where the rope was.
 //
 // Each tick: 4d `applyHeldEnds` (the haul model: reel-in, haul impulses, moments on notched trees, anchors pulled
-// loose; loose ends dragged within reach of the end they hang from), 4e `poseSensors` (Rapier joints re-made where a
-// body changed, sensors posed), 9d `tripwire` (from the contact pipeline), 10 `postStep` (the tension fit, the 3-step
-// rings, snaps, released bends settling back to standing; every pull spent).
+// loose; a pull not set again spent; cinching ties held or reeled; loose ends dragged within reach of the end they hang
+// from), 4e `poseSensors` (Rapier joints re-made where a body changed, sensors posed), 9d `tripwire` (from the contact
+// pipeline), 10 `postStep` (the tension fit, the 3-step rings, snaps, released bends settling back to standing,
+// cinching ties that stopped tied).
 //
 // Order: every loop runs in joint id order; entity joint lists are kept sorted. Rapier handles never leave the runtime
 // map and are never saved.
@@ -62,6 +63,9 @@ export const JOINT_TUNING = defineTuning(
     burnSpeedMps: 0.05,
     bendHoldRopeM: 0.3,
     bendSettleDeg: 5,
+    tieStillMps: 0.05,
+    nnlsIterPerGroup: 3,
+    nnlsIterBase: 10,
   },
   {
     tripwireWindowS: { unit: 's', source: 'SPEC:259' },
@@ -80,6 +84,13 @@ export const JOINT_TUNING = defineTuning(
       unit: '°',
       source: 'NEW: a released sapling that comes to rest within this of upright is rooted again (standing, fixed), so it can be bent again',
     },
+    tieStillMps: {
+      unit: 'm/s along the rope',
+      source:
+        'NEW: a held end tied off while its load still runs along the rope faster than this cinches when the load stops (the haul keeps acting through the hitch); a rigid rope made around a moving load catches it in one step (P10 review: a 30 kg log at 2 m/s snapped its vine tie)',
+    },
+    nnlsIterPerGroup: { unit: 'iterations per strand group', source: '§4.9 (Lawson-Hanson, at most 3·n + 10 iterations)', min: 1, step: 1 },
+    nnlsIterBase: { unit: 'iterations', source: '§4.9 (Lawson-Hanson, at most 3·n + 10 iterations)', min: 0, step: 1 },
   },
 );
 
@@ -110,6 +121,14 @@ interface JointRuntime {
   sensor: RAPIER.Collider | null;
   /** Make the Rapier joint again at the next sync (an anchor moved). */
   stale: boolean;
+  /**
+   * setPull was called since the last phase 4d read it: a held end's pullN is this tick's pull only when fresh (a pull
+   * nobody set again is spent in 4d). Never saved: it only says whether a call came between two 4d's, which a load
+   * can't fall between.
+   */
+  pullFresh: boolean;
+  /** A cinching tie hauled its load this tick (4d → phase 10 of one tick; never across a save). */
+  cinchHauled: boolean;
 }
 
 /** A joint end as the tension fit and the tripwire see it. */
@@ -165,16 +184,26 @@ export class JointStore implements TripwireSink {
     return this.make('lash', a, b, rope, credit, { breakEnergyJ: this.lashEnergy(rope.entity) });
   }
 
-  /** A revolute joint about `axis` (a's frame), limits in rad (null: free); contacts off between the pair. */
+  /**
+   * A revolute joint about `axis` (a's frame), limits in rad about it from the pose the pair is in now (null: free);
+   * contacts off between the pair. Rapier reads a revolute's angle between frames it builds from each body's local axis
+   * alone, so two bodies turned about the axis relative to each other start at a non-zero angle: the record keeps the
+   * limits in Rapier's reference (the angle now added, revoluteAngle), so they hold the same way through every remake
+   * of the Rapier joint and a load. A range that would cross ±π is moved a turn when it fits, else clamped to ±π.
+   */
   hinge(a: Anchor, b: Anchor, axis: V3, limits: [number, number] | null, rope: { entity: number; lengthM: number }, credit: string[]): number {
     this.checkEnds('hinge', a, b);
     const n = norm(axis);
     if (!(n > 0) || !Number.isFinite(n)) throw new Error('JointStore.hinge: the axis must be a non-zero vector');
-    return this.make('hinge', a, b, rope, credit, {
-      breakEnergyJ: this.lashEnergy(rope.entity),
-      axis: scale(axis, 1 / n),
-      limits: limits ? [limits[0], limits[1]] : null,
-    });
+    const ax = scale(axis, 1 / n);
+    let lim: [number, number] | null = null;
+    if (limits) {
+      const qa = this.anchorRotation(a);
+      const qb = this.anchorRotation(b);
+      const at = revoluteAngle(qa, ax, qb, rotate(conj(qb), rotate(qa, ax)));
+      lim = wrapLimits(limits[0] + at, limits[1] + at);
+    }
+    return this.make('hinge', a, b, rope, credit, { breakEnergyJ: this.lashEnergy(rope.entity), axis: ax, limits: lim });
   }
 
   /** A rope of free length `lengthM` (a Rapier rope joint while both ends are bodies or world points). */
@@ -199,31 +228,10 @@ export class JointStore implements TripwireSink {
     this.checkEnds('bend', top, hold);
     const holdAt = this.anchorPoint(hold);
     if (!holdAt) throw new Error('JointStore.bend: the hold anchor has no point');
-    const mat = MATERIALS[s.material];
-    const d = s.plant.diameter;
     const T = JOINT_TUNING;
-    const k = T.bendK * mat.springiness * d * d;
-    const damping = T.bendDamping * d * d;
-    const ax = principalAxis(s.shape);
-    const length = ax.max - ax.min;
-    // The base pivot: the edge of the base on the side it bends toward, so the base rolls up off the ground rather than
-    // into it.
-    const base = transform(s.pose, scale(ax.dir, ax.min));
-    const toward = { x: holdAt.x - base.x, y: 0, z: holdAt.z - base.z };
-    const th = norm(toward);
-    if (!(th > 0)) throw new Error('JointStore.bend: the hold point is straight above or below the sapling');
-    const dir = scale(toward, 1 / th);
-    const pivot = add(base, scale(dir, d / 2));
-    const axis = normalize(cross(UP, dir));
-    // The angle that brings the top nearest the hold point (the top's arc meets the line from the pivot to it), capped by
-    // the force the rope may hold at the top.
-    const topW = transform(s.pose, top.local);
-    const r0 = sub(topW, pivot);
-    const toHold = sub(holdAt, pivot);
-    const aTop = Math.atan2(dot(cross(UP, r0), axis), dot(r0, UP));
-    const aHold = Math.atan2(dot(cross(UP, toHold), axis), dot(toHold, UP));
-    const maxTheta = k > 0 ? (VERB_TUNING.bendMaxForceN * length) / k : Math.PI / 2;
-    const theta = Math.max(0, Math.min(aHold - aTop, maxTheta, Math.PI / 2));
+    const bp = bendAngle(s, top.local, holdAt);
+    if (!bp) throw new Error('JointStore.bend: the hold point is straight above or below the sapling');
+    const { theta, pivot, axis, stiffness: k, damping } = bp;
     // Posed bent: rotated about the pivot, then dynamic.
     const rot = axisAngle(axis, theta);
     const p = add(pivot, rotate(rot, sub(s.pose.p, pivot)));
@@ -273,13 +281,16 @@ export class JointStore implements TripwireSink {
     const at = this.anchorPoint(old) ?? copy3(old.local);
     this.setEnd(j, end, { entity: null, local: at, fighter: fighterId });
     j.pullN = 0;
+    this.runtime(j).pullFresh = false;
+    // A hand holds no bend (a held end has no Rapier joint): the bend it kept is released.
+    this.releaseBend(j);
   }
 
   /** The held end becomes loose at `at` (letting go of a rope end, §5.1). Nothing when no end is held. */
   dropEnd(joint: number, at: V3): void {
     const j = this.byId.get(joint);
     if (!j) return;
-    const end = j.a.fighter !== undefined ? 'a' : j.b.fighter !== undefined ? 'b' : null;
+    const end = heldEndOf(j);
     if (end) this.loosen(joint, end, at);
   }
 
@@ -294,16 +305,25 @@ export class JointStore implements TripwireSink {
     j.pullN = 0;
     const point = this.midpoint(j);
     this.world.events.push({ type: 'joint', joint, what: 'loose', point });
+    // A rope with a loose end holds no bend: the sapling springs back (and roots again once still, settleBends).
+    this.releaseBend(j);
     if (j.a.loose && j.b.loose) {
       this.forget(j);
       this.afterRemoved(j, point);
     }
   }
 
-  /** The held end's pull this tick (verbs set it every tick); the haul model, §4.9. Spent at the end of phase 10. */
+  /**
+   * The held end's pull this tick (verbs set it every tick, in 4d before applyHeldEnds); the haul model, §4.9. Ignored on
+   * a joint with no held end. DEVIATION (§4.9 "spent at the end of phase 10"): the pull stays in the record until the
+   * next 4d, which spends it unless it was set again, so a tie landing in phase 3 (§5.8) still sees the haul force of
+   * the tick before and keeps it while the tie cinches (tieHeldEnd).
+   */
   setPull(joint: number, forceN: number): void {
     const j = this.byId.get(joint);
-    if (j) j.pullN = Math.max(0, Number.isFinite(forceN) ? forceN : 0);
+    if (!j || heldEndOf(j) === null) return;
+    j.pullN = Math.max(0, Number.isFinite(forceN) ? forceN : 0);
+    this.runtime(j).pullFresh = true;
   }
 
   /** Reel in a slack rope by `dl`, never shorter than the distance between its ends. */
@@ -315,19 +335,39 @@ export class JointStore implements TripwireSink {
     this.markStale(j);
   }
 
-  /** The held end becomes tied to `to` at the current distance (tie, §5.8); tying ends the pull. */
+  /**
+   * The held end becomes tied to `to` at the current distance (tie, §5.8, §4.9); tying ends the pull.
+   *
+   * DEVIATION (P10 review finding 3; needs design approval): a rigid Rapier rope made around a load that still runs
+   * along it catches the load in one step, and the fit reads that catch (a 30 kg log tied while running out at 2 m/s
+   * snapped its vine tie on the first step; one tied while coming in came back to the tie's length at its speed). So a
+   * tie made while the end was hauled (pullN > 0, the last 4d's pull, setPull), to something static, whose load moves
+   * along the rope faster than tieStillMps, **cinches** (pullN stays in the record and marks it; no Rapier joint):
+   * - while the load runs out, the hauler's pull keeps holding it through the hitch (the haul model from the tie point);
+   * - while it comes in, the slack is taken in as it comes, with no pull (hauling it on from a tie point level with it
+   *   drew it up until its hanging vines lined up with the tie, which no rope holds);
+   * - it ends in the phase 10 where the load stops along the rope (its speed along the rope changes sign within the
+   *   tick, or falls to tieStillMps), or the rope runs out; the rope is then tied at that distance (settleCinch).
+   * A tie to a load at rest, to a dynamic target, or with no haul on, is tied at once, as §4.9 writes.
+   */
   tieHeldEnd(joint: number, to: Anchor): void {
     const j = this.need(joint, 'tieHeldEnd');
-    const end = j.a.fighter !== undefined ? 'a' : j.b.fighter !== undefined ? 'b' : null;
+    const end = heldEndOf(j);
     if (!end) throw new Error(`JointStore.tieHeldEnd: joint ${joint} has no held end`);
     if (to.loose || to.fighter !== undefined) throw new Error('JointStore.tieHeldEnd: a rope is tied to an entity or a world point');
     this.checkAnchor('tieHeldEnd', to);
     const other = end === 'a' ? j.b : j.a;
     const pTo = this.anchorPoint(to);
     const pOther = this.anchorPoint(other);
+    // The haul force the hand had: this tick's when set before the tie, else the one the last 4d applied (setPull).
+    const pull = j.pullN;
     this.setEnd(j, end, copyAnchor(to));
     if (j.rope && pTo && pOther) j.rope.lengthM = Math.max(dist(pTo, pOther), JOINT_TUNING.tautEps);
-    j.pullN = 0;
+    j.pullN = pull;
+    this.runtime(j).pullFresh = false;
+    const c = pull > 0 ? this.cinchOf(j, false) : null;
+    if (!c || !(Math.abs(this.speedAlong(c.e, c.at, c.u, 'now')) > JOINT_TUNING.tieStillMps)) j.pullN = 0;
+    this.markStale(j);
   }
 
   /**
@@ -376,15 +416,19 @@ export class JointStore implements TripwireSink {
    * v_a) / haulRampMps, 0, 1) along the rope: an impulse on a dynamic body (queued, applied later in this 4d), a moment
    * on a notched tree (felling.addMoment), or pullN tested against an anchored stake's capacity (pulled loose if
    * exceeded); the free length then becomes the current distance (it never grows while held). Not pulling, the hand
-   * only holds: the rope pays out to its free length (the tether keeps the hand within it).
+   * only holds: the rope pays out to its free length (the tether keeps the hand within it). A pull not set again since
+   * the last 4d is spent here (setPull). A tie still cinching (tieHeldEnd) is hauled the same way from its tie point.
    */
   applyHeldEnds(w: World): void {
-    const V = VERB_TUNING;
     const fighters = fighterMap(w);
     for (const j of [...this.sorted]) {
       if (j.kind !== 'rope' || !j.rope || !this.byId.has(j.id)) continue;
-      const heldEnd = j.a.fighter !== undefined ? 'a' : j.b.fighter !== undefined ? 'b' : null;
+      const heldEnd = heldEndOf(j);
       if (heldEnd) {
+        // A pull nobody set again since the last 4d is spent (setPull).
+        const rt = this.runtime(j);
+        if (!rt.pullFresh) j.pullN = 0;
+        rt.pullFresh = false;
         const f = fighters.get(j[heldEnd].fighter!);
         if (!f) {
           // Its holder is gone: the end lies where it was.
@@ -393,17 +437,22 @@ export class JointStore implements TripwireSink {
         }
         const other = heldEnd === 'a' ? j.b : j.a;
         if (other.loose || other.fighter !== undefined || !(j.pullN > 0)) continue;
-        const A = this.anchorPoint(other);
-        if (!A) continue;
-        const hand = handOf(f);
-        const D = dist(hand, A);
-        // Reeling in, then (the same tick) hauling once the slack is in (I-2: a haul skipped on reel-in ticks creeps).
-        if (D < j.rope.lengthM - JOINT_TUNING.tautEps) j.rope.lengthM = Math.max(D, j.rope.lengthM - V.pullHandSpeedMps * DT);
-        const L = j.rope.lengthM;
-        if (D < L - V.haulTautM || !(D > 0)) continue;
-        const u = scale(sub(hand, A), 1 / D);
-        this.haul(j, other, A, u);
-        j.rope.lengthM = Math.min(L, D);
+        this.reelAndHaul(j, other, handOf(f));
+        continue;
+      }
+      if (j.pullN > 0) {
+        // A tie still cinching (tieHeldEnd): a load running out is held by the haul through the hitch (the tie point
+        // standing in for the hand); a load coming in has its slack taken in as it comes, with no pull.
+        const c = this.cinchOf(j, false);
+        if (!c) {
+          j.pullN = 0;
+          this.markStale(j);
+          continue;
+        }
+        if (this.speedAlong(c.e, c.at, c.u, 'now') < 0) {
+          this.haul(j, j[c.load], c.at, c.u);
+          this.runtime(j).cinchHauled = true;
+        } else if (c.D < j.rope.lengthM) j.rope.lengthM = Math.max(c.D, JOINT_TUNING.tautEps);
         continue;
       }
       // A loose end hangs from the other end: dragged along when that end moves farther than the rope reaches.
@@ -520,7 +569,8 @@ export class JointStore implements TripwireSink {
    * phase-5 store and the phase-8 snapshot (an asleep body: at rest); a rope between two dynamic bodies takes the larger
    * of its two ends' estimates, a held end max(pullN, fitted); per strand t / strands, pushed into each joint's ring; a
    * group whose strand's ring maximum (over ropeBreakSteps) beats that strand's strength loses its weakest strand (one
-   * per group per tick). Then released bends settle, and every pull is spent.
+   * per group per tick). Then released bends settle, and cinching ties whose load stopped are tied (a held end keeps
+   * its pull until the next 4d).
    * TODO "rope tension with contacts": a roped body that also rests on something has its support unexplained by the
    * ropes, so its tension reads low.
    */
@@ -567,7 +617,10 @@ export class JointStore implements TripwireSink {
       if (j.kind !== 'rope') continue;
       const gi = groupOf.get(j.id);
       let t = gi === undefined ? 0 : est[gi] / groups[gi].joints.length;
-      if (j.a.fighter !== undefined || j.b.fighter !== undefined) t = Math.max(t, j.pullN);
+      // A held end, or a cinching tie that hauled this tick: the hand's pull is on the rope (max(pullN, fitted)).
+      const rt = this.rt.get(j.id);
+      if (heldEndOf(j) !== null || (j.pullN > 0 && rt?.cinchHauled)) t = Math.max(t, j.pullN);
+      if (rt) rt.cinchHauled = false;
       if (!Number.isFinite(t) || t < 0) t = 0;
       j.tension = [j.tension[1], j.tension[2], t];
     }
@@ -588,7 +641,8 @@ export class JointStore implements TripwireSink {
       if (this.byId.has(weakest.id)) this.remove(weakest.id, 'snap');
     }
     this.settleBends(w);
-    for (const j of this.sorted) j.pullN = 0;
+    // A held end's pull stays until the next 4d (setPull); a cinching tie ends once its load stops.
+    for (const j of [...this.sorted]) if (j.pullN > 0 && heldEndOf(j) === null && this.byId.has(j.id)) this.settleCinch(j);
   }
 
   /** Client: anchors (world), length, tension over strength, slack. Joints made of a rope, in id order. */
@@ -610,6 +664,12 @@ export class JointStore implements TripwireSink {
     const a = this.anchorPoint(j.a);
     const b = this.anchorPoint(j.b);
     return a && b ? { a, b } : null;
+  }
+
+  /** The rotation of the body a joint end is on (identity for a world point, a loose end or a hand). */
+  private anchorRotation(a: Anchor): Quat {
+    const e = a.entity !== null && a.fighter === undefined && !a.loose ? this.world.entities.get(a.entity) : undefined;
+    return e ? copy3q(e.pose.q) : { x: 0, y: 0, z: 0, w: 1 };
   }
 
   /** A joint end's world point: an entity's local point, a world or loose point, or the hand holding it; null if gone. */
@@ -725,6 +785,17 @@ export class JointStore implements TripwireSink {
     if (j.rope) this.unlinkIfUnused(j.rope.entity, j);
   }
 
+  /**
+   * A holding rope that lost an end (loose, or taken in hand): the bend it kept is released (`release` event at the
+   * rope's middle, as when the rope is cut), so its motor springs the sapling back and settleBends can root it again.
+   */
+  private releaseBend(j: JointRecord): void {
+    if (j.holdsBend === null) return;
+    const bend = j.holdsBend;
+    j.holdsBend = null;
+    if (this.byId.has(bend)) this.world.events.push({ type: 'joint', joint: bend, what: 'release', point: this.midpoint(j) });
+  }
+
   /** After a joint is gone: a held bend released, a bend's holding rope freed, the rope coiled once unused. */
   private afterRemoved(j: JointRecord, point: V3): void {
     if (j.holdsBend !== null && this.byId.has(j.holdsBend)) {
@@ -825,7 +896,7 @@ export class JointStore implements TripwireSink {
   private runtime(j: JointRecord): JointRuntime {
     let rt = this.rt.get(j.id);
     if (!rt) {
-      rt = { joint: null, bodyA: null, bodyB: null, madeLength: 0, ground: null, groundAt: null, sensor: null, stale: false };
+      rt = { joint: null, bodyA: null, bodyB: null, madeLength: 0, ground: null, groundAt: null, sensor: null, stale: false, pullFresh: false, cinchHauled: false };
       this.rt.set(j.id, rt);
       if (j.rope) rt.sensor = this.makeSensor(j);
     }
@@ -857,6 +928,8 @@ export class JointStore implements TripwireSink {
   /** Whether the joint wants a Rapier joint now (§2.4), and between which ends. */
   private wantsRapier(j: JointRecord): boolean {
     if (isFree(j.a) || isFree(j.b)) return false;
+    // A tie still cinching: the haul holds its load, not a rigid rope (tieHeldEnd).
+    if (j.kind === 'rope' && j.pullN > 0) return false;
     if (j.a.entity === null && j.b.entity === null) return false;
     return true;
   }
@@ -969,6 +1042,117 @@ export class JointStore implements TripwireSink {
   // -------------------------------------------------------------------------
   // Internals: the haul model, tripwires, the fit, bends
   // -------------------------------------------------------------------------
+
+  /**
+   * The haul model's tick for a rope pulled from `hand` (a held end's hand, or a cinching tie's point): the slack reeled
+   * in (at most pullHandSpeedMps × DT), then, once within haulTautM of the free length, the haul on `other`; the free
+   * length never grows.
+   */
+  private reelAndHaul(j: JointRecord, other: Anchor, hand: V3): void {
+    const V = VERB_TUNING;
+    const A = this.anchorPoint(other);
+    if (!A || !j.rope) return;
+    const D = dist(hand, A);
+    // Reeling in, then (the same tick) hauling once the slack is in (I-2: a haul skipped on reel-in ticks creeps).
+    if (D < j.rope.lengthM - JOINT_TUNING.tautEps) j.rope.lengthM = Math.max(D, j.rope.lengthM - V.pullHandSpeedMps * DT);
+    const L = j.rope.lengthM;
+    if (D < L - V.haulTautM || !(D > 0)) return;
+    const u = scale(sub(hand, A), 1 / D);
+    this.haul(j, other, A, u);
+    j.rope.lengthM = Math.min(L, D);
+  }
+
+  /**
+   * A tie that can cinch (tieHeldEnd): a rope with both ends attached, one on a static anchor (a world point, or an
+   * entity whose body isn't dynamic) and the other on an enabled dynamic body: that load end, its body, its world point,
+   * the tie point, u (unit from the load point toward the tie point) and their distance. `live`: the load's point from
+   * its body's pose now (phase 10, after the step), not the record's. null otherwise.
+   */
+  private cinchOf(j: JointRecord, live: boolean): { load: 'a' | 'b'; e: Entity; at: V3; target: V3; u: V3; D: number } | null {
+    if (j.kind !== 'rope' || !j.rope || isFree(j.a) || isFree(j.b)) return null;
+    const sa = this.endKind(j.a);
+    const sb = this.endKind(j.b);
+    const load = sa === 'static' && sb === 'dynamic' ? 'b' : sb === 'static' && sa === 'dynamic' ? 'a' : null;
+    if (!load) return null;
+    const an = j[load];
+    const e = this.world.entities.get(an.entity!)!;
+    const b = e.body!;
+    const at = live ? transform({ p: copy3(b.translation()), q: copy3q(b.rotation()) }, an.local) : this.anchorPoint(an);
+    const target = this.anchorPoint(load === 'a' ? j.b : j.a);
+    if (!at || !target) return null;
+    const D = dist(at, target);
+    if (!(D > 0)) return null;
+    return { load, e, at, target, u: scale(sub(target, at), 1 / D), D };
+  }
+
+  /** An attached end's kind for a cinch: 'static' (a world point, a body that isn't dynamic), 'dynamic', or null (no body). */
+  private endKind(an: Anchor): 'static' | 'dynamic' | null {
+    if (an.entity === null) return 'static';
+    const e = this.world.entities.get(an.entity);
+    const b = e?.body;
+    if (!e || !b || !b.isEnabled()) return null;
+    return b.isDynamic() && !this.world.entities.isAnchored(e) ? 'dynamic' : 'static';
+  }
+
+  /**
+   * The speed of entity e's point `at` along u (m/s, + toward the tie point): 'now' from its body, 'post' from the
+   * phase-8 snapshot, 'pre' from the phase-5 store (after this tick's 4d impulses), 'mirror' from its record (the
+   * velocity the last tick ended with, before this tick's 4d). NaN when that state isn't stored (an asleep body).
+   */
+  private speedAlong(e: Entity, at: V3, u: V3, src: 'now' | 'post' | 'pre' | 'mirror'): number {
+    const b = e.body;
+    if (!b) return Number.NaN;
+    const key = ownerKey({ kind: 'entity', id: e.id });
+    const pre = this.world.physics.pre(key);
+    let v: V3;
+    let om: V3;
+    let com: V3;
+    if (src === 'now') {
+      v = copy3(b.linvel());
+      om = copy3(b.angvel());
+      com = copy3(b.worldCom());
+    } else if (src === 'post') {
+      const post = this.world.physics.post(key);
+      if (!post) return Number.NaN;
+      v = post.v;
+      om = post.w;
+      com = copy3(b.worldCom());
+    } else if (src === 'pre') {
+      if (!pre) return Number.NaN;
+      v = pre.v;
+      om = pre.w;
+      com = pre.com;
+    } else {
+      v = e.vel.lin;
+      om = e.vel.ang;
+      com = pre ? pre.com : copy3(b.worldCom());
+    }
+    return dot(add(v, cross(om, sub(at, com))), u);
+  }
+
+  /**
+   * Phase 10, a cinching tie (tieHeldEnd): done when its load stopped along the rope this tick (the speed along it
+   * changed sign since the tick began, or is at most tieStillMps), or the rope ran out; it is then tied at the distance
+   * the step left (its Rapier rope made in the next 4e, between bodies that haven't moved since).
+   */
+  private settleCinch(j: JointRecord): void {
+    const c = this.cinchOf(j, true);
+    if (!c || !j.rope) {
+      j.pullN = 0;
+      this.markStale(j);
+      return;
+    }
+    const v2 = this.speedAlong(c.e, c.at, c.u, 'post');
+    const v1 = this.speedAlong(c.e, c.at, c.u, 'pre');
+    const v0 = this.speedAlong(c.e, c.at, c.u, 'mirror');
+    const turned = (x: number): boolean => Number.isFinite(x) && x * v2 <= 0;
+    const full = this.world.entities.get(j.rope.entity)?.rope?.lengthM ?? Infinity;
+    const stopped = !(Math.abs(v2) > JOINT_TUNING.tieStillMps) || turned(v0) || turned(v1);
+    if (!stopped && c.D < full) return;
+    j.rope.lengthM = Math.max(Math.min(c.D, full), JOINT_TUNING.tautEps);
+    j.pullN = 0;
+    this.markStale(j);
+  }
 
   /** One tick's haul on the attached end `other` at A along u (unit, toward the hand). */
   private haul(j: JointRecord, other: Anchor, A: V3, u: V3): void {
@@ -1091,7 +1275,7 @@ export class JointStore implements TripwireSink {
       const t = scale(cross(sub(pB, com), u), 1 / L);
       cols.push([u.x, u.y, u.z, t.x, t.y, t.z]);
     }
-    const x = nnls(cols, [F.x, F.y, F.z, tau.x, tau.y, tau.z], 3 * cols.length + 10);
+    const x = nnls(cols, [F.x, F.y, F.z, tau.x, tau.y, tau.z], Math.round(JOINT_TUNING.nnlsIterPerGroup * cols.length + JOINT_TUNING.nnlsIterBase));
     return x.map((v) => (Number.isFinite(v) && v > 0 ? v : 0));
   }
 
@@ -1127,12 +1311,110 @@ export class JointStore implements TripwireSink {
 }
 
 // ---------------------------------------------------------------------------
+// Rapier's revolute reference
+// ---------------------------------------------------------------------------
+
+/**
+ * The frame Rapier builds for a revolute's local axis (`set_local_axis1/2`): the shortest rotation taking +x to it
+ * (nalgebra's rotation_between_axis), a half turn about y when it points along −x.
+ */
+function axisFrame(axis: V3): Quat {
+  const n = normalize(axis);
+  // x × n = (0, −n.z, n.y)
+  const s = Math.hypot(n.z, n.y);
+  if (s > GEOM_EPS) return axisAngle({ x: 0, y: -n.z / s, z: n.y / s }, Math.acos(Math.max(-1, Math.min(1, n.x))));
+  return n.x < 0 ? { x: 0, y: 1, z: 0, w: 0 } : { x: 0, y: 0, z: 0, w: 1 };
+}
+
+/**
+ * The angle Rapier's revolute (JointData.revoluteWithAxes) reads between bodies at rotations qa and qb with the joint's
+ * local axes axisA and axisB: twice the x part of (qa·Fa)⁻¹(qb·Fb) taken with w ≥ 0, as its limit test reads it; rad.
+ */
+export function revoluteAngle(qa: Quat, axisA: V3, qb: Quat, axisB: V3): number {
+  const r = qmul(conj(qmul(qa, axisFrame(axisA))), qmul(qb, axisFrame(axisB)));
+  const sx = r.w < 0 ? -r.x : r.x;
+  return 2 * Math.asin(Math.max(-1, Math.min(1, sx)));
+}
+
+/** Limits in (−π, π]: moved a whole turn when the range crosses ±π and fits on the other side, else clamped. */
+function wrapLimits(lo: number, hi: number): [number, number] {
+  const turn = 2 * Math.PI;
+  let a = lo;
+  let b = hi;
+  while (b > Math.PI && a - turn >= -Math.PI) {
+    a -= turn;
+    b -= turn;
+  }
+  while (a < -Math.PI && b + turn <= Math.PI) {
+    a += turn;
+    b += turn;
+  }
+  return [Math.max(-Math.PI, a), Math.min(Math.PI, b)];
+}
+
+// ---------------------------------------------------------------------------
+// The bend angle (§5.9)
+// ---------------------------------------------------------------------------
+
+/** How a rooted sapling bends toward a hold point (bendAngle): the angle and what it is made of. */
+export interface BendPose {
+  /** The angle it is bent to, rad: the smallest of reachTheta, forceTheta and 90°, never below 0. */
+  theta: number;
+  /** The angle that brings its top nearest the hold point (its top's arc meets the line from the pivot to it), rad. */
+  reachTheta: number;
+  /** The angle at which the rope at its top holds VERB_TUNING.bendMaxForceN (k θ / L), rad. */
+  forceTheta: number;
+  /** Whether theta is the force's limit (§5.9: "bends only as far as 500 N allows", refused `tooStiff` under 20°). */
+  forceLimited: boolean;
+  /** The pivot (world): the edge of its base on the side it bends toward. */
+  pivot: V3;
+  /** The bend axis (world, horizontal, unit): a positive rotation about it tips the top toward the hold point. */
+  axis: V3;
+  /** The bend motor's stiffness k = bendK × springiness × d² (N·m/rad) and damping (N·m·s/rad). */
+  stiffness: number;
+  damping: number;
+}
+
+/**
+ * The bend a rooted sapling takes toward the world point `holdAt`, its top at `topLocal` (its own frame): the angle
+ * that brings the top nearest the hold point, capped by the force the rope may hold at its top (VERB_TUNING.bendMaxForceN
+ * = k θ / L, L the sapling's length) and by 90°. Pure (reads the entity and the tuning): JointStore.bend poses the sapling
+ * with it, and the Bend verb (§5.9, P16) asks it first, to refuse `tooStiff` under its minimum angle. null when the
+ * hold point is straight above or below the base.
+ */
+export function bendAngle(sapling: Entity, topLocal: V3, holdAt: V3): BendPose | null {
+  const d = sapling.plant?.diameter ?? 0;
+  const mat = MATERIALS[sapling.material];
+  const k = JOINT_TUNING.bendK * mat.springiness * d * d;
+  const damping = JOINT_TUNING.bendDamping * d * d;
+  const ax = principalAxis(sapling.shape);
+  const length = ax.max - ax.min;
+  // The base pivot: the edge of the base on the side it bends toward, so the base rolls up off the ground rather than
+  // into it.
+  const base = transform(sapling.pose, scale(ax.dir, ax.min));
+  const toward = { x: holdAt.x - base.x, y: 0, z: holdAt.z - base.z };
+  const th = norm(toward);
+  if (!(th > 0) || !Number.isFinite(th)) return null;
+  const dir = scale(toward, 1 / th);
+  const pivot = add(base, scale(dir, d / 2));
+  const axis = normalize(cross(UP, dir));
+  const r0 = sub(transform(sapling.pose, topLocal), pivot);
+  const toHold = sub(holdAt, pivot);
+  const aTop = Math.atan2(dot(cross(UP, r0), axis), dot(r0, UP));
+  const aHold = Math.atan2(dot(cross(UP, toHold), axis), dot(toHold, UP));
+  const reachTheta = aHold - aTop;
+  const forceTheta = k > 0 ? (VERB_TUNING.bendMaxForceN * length) / k : Math.PI / 2;
+  const theta = Math.max(0, Math.min(reachTheta, forceTheta, Math.PI / 2));
+  return { theta, reachTheta, forceTheta, forceLimited: forceTheta < reachTheta && forceTheta < Math.PI / 2, pivot, axis, stiffness: k, damping };
+}
+
+// ---------------------------------------------------------------------------
 // The non-negative least squares (Lawson-Hanson)
 // ---------------------------------------------------------------------------
 
 /**
  * min ‖A x − b‖ subject to x ≥ 0, A given by its columns (each of b's length), at most `maxIter` iterations (§4.9:
- * 3·n + 10). Deterministic: ties go to the lowest column. Columns that are parallel share through the normal equations'
+ * 3·n + 10, JOINT_TUNING.nnlsIterPerGroup and nnlsIterBase). Deterministic: ties go to the lowest column. Columns that are parallel share through the normal equations'
  * slight regularisation.
  */
 export function nnls(cols: readonly (readonly number[])[], b: readonly number[], maxIter: number): number[] {
@@ -1245,6 +1527,11 @@ function leastSquares(cols: readonly (readonly number[])[], b: readonly number[]
 const UP: Readonly<V3> = Object.freeze({ x: 0, y: 1, z: 0 });
 
 const isFree = (a: Anchor): boolean => a.fighter !== undefined || a.loose === true;
+
+/** The end a fighter's hand holds, or null. */
+function heldEndOf(j: JointRecord): 'a' | 'b' | null {
+  return j.a.fighter !== undefined ? 'a' : j.b.fighter !== undefined ? 'b' : null;
+}
 
 /** The largest of the last ropeBreakSteps tensions (SPEC:261). */
 function ringMax(j: JointRecord): number {
