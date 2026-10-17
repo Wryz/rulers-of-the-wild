@@ -20,8 +20,8 @@ import { IdCounter } from '../../sim/fighter';
 import { DAMAGE_TUNING } from '../../sim/rules';
 import { WEAPON_MOVES, WEAPONS, type WeaponDef } from '../../sim/weapons';
 import { JOINT_TUNING } from '../joints';
-import { isRopeLike, isSoftGround, isSpringy, MATERIALS, propertyAtLeast, propertyAtMost, propertyMarginAtLeast } from '../materials';
-import { cylinderPoints, principalAxis } from '../shapes';
+import { isRopeLike, isSoftGround, isSpringy, MATERIALS, PROPERTY_EPS, propertyAtLeast, propertyAtMost, propertyMarginAtLeast } from '../materials';
+import { cylinderPoints, GEOM_EPS, principalAxis } from '../shapes';
 import { TERRAIN_TUNING } from '../terrain';
 import type { Entity, Pose3, Quat, Shape, SharpPoint, V3 } from '../types';
 import type { World } from '../world';
@@ -81,7 +81,7 @@ const cross = (a: V3, b: V3): V3 => v(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b
 const len = (a: V3): number => Math.hypot(a.x, a.y, a.z);
 function unit(a: V3, fallback: V3 = v(0, 1, 0)): V3 {
   const l = len(a);
-  return l > 1e-12 ? scale(a, 1 / l) : { ...fallback };
+  return l > GEOM_EPS ? scale(a, 1 / l) : { ...fallback };
 }
 function rotate(q: Quat, p: V3): V3 {
   const tx = 2 * (q.y * p.z - q.z * p.y);
@@ -102,7 +102,11 @@ function normQuat(q: Quat): Quat {
   const l = Math.hypot(q.x, q.y, q.z, q.w);
   return l > 0 ? { x: q.x / l, y: q.y / l, z: q.z / l, w: q.w / l } : { x: 0, y: 0, z: 0, w: 1 };
 }
-/** The rotation whose matrix has columns x, y, z (an orthonormal right-handed basis). */
+/**
+ * The rotation whose matrix has columns x, y, z (an orthonormal right-handed basis). Shepperd's method: r = √(1 + the
+ * largest of the trace and the diagonal terms' combinations) is twice the largest component; the rest are the
+ * off-diagonal sums and differences ÷ 2r.
+ */
 function quatFromBasis(x: V3, y: V3, z: V3): Quat {
   const m00 = x.x, m10 = x.y, m20 = x.z;
   const m01 = y.x, m11 = y.y, m21 = y.z;
@@ -110,17 +114,21 @@ function quatFromBasis(x: V3, y: V3, z: V3): Quat {
   const tr = m00 + m11 + m22;
   let q: Quat;
   if (tr > 0) {
-    const s = Math.sqrt(tr + 1) * 2;
-    q = { w: s / 4, x: (m21 - m12) / s, y: (m02 - m20) / s, z: (m10 - m01) / s };
+    const r = Math.sqrt(1 + tr);
+    const f = 0.5 / r;
+    q = { w: 0.5 * r, x: (m21 - m12) * f, y: (m02 - m20) * f, z: (m10 - m01) * f };
   } else if (m00 > m11 && m00 > m22) {
-    const s = Math.sqrt(1 + m00 - m11 - m22) * 2;
-    q = { w: (m21 - m12) / s, x: s / 4, y: (m01 + m10) / s, z: (m02 + m20) / s };
+    const r = Math.sqrt(1 + m00 - m11 - m22);
+    const f = 0.5 / r;
+    q = { w: (m21 - m12) * f, x: 0.5 * r, y: (m01 + m10) * f, z: (m02 + m20) * f };
   } else if (m11 > m22) {
-    const s = Math.sqrt(1 + m11 - m00 - m22) * 2;
-    q = { w: (m02 - m20) / s, x: (m01 + m10) / s, y: s / 4, z: (m12 + m21) / s };
+    const r = Math.sqrt(1 + m11 - m00 - m22);
+    const f = 0.5 / r;
+    q = { w: (m02 - m20) * f, x: (m01 + m10) * f, y: 0.5 * r, z: (m12 + m21) * f };
   } else {
-    const s = Math.sqrt(1 + m22 - m00 - m11) * 2;
-    q = { w: (m10 - m01) / s, x: (m02 + m20) / s, y: (m12 + m21) / s, z: s / 4 };
+    const r = Math.sqrt(1 + m22 - m00 - m11);
+    const f = 0.5 / r;
+    q = { w: (m10 - m01) * f, x: (m02 + m20) * f, y: (m12 + m21) * f, z: 0.5 * r };
   }
   return normQuat(q);
 }
@@ -229,7 +237,7 @@ export function heldShape(w: World, entity: number): HeldShape {
   let ax = principalAxis(longest.shape);
   for (const e of members) {
     const a = principalAxis(e.shape);
-    if (a.max - a.min > ax.max - ax.min + 1e-12) {
+    if (a.max - a.min > ax.max - ax.min + GEOM_EPS) {
       longest = e;
       ax = a;
     }
@@ -286,8 +294,8 @@ export function heldShape(w: World, entity: number): HeldShape {
       head = f;
       continue;
     }
-    if (f.sharpness > head.sharpness + 1e-9) head = f;
-    else if (Math.abs(f.sharpness - head.sharpness) <= 1e-9) {
+    if (f.sharpness > head.sharpness + PROPERTY_EPS) head = f;
+    else if (Math.abs(f.sharpness - head.sharpness) <= PROPERTY_EPS) {
       if (f.kind === 'edge' && head.kind === 'point') head = f;
       else if (f.kind === head.kind && f.end > head.end) head = f;
     }
@@ -298,7 +306,7 @@ export function heldShape(w: World, entity: number): HeldShape {
   let side: 1 | -1;
   if (head && head.end !== 0) side = head.end;
   else if (head) side = dot(sub(head.local, centre), axis) < 0 ? -1 : 1;
-  else side = dot(sub(com, centre), axis) < -1e-9 ? -1 : 1;
+  else side = dot(sub(com, centre), axis) < -GEOM_EPS ? -1 : 1;
   const axisOut = scale(axis, side);
   const grip = sub(centre, scale(axisOut, L / 2));
 

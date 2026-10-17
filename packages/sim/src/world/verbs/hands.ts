@@ -19,7 +19,7 @@ import type { Fighter } from '../../sim/fighter';
 import { DT } from '../../sim/math';
 import { bladeFrame, WEAPONS } from '../../sim/weapons';
 import { propertyAtMost } from '../materials';
-import { principalAxis } from '../shapes';
+import { GEOM_EPS, principalAxis } from '../shapes';
 import type { Entity, Inventory, Pose3, PostureId, V3 } from '../types';
 import type { World } from '../world';
 import { WORLD_TUNING } from '../worldTuning';
@@ -142,7 +142,7 @@ export function heldPose(w: World, f: Fighter, h: Hands): Pose3 | null {
     bladeFrame(f, grip, dir);
     yW = unit({ x: dir.x, y: dir.y, z: dir.z }, fwd);
     const ahead = sub(fwd, scale(yW, dot(fwd, yW)));
-    zW = len(ahead) > 1e-6 ? unit(ahead) : perpendicular(yW);
+    zW = len(ahead) > GEOM_EPS ? unit(ahead) : perpendicular(yW);
     at = { x: grip.x, y: grip.y, z: grip.z };
     anchor = hs.grip;
   } else {
@@ -161,7 +161,7 @@ export function heldPose(w: World, f: Fighter, h: Hands): Pose3 | null {
   // The object's own frame: y along its axis (grip → head), z toward its head's point or edge, x = y × z.
   const yL = hs.axis;
   const toward = hs.head ? sub(hs.head.dir, scale(yL, dot(hs.head.dir, yL))) : zero();
-  const zL = len(toward) > 1e-6 ? unit(toward) : perpendicular(yL);
+  const zL = len(toward) > GEOM_EPS ? unit(toward) : perpendicular(yL);
   const xL = cross(yL, zL);
   const q = mulQuat(quatFromBasis(xW, yW, zW), conj(quatFromBasis(xL, yL, zL)));
   const p = sub(at, rotate(q, anchor));
@@ -331,7 +331,7 @@ export function dragImpulse(w: World, f: Fighter, entity: number, grip: V3, capN
   let ux = hand.x - g.x;
   let uz = hand.z - g.z;
   const d = Math.hypot(ux, uz);
-  if (d > 1e-9) {
+  if (d > GEOM_EPS) {
     ux /= d;
     uz /= d;
   } else {
@@ -477,7 +477,7 @@ const take: VerbHandler = {
     const low = getPose(two ? 'pickupLow2' : 'pickupLow1');
     const keys: TrackKey[] = [
       { f: actAt, pose: low, ease: 'inOut' },
-      { f: Math.min(frames, actAt + 3), pose: low },
+      { f: Math.min(frames, actAt + t.takeHoldFrames), pose: low },
       { f: frames, pose: getPose(holdPose(w, e.id, plan?.mode ?? null, two)), ease: 'inOut' },
     ];
     return { frames, actAt, faceAt, keys };

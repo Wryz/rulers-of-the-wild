@@ -98,6 +98,7 @@ export const VERB_TUNING = defineTuning(
     // P14: values the design gives in prose (§5.0, §5.1, §5.4) or not at all.
     heldJoinDepth: 3,
     takeGrabFrac: 0.5,
+    takeHoldFrames: 3,
     carryFrontUpM: 1.05,
     carryFrontFwdM: 0.4,
     carryShoulderUpM: 1.55,
@@ -184,6 +185,7 @@ export const VERB_TUNING = defineTuning(
     haulRampMps: { unit: 'm/s', source: 'NEW: the haul model (I-2) [I-rev ran: swing_light.out]' },
     heldJoinDepth: { unit: 'joints', source: 'NEW: §5.0 (a held object is the entity in the hands plus every entity lash-joined to it, depth ≤ 3)', min: 0, step: 1 },
     takeGrabFrac: { unit: '× the take frames', source: "NEW: the hands close half-way through a take (DS pickup's grabAt = frames × 0.5)", min: 0, max: 1 },
+    takeHoldFrames: { unit: 'ticks', source: "NEW: the low pose held as the hands close (DS pickup's grabAt + 3 key)", min: 0, step: 1 },
     carryFrontUpM: { unit: 'm × scale above the feet', source: 'NEW: where a carried load sits (§5.1 carryFront)', min: 0 },
     carryFrontFwdM: { unit: 'm × scale ahead', source: 'NEW: where a carried load sits (§5.1 carryFront)', min: 0 },
     carryShoulderUpM: { unit: 'm × scale above the feet', source: 'NEW: a long load on the shoulder (§5.1 carryShoulder)', min: 0 },
