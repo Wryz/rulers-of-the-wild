@@ -88,7 +88,9 @@ export class WorldViews implements WorldViewsPort {
     const holds = this.holds(world);
     this.entities.sync(all, {
       alpha,
-      skip: (e) => this.forest.owns(e),
+      // The Clearing's boundary walls (look 'boundary', 60 m tall just outside the terrain) keep things in the world;
+      // the valley rim is the visible edge, so they aren't drawn (the presentation world still mirrors them).
+      skip: (e) => this.forest.owns(e) || e.look === 'boundary',
       placed: (e) => this.placed(e, holds),
       blood: (e) => {
         if (this.gore === 'off') return 0;
