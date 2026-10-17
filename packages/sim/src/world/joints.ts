@@ -396,11 +396,9 @@ export class JointStore implements TripwireSink {
         if (!A) continue;
         const hand = handOf(f);
         const D = dist(hand, A);
+        // Reeling in, then (the same tick) hauling once the slack is in (I-2: a haul skipped on reel-in ticks creeps).
+        if (D < j.rope.lengthM - JOINT_TUNING.tautEps) j.rope.lengthM = Math.max(D, j.rope.lengthM - V.pullHandSpeedMps * DT);
         const L = j.rope.lengthM;
-        if (D < L - JOINT_TUNING.tautEps) {
-          j.rope.lengthM = Math.max(D, L - V.pullHandSpeedMps * DT);
-          continue;
-        }
         if (D < L - V.haulTautM || !(D > 0)) continue;
         const u = scale(sub(hand, A), 1 / D);
         this.haul(j, other, A, u);
@@ -1105,19 +1103,21 @@ export class JointStore implements TripwireSink {
       if (j.kind !== 'bend' || j.a.entity === null) continue;
       if (this.sorted.some((o) => o.holdsBend === j.id)) continue;
       const s = w.entities.get(j.a.entity);
-      if (!s?.body || !s.plant || s.plant.phase !== 'bent') continue;
-      const resting = s.restTicks >= PHYSICS_TUNING.restTicks || s.body.isSleeping();
-      if (!resting) continue;
+      const b = s?.body;
+      if (!s || !b || !s.plant || s.plant.phase !== 'bent') continue;
       const ax = principalAxis(s.shape);
-      const upNow = rotate(s.pose.q, ax.dir);
+      const upNow = rotate(copy3q(b.rotation()), ax.dir);
       const tilt = Math.acos(Math.max(-1, Math.min(1, dot(upNow, UP))));
       if (tilt > (JOINT_TUNING.bendSettleDeg * Math.PI) / 180) continue;
+      // Still for this tick (its motor holds a fraction of a degree of tremble, so the rest count never fills).
+      const speed = b.isSleeping() ? 0 : norm(copy3(b.linvel())) + norm(copy3(b.angvel())) * (ax.max - ax.min);
+      if (!(speed < PHYSICS_TUNING.restSpeed)) continue;
       // Upright about its pivot again: the joint's anchor on the sapling back over the pivot point.
       const pivot = j.b.local;
-      const q = { x: 0, y: 0, z: 0, w: 1 };
-      const p = sub(pivot, rotate(q, j.a.local));
+      const upright = { x: 0, y: 0, z: 0, w: 1 };
+      const p = sub(pivot, rotate(upright, j.a.local));
       this.forget(j);
-      w.entities.setPose(s, { p, q });
+      w.entities.setPose(s, { p, q: upright });
       w.entities.setState(s, 'fixed');
       s.plant.phase = 'standing';
       s.touched = true;
