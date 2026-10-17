@@ -68,10 +68,8 @@ export type UnscoredWhy = 'bounce' | 'grace' | 'limb' | 'held' | 'released' | 'p
 /**
  * What phase 9d hands the joint store (P10, §4.9): a new episode (not a bounce, outside the crosser's grace) between
  * rope sensor `joint` and `by`, a creature's collider or a dynamic entity. The tripwire rule (root momentum, the
- * exemptions, the load against the rope's strength, queued shares, the `tripwire` event) is the joint store's.
- * TODO(P10): JointStore `implements TripwireSink` (§1.5.7 gains the method); then phase 9d's cast goes. Until then no
- * rope sensor exists (only P10's JointStore makes them), so the call never runs; a JointStore that has rope sensors and
- * no `tripwire` throws at the first crossing instead of silently never firing.
+ * exemptions, the load against the rope's strength, queued shares, the `tripwire` event) is the joint store's:
+ * JointStore implements it (§1.5.7 gains the method), and phase 9d calls it plainly.
  */
 export interface TripwireSink {
   tripwire(w: World, joint: number, by: Owner): void;
@@ -275,8 +273,7 @@ export class ContactSystem {
     // 9c: entities (integrity; a notched tree's fall-direction moment), after the creature damage (SPEC:344).
     for (const fr of fresh) for (const h of fr.entity) this.applyEntityHit(w, h);
     // 9d: rope sensors → tripwires (a plain call: a joint store without the method fails loudly, never silently).
-    const sink = w.joints as unknown as TripwireSink;
-    for (const fr of fresh) if (fr.rope) sink.tripwire(w, fr.rope.joint, fr.rope.by);
+    for (const fr of fresh) if (fr.rope) w.joints.tripwire(w, fr.rope.joint, fr.rope.by);
     // 9e: thrown entities stop being held at their first contact or at rest (D-31); `land` events for heavy landings.
     for (const e of w.entities.all()) {
       if (!e.thrown) continue;
@@ -664,15 +661,14 @@ export class ContactSystem {
   private applyEntityHit(w: World, h: EntityHit): void {
     const e = w.entities.get(h.e.id);
     if (!e) return;
-    // TODO(P10): Breaking.hit is P05's stub until P10 (it throws "not implemented yet"); then this is a plain call.
-    stubbed(() => w.breaking.hit(e, h.energy, h.point, h.breaker), 'world/breaking.ts: Breaking.hit is not implemented yet');
+    w.breaking.hit(e, h.energy, h.point, h.breaker);
     // A notched tree: the impact's moment about the hinge in the fall direction (§4.12): E/hingeRad × max(0, d̂·fallDir),
     // the fall direction away from the cut side.
     const cut = e.plant?.phase === 'notched' ? e.plant.cut : null;
     if (cut && h.dir) {
       const along = -(h.dir.x * cut.fromDir.x + h.dir.y * cut.fromDir.y + h.dir.z * cut.fromDir.z);
       const moment = (h.energy / FELL_TUNING.hingeRad) * Math.max(0, along);
-      if (moment > 0) stubbed(() => w.felling.addMoment(e.id, moment), 'world/felling.ts: Felling.addMoment is not implemented yet');
+      if (moment > 0) w.felling.addMoment(e.id, moment);
     }
   }
 
@@ -968,19 +964,6 @@ function solidContact(w: World, ca: RAPIER.Collider, cb: RAPIER.Collider, ma: Mo
   const nl = len(nSum);
   if (np === 0 || !(nl > 1e-9)) return null;
   return { n: scale(nSum, 1 / nl), point: scale(pSum, 1 / np) };
-}
-
-/**
- * Runs a call into a system that is still P05's stub (it throws `<message prefix>…`), as world.ts and characters.ts do
- * for P01's placeholders: a world without that system yet must not throw from inside step(). Any other error is real.
- */
-function stubbed(fn: () => void, prefix: string): void {
-  try {
-    fn();
-  } catch (e) {
-    if (e instanceof Error && e.message.startsWith(prefix)) return;
-    throw e;
-  }
 }
 
 // ---------------------------------------------------------------------------

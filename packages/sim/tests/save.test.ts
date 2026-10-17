@@ -49,7 +49,7 @@ import { defineTuning, getTuningValue, resetTuning, setTuningValue, tuningSnapsh
 import { ApeMind } from '../src/world/creatures/apeMind';
 import { createCreature } from '../src/world/creatures/factory';
 import type { CreatureMind } from '../src/world/creatures/mind';
-import { spawnBox, spawnGrass, spawnLog, spawnRopeCoil, spawnStick, spawnStone } from '../src/world/factory';
+import { spawnBox, spawnGrass, spawnLog, spawnRopeCoil, spawnSapling, spawnStick, spawnStone, spawnTree } from '../src/world/factory';
 import { physicsReady } from '../src/world/physics';
 import type { Quat, RulerState, V3 } from '../src/world/types';
 import { createWorld, type World, type WorldOptions } from '../src/world/world';
@@ -547,10 +547,24 @@ const INVENTORY: Record<string, Record<string, string>> = {
     collider: 'not saved: the Rapier collider, rebuilt from the record',
     prevPose: 'not saved: client interpolation (a load sets it to the pose)',
   },
-  JointStore: { world: 'not saved: a link' },
-  Breaking: { world: 'not saved: a link' },
+  JointStore: {
+    world: 'not saved: a link',
+    byId: 'saved: joints (every joint, generation\'s included: restoreRecord replaces the store)',
+    sorted: 'saved: joints (id order)',
+    snapshot: 'not saved: a cache of sorted',
+    rt: 'not saved: per-joint runtime (the Rapier joint, a world-point end\'s hidden fixed body, the rope sensor), made again from joints by restoreRecord',
+    tripped: 'not saved: the strand groups whose tripwire load phase 9d took this tick (a crossing is counted once per tick)',
+  },
+  Breaking: {
+    world: 'not saved: a link',
+    pending: 'not saved: breaks found in phases 9c and 11 for phase 12 of the same tick, which empties it; empty at a tick end',
+  },
   Loads: { world: 'not saved: a link' },
-  Felling: { world: 'not saved: a link' },
+  Felling: {
+    world: 'not saved: a link',
+    moments: 'not saved: moments added in phases 4d and 9c for phase 13c of the same tick, which empties it; empty at a tick end',
+    falls: "saved: felling (a falling trunk's phase and hinge; its runtime joint to the stump is made again from it and entities[].plant)",
+  },
   CombatSim: {
     fighters: 'saved: fighters (step order)',
     events: 'not saved: cleared at the start of every tick',
@@ -777,9 +791,7 @@ function missingStep(v: unknown, path: string): string | null {
  */
 const AWAITING: Record<string, string> = {
   cover: 'GroundCover (P21)',
-  joints: 'JointStore (P10)',
   spawner: 'Spawner (P22)',
-  felling: 'Felling (P10)',
 };
 
 describe('completeness (RR-19)', () => {
@@ -1027,6 +1039,65 @@ describe('save → load → save', () => {
     for (let k = 0; k < 60; k++) l.step();
     expect(['chase', 'fight']).toContain(lm.state);
     expect(lf.distanceTo(l.player!)).toBeLessThan(f.distanceTo(w.player!));
+  });
+
+  it('is byte-identical with joints (a hanging log, a lashing, a hanging vine, a bend), loads and felling under way, and gives back the Rapier joints (P10)', async () => {
+    const w = await make();
+    // A 30 kg log hanging on a vine from a post (a taut rope with a tension ring).
+    const post = spawnBox(w, { p: { x: 8, y: 3.2, z: 8 }, size: [0.4, 0.4, 0.4], material: 'dryWood', state: 'fixed', look: 'scaffold' });
+    const hung = spawnLog(w, { p: { x: 8, y: 1.5, z: 8 }, length: 1, mass: 30 });
+    w.joints.rope({ entity: post, local: { x: 0, y: -0.2, z: 0 } }, { entity: hung, local: { x: 0, y: 0, z: 0 } }, 1.5, { entity: spawnRopeCoil(w, { at: { x: 14, y: 0.2, z: 14 }, material: 'vine', lengthM: 2 }), lengthM: 1.5 }, ['p1']);
+    // Two logs lashed together on the ground.
+    const la = spawnLog(w, { p: { x: -8, y: 0.2, z: 8 }, length: 2, r: 0.1 });
+    const lb = spawnLog(w, { p: { x: -8, y: 0.2, z: 8.4 }, length: 2, r: 0.1 });
+    w.joints.lash({ entity: la, local: { x: 0, y: 0, z: 0.2 } }, { entity: lb, local: { x: 0, y: 0, z: -0.2 } }, { entity: spawnRopeCoil(w, { at: { x: 15, y: 0.2, z: 14 }, material: 'sinew', lengthM: 1 }), lengthM: 1 }, []);
+    // A tree with a hanging vine (a rope with a loose end), and a sapling bent down to a stake.
+    spawnTree(w, { at: { x: -10, z: -8 }, diameter: 0.3, height: 12, vine: { anchorH: 7, lengthM: 10, yaw: 0 } });
+    const sap = spawnSapling(w, { at: { x: 8, z: -8 }, diameter: 0.06, height: 3 });
+    const stake = spawnLog(w, { p: { x: 10, y: 0.2, z: -8 }, q: UPRIGHT, length: 1, r: 0.04, state: 'anchored' });
+    // A rotten branch across two crates: it spans, so its own weight goes into its load history.
+    spawnBox(w, { p: { x: -8, y: 0.25, z: -2.6 }, size: [0.4, 0.5, 0.4], material: 'dryWood', state: 'fixed', look: 'crate' });
+    spawnBox(w, { p: { x: -8, y: 0.25, z: -1.4 }, size: [0.4, 0.5, 0.4], material: 'dryWood', state: 'fixed', look: 'crate' });
+    const branch = spawnStick(w, { p: { x: -8, y: 0.54, z: -2 }, q: { x: Math.SQRT1_2, y: 0, z: 0, w: Math.SQRT1_2 }, length: 1.8, r: 0.03, material: 'rottenWood' });
+    // Two trees being felled: one notched, one falling.
+    const notched = spawnTree(w, { at: { x: 14, z: 0 }, diameter: 0.3, height: 12 }).tree;
+    const falling = spawnTree(w, { at: { x: -14, z: 0 }, diameter: 0.3, height: 12 }).tree;
+    w.step();
+    w.joints.bend(sap, { entity: sap, local: { x: 0, y: 1.5, z: 0 } }, { entity: stake, local: { x: 0, y: 0.5, z: 0 } }, { entity: spawnRopeCoil(w, { at: { x: 16, y: 0.2, z: 14 }, material: 'vine', lengthM: 2 }), lengthM: 2 }, ['p1']);
+    w.felling.chop(notched, { x: -1, y: 0, z: 0 }, 0.06, ['p1']);
+    w.felling.chop(falling, { x: 0, y: 0, z: 1 }, 0.3, ['p1']);
+    run(w, 60, new Rng(13));
+    const a = serializeWorld(w);
+    const s = parsed(a) as unknown as SaveV1;
+    // Not vacuous: five joints (the bend and its hold rope among them), tension rings, a load history, both trees.
+    expect(s.joints.map((j) => j.kind).sort()).toEqual(['bend', 'lash', 'rope', 'rope', 'rope']);
+    expect(s.joints.some((j) => j.tension.some((t) => t > 0))).toBe(true);
+    expect(s.entities.find((e) => e.id === branch)!.loadHist.some((x) => x > 0)).toBe(true);
+    expect(s.felling.map((f) => [f.tree, f.phase])).toEqual([
+      [notched, 'notched'],
+      [falling, 'falling'],
+    ]);
+    const l = await load(a);
+    const b = serializeWorld(l);
+    const sa = sections(a, SAVE_V1_KEYS);
+    const sb = sections(b, SAVE_V1_KEYS);
+    for (const k of EXACT) expect(sb[k] === sa[k], `section ${k}`).toBe(true);
+    // The Rapier joints come back with the records: the lashing, the hanging log's rope, the bend, its hold rope and the
+    // falling trunk's hinge to its stump (the vine with a loose end has none).
+    const n = w.physics.rapier.impulseJoints.len();
+    expect(n).toBe(5);
+    l.step();
+    expect(l.physics.rapier.impulseJoints.len()).toBe(n);
+    // Two loads of the save go on alike.
+    const l2 = await load(a);
+    l2.step();
+    for (let i = 0; i < 59; i++) {
+      l.step();
+      l2.step();
+    }
+    const c1 = sections(serializeWorld(l), SAVE_V1_KEYS);
+    const c2 = sections(serializeWorld(l2), SAVE_V1_KEYS);
+    for (const k of ['entities', 'joints', 'felling'] as const) expect(c1[k] === c2[k], `section ${k} after 60 ticks`).toBe(true);
   });
 
   it('gives the loaded world its fighters, players, tick, entity poses, queue, impulses and streams', async () => {

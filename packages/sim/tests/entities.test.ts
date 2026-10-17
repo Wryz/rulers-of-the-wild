@@ -339,11 +339,12 @@ describe('anchoring', () => {
     const mEff = reducedMass(4.5, w.entities.isAnchored(stake) ? Infinity : stake.mass);
     expect(mEff).toBe(4.5);
 
-    // Its queued impulse is dropped, and a 300 kg log dropped across it doesn't move it.
+    // Its queued impulse is dropped, and a 300 kg log laid across it doesn't move it (set down from 2 cm: dropped from
+    // 0.5 m, ≈ 1.5 kJ beats capacity × loadLeverM = 120 J and knocks the stake loose, §2.3, P10).
     const pose = structuredClone(stake.pose);
     w.entities.queueImpulse(stake.id, { x: 500, y: 0, z: 0 }, null);
     const r = prismR(300, MATERIALS.greenWood.density, 3, 6);
-    w.entities.create(prism('greenWood', { length: 3, r, sides: 6, p: { x: 0, y: 0.7 + r + 0.5, z: 0 }, q: LYING_Z }));
+    w.entities.create(prism('greenWood', { length: 3, r, sides: 6, p: { x: 0, y: 0.7 + r + 0.02, z: 0 }, q: LYING_Z }));
     for (let t = 0; t < 120; t++) w.step();
     expect(w.entities.pendingImpulses()).toEqual([]);
     expect(stake.pose).toEqual(pose);
@@ -659,17 +660,18 @@ describe('the mirror', () => {
     const a = await pile();
     const b = await pile();
     expect(mirrorText(b)).toBe(mirrorText(a));
-    let prev = a.entities.all().map((e) => structuredClone(e.pose));
+    // By id: light pieces of the pile may break on landing (§4.10, P10), which replaces them with new ids.
+    let prev = new Map(a.entities.all().map((e) => [e.id, structuredClone(e.pose)]));
     for (let t = 1; t <= 1200; t++) {
       a.step();
       b.step();
       // prevPose is the pose one tick earlier; pose is the body's own f32 pose.
       const now = a.entities.all();
       for (let i = 0; i < now.length; i++) {
-        expect(now[i].prevPose).toEqual(prev[i]);
+        if (prev.has(now[i].id)) expect(now[i].prevPose).toEqual(prev.get(now[i].id));
         if (t % 120 === 0) expect(now[i].pose).toEqual(bodyPose(now[i]));
       }
-      prev = now.map((e) => structuredClone(e.pose));
+      prev = new Map(now.map((e) => [e.id, structuredClone(e.pose)]));
       if (t % 60 === 0) expect(mirrorText(b)).toBe(mirrorText(a));
     }
     for (const e of a.entities.all()) {
@@ -1034,7 +1036,9 @@ describe('save records', () => {
     w.entities.remove(mat.id);
     w.entities.release(thrown, 1);
     thrown.thrown = { by: 1, tick: w.tick };
-    w.entities.setGrace(thrown, { from: { kind: 'fighter', id: 1, part: 'zone', bone: 'shinL' }, minUntil: w.tick + 10, maxUntil: w.tick + 600 });
+    // minUntil past the 240 ticks below: from minUntil, P10's grace ends as soon as the piece is clear of its breaker
+    // (RF-7), and this one never touched it.
+    w.entities.setGrace(thrown, { from: { kind: 'fighter', id: 1, part: 'zone', bone: 'shinL' }, minUntil: w.tick + 300, maxUntil: w.tick + 600 });
     thrown.crossCut = { axisT: 0.2, remaining: 0.5, fromDir: { x: 0, y: 0, z: 1 } };
     thrown.loadHist[3] = 120.5;
     thrown.credit = ['p1'];
