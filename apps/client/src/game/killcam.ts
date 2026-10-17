@@ -26,49 +26,55 @@ export interface Moment {
   severity: number;
 }
 
-/** The shot parameters of one moment kind (§10.3's table; distances and heights in m, before the scale terms). */
+/**
+ * The shot parameters every moment kind shares, named as §9.1 names them (`orbit` in rad: Cinematics turns the shot by
+ * it per second, Shot.orbit).
+ */
 const shotFields = (what: string) => ({
-  orbit: { unit: 'rad/s', source: `§10.3 ${what}`, min: -1, max: 1, step: 0.01 },
-  fov: { unit: '°', source: `§10.3 ${what}`, min: 20, max: 90, step: 1 },
-  durationS: { unit: 's', source: `§10.3 ${what}`, min: 0.2, max: 10, step: 0.1 },
-  slow: { unit: '× time', source: `§10.3 ${what}`, min: 0.02, max: 1, step: 0.01 },
-  priority: { unit: '—', source: `§10.3 ${what} (Cinematics' ladder: death 5, skull 4.5, finisher 4)`, min: 0, max: 10, step: 0.5 },
+  orbit: { unit: 'rad (per s of the shot)', source: `§9.1 KILLCAM_TUNING ${what}`, min: -1, max: 1, step: 0.01 },
+  fov: { unit: '°', source: `§9.1 KILLCAM_TUNING ${what}`, min: 20, max: 90, step: 1 },
+  durationS: { unit: 's', source: `§9.1 KILLCAM_TUNING ${what}`, min: 0.2, max: 10, step: 0.1 },
+  slow: { unit: '×', source: `§9.1 KILLCAM_TUNING ${what}`, min: 0.02, max: 1, step: 0.01 },
+  priority: { unit: '—', source: `§9.1 KILLCAM_TUNING ${what} (Cinematics' ladder: death 5, skull 4.5, finisher 4)`, min: 0, max: 10, step: 0.5 },
 });
 
+/**
+ * §9.1's keys (dist, height, orbit, fov, durationS, slow, priority; worldWound's dolly). One key is added: envKill's
+ * `distScale`, because its distance is a formula, 3.8 × max(1, 0.75·scale), which one number can't hold. worldWound's
+ * and rulerDeath's dist and height are per unit of the subject's scale (§9.1: "3.3·scale", "4·scale").
+ */
 export const KILLCAM_TUNING = defineTuning(
   'KILLCAM_TUNING',
   'Client › kill cam',
   {
     cooldownS: 4,
-    /** DS's finishing shot: distance distM × max(1, distScaleMul·scale). */
-    envKill: { distM: 3.8, distScaleMul: 0.75, heightM: 0.55, orbit: 0.3, fov: 38, durationS: 2.2, slow: 0.18, priority: 4 },
-    /** DS boss-intro framing: distance and height × scale. */
-    worldWound: { distPerScaleM: 3.3, heightPerScaleM: -0.15, orbit: -0.12, dolly: -0.35, fov: 42, durationS: 2.4, slow: 0.25, priority: 4.5 },
-    rulerDeath: { distPerScaleM: 4, heightPerScaleM: 0.3, orbit: 0.1, fov: 40, durationS: 4.0, slow: 0.2, priority: 6 },
-    playerByRuler: { distM: 7, heightM: 2.5, orbit: 0.2, fov: 44, durationS: 2.6, slow: 0.3, priority: 5.5 },
+    envKill: { dist: 3.8, distScale: 0.75, height: 0.55, orbit: 0.3, fov: 38, durationS: 2.2, slow: 0.18, priority: 4 },
+    worldWound: { dist: 3.3, height: -0.15, orbit: -0.12, dolly: -0.35, fov: 42, durationS: 2.4, slow: 0.25, priority: 4.5 },
+    rulerDeath: { dist: 4, height: 0.3, orbit: 0.1, fov: 40, durationS: 4.0, slow: 0.2, priority: 6 },
+    playerByRuler: { dist: 7, height: 2.5, orbit: 0.2, fov: 44, durationS: 2.6, slow: 0.3, priority: 5.5 },
   },
   {
     cooldownS: { unit: 's per moment kind', source: 'NEW (§10.3)', min: 0, max: 30, step: 0.5 },
     envKill: {
-      distM: { unit: 'm', source: 'DS (game.ts finishing shot)', min: 1, max: 20, step: 0.1 },
-      distScaleMul: { unit: '× scale', source: 'DS (game.ts finishing shot)', min: 0, max: 2, step: 0.05 },
-      heightM: { unit: 'm', source: 'DS (game.ts finishing shot)', min: -3, max: 10, step: 0.05 },
+      dist: { unit: 'm (× max(1, distScale·scale))', source: 'DS (game.ts finishing shot)', min: 1, max: 20, step: 0.1 },
+      distScale: { unit: '× scale', source: 'DS (game.ts finishing shot): the 0.75 of 3.8 × max(1, 0.75·scale)', min: 0, max: 2, step: 0.05 },
+      height: { unit: 'm', source: 'DS (game.ts finishing shot)', min: -3, max: 10, step: 0.05 },
       ...shotFields('envKill (DS finishing shot)'),
     },
     worldWound: {
-      distPerScaleM: { unit: 'm × scale', source: 'NEW (DS boss-intro framing, MAP client §3.3)', min: 0.5, max: 10, step: 0.1 },
-      heightPerScaleM: { unit: 'm × scale', source: 'NEW (DS boss-intro framing)', min: -2, max: 2, step: 0.05 },
+      dist: { unit: 'm × scale', source: 'NEW (DS boss-intro framing, MAP client §3.3)', min: 0.5, max: 10, step: 0.1 },
+      height: { unit: 'm × scale', source: 'NEW (DS boss-intro framing)', min: -2, max: 2, step: 0.05 },
       dolly: { unit: 'm/s', source: 'NEW (DS boss-intro framing)', min: -2, max: 2, step: 0.05 },
       ...shotFields('worldWound'),
     },
     rulerDeath: {
-      distPerScaleM: { unit: 'm × scale', source: 'NEW', min: 0.5, max: 10, step: 0.1 },
-      heightPerScaleM: { unit: 'm × scale', source: 'NEW', min: -2, max: 2, step: 0.05 },
+      dist: { unit: 'm × scale', source: 'NEW', min: 0.5, max: 10, step: 0.1 },
+      height: { unit: 'm × scale', source: 'NEW', min: -2, max: 2, step: 0.05 },
       ...shotFields('rulerDeath'),
     },
     playerByRuler: {
-      distM: { unit: 'm', source: 'NEW (rule 9)', min: 1, max: 30, step: 0.1 },
-      heightM: { unit: 'm', source: 'NEW (rule 9)', min: -3, max: 15, step: 0.1 },
+      dist: { unit: 'm', source: 'NEW (rule 9)', min: 1, max: 30, step: 0.1 },
+      height: { unit: 'm', source: 'NEW (rule 9)', min: -3, max: 15, step: 0.1 },
       ...shotFields('playerByRuler'),
     },
   },
@@ -136,8 +142,8 @@ export class KillCam implements KillCamPort {
         return {
           focus: this.views.pelvisOf(f),
           side: this.views.across(from, f.pos, 0.1),
-          distance: T.distM * Math.max(1, T.distScaleMul * f.scale),
-          height: T.heightM,
+          distance: T.dist * Math.max(1, T.distScale * f.scale),
+          height: T.height,
           orbit: T.orbit,
           fov: T.fov,
           duration: T.durationS,
