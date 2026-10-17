@@ -5,6 +5,10 @@ spec and the source of truth; "The Wild" in the spec is this game. Work through 
 plan one milestone at a time, and only start a milestone when the one before it has passed
 its gate.
 
+Milestone 1's implementation design is `docs/M1-DESIGN.md` (module map, tick pipeline, rules,
+verbs, creatures, tuning tables, acceptance tests, work packages). Follow it; where it is wrong,
+take the option closest to the design rules and record the deviation.
+
 ## The 12 design rules (binding)
 
 Copied word for word from `docs/SPEC.md` (Design pillars and rules). If an implementation
