@@ -15,9 +15,9 @@
 // exactly the in-play behaviour.
 //
 // TODO "lengthwise split": "split a log" is a cross-cut in M1 (X13).
-import { buttonMove } from '../../sim/combat';
-import type { VerbCommand } from '../../sim/commands';
 import type { Fighter } from '../../sim/fighter';
+import { angleDelta } from '../../sim/math';
+import { defineTuning } from '../../tuning/registry';
 import { chopDepth } from '../felling';
 import { ropeCoilShape } from '../factory';
 import { JOINT_TUNING } from '../joints';
@@ -25,9 +25,47 @@ import { crossCut, GEOM_EPS, principalAxis, shapeContains, type ShapePiece } fro
 import type { Anchor, Entity, RefuseReason, SharpPoint, V3 } from '../types';
 import type { World } from '../world';
 import { creditEntity } from './hands';
-import { registerVerb, verbEvent, type VerbHandler } from './targets';
+import { registerVerb, verbEvent, type VerbHandler, type WorkSpec } from './targets';
 import { canCut, freshChopEnergy, heldMembers, toolEdge, verbGeom } from './tools';
 import { VERB_TUNING } from './tuning';
+
+/**
+ * The strike seam's and the aimed swing's own starting values (read by strike.ts, which imports this module; they live
+ * here so cut.ts's aimed swing reads them without an import cycle). DEVIATION (P15): §13.0 adds no tuning table after
+ * P05, but P05 registered none for these files and §9.1 has no row for these values (§5.2's table gives the reaction
+ * frames inline: `stick`, w.bite, 12 and `rebound`, 2, 10, DS's clang); CLAUDE.md puts every starting value in a live
+ * tuning table, so they live here (as P06's ENTITY_TUNING and P07's FACTORY_TUNING do).
+ */
+export const STRIKE_TUNING = defineTuning(
+  'STRIKE_TUNING',
+  'Verbs › strike',
+  {
+    stickRetract: 12,
+    reboundHold: 2,
+    reboundRetract: 10,
+    unarmedLimbBones: 2,
+    aimTurnTolDeg: 3,
+  },
+  {
+    stickRetract: { unit: 'ticks', source: '§5.2 strike table (a chop, cut or dig sticks: `stick`, w.bite, 12)', min: 0, step: 1 },
+    reboundHold: { unit: 'ticks', source: "§5.2 strike table (a push or clang rebounds: `rebound`, 2, 10; DS's clang)", min: 0, step: 1 },
+    reboundRetract: { unit: 'ticks', source: "§5.2 strike table (a push or clang rebounds: `rebound`, 2, 10; DS's clang)", min: 0, step: 1 },
+    unarmedLimbBones: {
+      unit: 'bones of the striking limb, from its end',
+      source:
+        'NEW (P15 review, orchestrator decision; departs from §5.2\'s "strikeMassKg 6" for unarmed blows): the striker mass of an unarmed push is the striking limb\'s (boneMass): 2 = shin + thigh for a kick (13.5 kg at scale 1: J ≈ 41 N·s at 108 J, §5.2\'s 40 N·s), forearm + upper arm for a punch; 1 = the shin or the forearm alone',
+      min: 1,
+      max: 2,
+      step: 1,
+    },
+    aimTurnTolDeg: {
+      unit: '°',
+      source: "NEW (P15 review): the radial's Cut and Dig turn at VERB_TUNING.faceTurnRate (§5.0) until the turn left is under this, then swing",
+      min: 0,
+      max: 180,
+    },
+  },
+);
 
 const { add, sub, scale, dot, cross, len, unit, rotate, pointToLocal } = verbGeom;
 const UP: Readonly<V3> = Object.freeze({ x: 0, y: 1, z: 0 });
@@ -307,36 +345,57 @@ export function severRope(w: World, f: Fighter, joint: number, point: V3): numbe
 // The aimed committed swing (the radial's Cut and Dig, §5.3, §5.10)
 // ---------------------------------------------------------------------------
 
-/** The player number whose fighter `f` is (World.players), or null for a creature. */
-function playerNumberOf(w: World, f: Fighter): number | null {
-  for (const [n, p] of w.players) if (p === f) return n;
+/**
+ * The turn before an aimed swing (§5.0: a work action "turns toward faceAt by VERB_TUNING.faceTurnRate of the remaining
+ * angle per tick"): a work action that only turns the fighter (its faceAt along the aim, nearer than standOffM, so
+ * CombatSim's faceWork steps no closer: a chop needs its stand-off) until the turn left is under
+ * STRIKE_TUNING.aimTurnTolDeg, landing at actAt with the swing. null when the fighter already faces the aim (or can't
+ * turn: faceTurnRate 0), so the swing starts now. The aim is the fighter's verbAim (set by setFocus).
+ */
+export function aimTurn(f: Fighter): WorkSpec | null {
+  const aim = f.verbAim;
+  if (!aim) return null;
+  const dx = aim.x - f.pos.x;
+  const dz = aim.z - f.pos.z;
+  const d = Math.hypot(dx, dz);
+  if (!(d > GEOM_EPS)) return null;
+  const left = Math.abs(angleDelta(f.yaw, Math.atan2(dx, dz)));
+  const tol = (Math.max(0, STRIKE_TUNING.aimTurnTolDeg) * Math.PI) / 180;
+  const rate = VERB_TUNING.faceTurnRate;
+  if (left <= tol || !(rate > 0)) return null;
+  // faceWork turns on frames 1 .. actAt − 1: n turns leave left × (1 − rate)^n.
+  const turns = rate >= 1 || !(tol > 0) ? 1 : Math.max(1, Math.ceil(Math.log(tol / left) / Math.log(1 - rate)));
+  const reach = 0.5 * VERB_TUNING.standOffM * f.scale;
+  const k = Math.min(d, reach) / d;
+  return { frames: turns + 1, actAt: turns + 1, faceAt: { x: f.pos.x + dx * k, y: f.pos.y, z: f.pos.z + dz * k }, keys: [] };
+}
+
+/**
+ * The wielded tool's committed swing (E: its class's heavy technique, §5.2) as a pressed E starts it (DS
+ * tryBufferedAttack: startMove, `attackStart`), from a work action's landing too (the fighter is then in 'pickup', not
+ * free). The strike seam decides the outcome. Returns null when the swing started, else why it couldn't.
+ */
+export function committedSwing(w: World, f: Fighter): RefuseReason | null {
+  const weapon = f.weapon;
+  const move = weapon ? f.moveDef(weapon.heavy) : undefined;
+  if (!move || !f.canUse(move) || f.load?.mode === 'carry') return 'cantAct';
+  f.startMove(move, false);
+  w.combat.events.push({ type: 'attackStart', f, move });
   return null;
 }
 
 /**
- * The tool's committed swing (E, `rpunch`: the class's heavy technique, §5.2) at a target, as the radial's Cut and Dig
- * play it (§5.3, §5.10): the focus is set on the target as the client's highlight sets it (VerbSystem focus, so verbAim
- * follows it while the swing plays and the swing goes at it, §5.2), the fighter turns to face the aim point, and the move
- * starts as a pressed E starts it (DS tryBufferedAttack: startMove, `attackStart`). The strike seam decides the
- * outcome. Returns null when the swing started, else why it couldn't.
+ * The radial's aimed swing (§5.3, §5.10) begins: the focus is set on the target as the client's highlight sets it
+ * (VerbSystem.setFocus: verbAim follows it, so the swing goes at it, §5.2), then the fighter turns to it at
+ * faceTurnRate (aimTurn's work action, whose landing swings) or, already facing it, swings now. Returns the turn's
+ * work action, or null (the swing started, or `refused` says why not).
  */
-export function aimedSwing(w: World, f: Fighter, focus: { target: number; at?: readonly [number, number, number] }): RefuseReason | null {
-  const n = playerNumberOf(w, f);
-  if (n !== null) {
-    const c: VerbCommand = { tick: w.tick, player: n, kind: 'verb', verb: 'focus', target: focus.target };
-    if (focus.at) c.at = [focus.at[0], focus.at[1], focus.at[2]];
-    w.verbs.applyCommands([c]);
-  }
-  const aim = f.verbAim;
-  if (aim) {
-    const dx = aim.x - f.pos.x;
-    const dz = aim.z - f.pos.z;
-    if (Math.hypot(dx, dz) > GEOM_EPS) f.yaw = Math.atan2(dx, dz);
-  }
-  const pick = buttonMove(f, 'rpunch');
-  if (!pick.move || !pick.ready || f.load?.mode === 'carry') return 'busy';
-  f.startMove(pick.move, pick.counter);
-  w.combat.events.push({ type: 'attackStart', f, move: pick.move });
+export function aimedSwing(w: World, f: Fighter, target: number, at: V3 | null, verb: 'cut' | 'dig'): WorkSpec | null {
+  w.verbs.setFocus(f, target, at);
+  const turn = aimTurn(f);
+  if (turn) return turn;
+  const r = committedSwing(w, f);
+  if (r) verbEvent(w, f, verb, false, r, target);
   return null;
 }
 
@@ -349,8 +408,8 @@ export function wieldedEntity(f: Fighter): number | null {
 /**
  * cut (§5.0, §5.3): `{ verb: 'cut', target }`. Needs an edge that can cut the target (§5.0's "can cut X": the wielded
  * object's edge, `edgeHardness − X.hardness ≥ cutHardnessMargin`); refused `noEdge` without one, `tooHard` when it can't
- * cut that material. Acting is the aimed committed swing at the target (aimedSwing): the stroke's effect is the strike
- * seam's, and its `cut` verb event is pushed where it lands.
+ * cut that material. Acting is the aimed committed swing at the target (aimedSwing: a turn at faceTurnRate, then the
+ * swing): the stroke's effect is the strike seam's, and its `cut` verb event is pushed where it lands.
  */
 const cutVerb: VerbHandler = {
   verb: 'cut',
@@ -364,9 +423,11 @@ const cutVerb: VerbHandler = {
     return canCut(w, tool, e.id) ? null : 'tooHard';
   },
   start(w, f, cmd) {
-    const r = aimedSwing(w, f, { target: cmd.target });
+    return aimedSwing(w, f, cmd.target, null, 'cut');
+  },
+  land(w, f, cmd) {
+    const r = committedSwing(w, f);
     if (r) verbEvent(w, f, 'cut', false, r, cmd.target);
-    return null;
   },
 };
 

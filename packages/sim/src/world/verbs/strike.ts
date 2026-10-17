@@ -6,18 +6,19 @@
 //   the terrain, every entity but the striker's own held object, and every rope sensor but the lashings of that object;
 //   the smallest time of impact wins (a 30 cm trunk the point test misses is caught, MAP gap-5 §3). Ties go to the
 //   sample nearer the head (the head leads a swing). Samples below strikeFrom − haftMarginM are the haft.
-// - Unarmed (fists, feet): one overlap ball of (move radius + reach) × scale at the strike point, against entities only
-//   (INTERPRETATION: a foot near the ground would otherwise clang on every kick; a fist through a hanging vine meets
-//   nothing). The entity whose surface is nearest the strike point is met.
+// - Unarmed (fists, feet): a ball of (move radius + reach) × scale swept from last tick's strike point to this tick's
+//   (CombatSim keeps it from the wind-up's last frame, as it keeps a blade's), against entities only (INTERPRETATION:
+//   a foot near the ground would otherwise clang on every kick; a fist through a hanging vine meets nothing).
 // What it met decides the effect (the table of §5.2), with E = blowDamage(a, null, m, power, haft, null) ×
 // meleeJPerDmg and power = a.swingPower(); a qualifying stroke is the head, power ≥ VERB_TUNING.minStrikePower and a
 // tool that can do it:
 // - a rooted tree, an edge that cuts its wood → chop (cut.ts); a free elongated entity, likewise → cross-cut (cut.ts);
 // - a rope sensor, an edge that cuts the rope → sever (cut.ts);
 // - the terrain, a tool that digs → dig (dig.ts);
-// - otherwise a free dynamic entity (not anchored) with E > 0 → push: an impulse J = √(2·E·reducedMass(m_e,
-//   strikeMassKg)) along the swing (unarmed: the facing), queued for this tick's phase 4d, and the entity's integrity by
-//   the impact rule (Breaking.hit, as phase 9c scores a contact); the striker's credit joins it (a kicked-out prop);
+// - otherwise a free dynamic entity (not anchored) with E > 0 → push: an impulse J = √(2·E·reducedMass(m_e, m_striker))
+//   along the swing (unarmed: the facing), queued for this tick's phase 4d (m_striker: strikerMassKg, the limb's mass
+//   for an unarmed blow, strikeMassKg × scale³ for an armed one), and the entity's integrity by the impact rule
+//   (Breaking.hit, as phase 9c scores a contact); the striker's credit joins it (a kicked-out prop);
 // - anything else (fixed, anchored, a blunt or weak blow on a rope, a non-digging tool in the ground) → clang.
 // Cuts and digs stick (the edge bites in, w.bite frames); pushes and clangs rebound. One world contact per swing:
 // CombatSim marks the swing spent whatever is returned.
@@ -28,14 +29,15 @@
 import RAPIER from '@dimforge/rapier3d-compat';
 import { Vector3 } from 'three';
 import { blowDamage } from '../../sim/combat';
+import type { BoneName } from '../../body/skeleton';
 import type { Fighter } from '../../sim/fighter';
+import type { MoveDef } from '../../sim/moves';
 import { projectilePoints, type Projectile } from '../../sim/projectiles';
-import { DAMAGE_TUNING, reducedMass } from '../../sim/rules';
+import { boneMass, DAMAGE_TUNING, reducedMass } from '../../sim/rules';
 import type { WeaponDef } from '../../sim/weapons';
-import { defineTuning } from '../../tuning/registry';
 import type { Owner, ProjectileWorldHit, V3, WorldStrike } from '../types';
 import type { World } from '../world';
-import { chopTree, crossCutStrike, severRope } from './cut';
+import { chopTree, crossCutStrike, severRope, STRIKE_TUNING } from './cut';
 import { digAt } from './dig';
 import { creditEntity } from './hands';
 import { verbEvent } from './targets';
@@ -43,30 +45,9 @@ import { landThrown } from './throw';
 import { canCut, heldMembers, isElongated, isRooted, isRopeEntity, toolDigs, verbGeom } from './tools';
 import { TOOL_TUNING, VERB_TUNING } from './tuning';
 
-const { sub, scale, len, unit } = verbGeom;
+const { sub, scale, len } = verbGeom;
 const v3 = (p: { x: number; y: number; z: number }): V3 => ({ x: p.x, y: p.y, z: p.z });
 const IDQ = Object.freeze({ x: 0, y: 0, z: 0, w: 1 });
-
-/**
- * The strike seam's own starting values. DEVIATION (P15): §13.0 adds no tuning table after P05, but P05 registered none
- * for this file and §9.1 has no row for these (§5.2's table gives them inline: `stick`, w.bite, 12 and `rebound`, 2,
- * 10, DS's clang); CLAUDE.md puts every starting value in a live tuning table, so they live here (as P06's
- * ENTITY_TUNING and P07's FACTORY_TUNING do).
- */
-export const STRIKE_TUNING = defineTuning(
-  'STRIKE_TUNING',
-  'Verbs › strike',
-  {
-    stickRetract: 12,
-    reboundHold: 2,
-    reboundRetract: 10,
-  },
-  {
-    stickRetract: { unit: 'ticks', source: '§5.2 strike table (a chop, cut or dig sticks: `stick`, w.bite, 12)', min: 0, step: 1 },
-    reboundHold: { unit: 'ticks', source: "§5.2 strike table (a push or clang rebounds: `rebound`, 2, 10; DS's clang)", min: 0, step: 1 },
-    reboundRetract: { unit: 'ticks', source: "§5.2 strike table (a push or clang rebounds: `rebound`, 2, 10; DS's clang)", min: 0, step: 1 },
-  },
-);
 
 /** What a swing met first. */
 interface Met {
@@ -147,23 +128,45 @@ function sweepBlade(w: World, f: Fighter, prev: readonly Vector3[] | null, pts: 
   return best ? { owner: best.owner, point: best.point, normal: best.normal, offset: offs[best.i] ?? null, dir: best.dir } : null;
 }
 
-/** The entity an unarmed strike's ball overlaps, nearest the strike point first (ties: the lower id). */
-function overlapUnarmed(w: World, f: Fighter, at: V3, own: readonly number[]): Met | null {
+/** What an unarmed strike may meet: entities outside the striker's own held object (no terrain, no rope). */
+function limbFilter(own: readonly number[]): (o: Owner) => boolean {
+  return (o) => o.kind === 'entity' && !own.includes(o.id);
+}
+
+/**
+ * The entity an unarmed strike meets: its ball ((move radius + reach) × scale) swept from last tick's strike point to
+ * this tick's, as a blade's samples are (CombatSim keeps the fist's or foot's point from the last frame of the wind-up),
+ * so a foot can't pass through a prop between two ticks; without a last point, the ball where it is. Pushed along the
+ * facing (§5.2).
+ */
+function sweepUnarmed(w: World, f: Fighter, prev: readonly Vector3[] | null, at: V3, own: readonly number[]): Met | null {
   const m = f.move!;
   const r = (m.radius + f.stats.reach) * f.scale;
-  const owners = w.queries.overlaps({ kind: 'ball', r }, { p: at, q: IDQ }, { terrain: false, entities: 'all', ropes: false, fighters: 'none', exclude: { entities: [...own] } });
-  let best: Met | null = null;
-  let bestD = Infinity;
-  for (const o of owners) {
-    if (o.kind !== 'entity') continue;
-    const proj = w.queries.projectPoint(o.id, at);
-    const d = proj.inside ? 0 : proj.dist;
-    if (!(d < bestD)) continue;
-    bestD = d;
-    const out = sub(at, proj.point);
-    best = { owner: o, point: proj.point, normal: unit(out, scale(facing(f), -1)), offset: null, dir: facing(f) };
-  }
-  return best;
+  const from = prev && prev.length === 1 ? v3(prev[0]) : at;
+  const hit = sweep(w, from, sub(at, from), r, limbFilter(own));
+  if (!hit) return null;
+  return { owner: hit.owner, point: hit.point, normal: hit.normal, offset: null, dir: facing(f) };
+}
+
+/** The bones of a striking limb from its end inward (the foot is part of the shin, the hand of the forearm). */
+const LIMB_CHAIN: Readonly<Record<MoveDef['limb'], readonly BoneName[]>> = {
+  footL: ['shinL', 'thighL'],
+  footR: ['shinR', 'thighR'],
+  handL: ['foreArmL', 'upperArmL'],
+  handR: ['foreArmR', 'upperArmR'],
+};
+
+/**
+ * The striker's mass behind a push (§5.2's J = √(2·E·reducedMass(m_e, m_striker))). DEPARTURE (P15 review, orchestrator
+ * decision; §5.2: "J = √(2·E·reducedMass(m_e, strikeMassKg 6))"): an unarmed blow has its limb behind it, the mass of
+ * STRIKE_TUNING.unarmedLimbBones bones of the striking limb's chain (boneMass: shin + thigh, 13.5 kg, for a human kick,
+ * so DS's 108 J kick gives ≈ 41 N·s, §5.2's 40 N·s; rule 2 and rule 3); an armed one keeps strikeMassKg, × the
+ * striker's scale³ (a giant's swat is not a man's).
+ */
+export function strikerMassKg(f: Fighter, m: MoveDef, armed: boolean): number {
+  if (armed) return VERB_TUNING.strikeMassKg * f.scale * f.scale * f.scale;
+  const n = Math.max(1, Math.min(LIMB_CHAIN[m.limb].length, Math.round(STRIKE_TUNING.unarmedLimbBones)));
+  return LIMB_CHAIN[m.limb].slice(0, n).reduce((sum, b) => sum + boneMass(f, b), 0);
 }
 
 /** The fighter's reaction: an edge that bit in sticks for w.bite frames; anything else rebounds (§5.2). */
@@ -187,7 +190,7 @@ export function worldStrike(
   if (!m || pts.length === 0) return null;
   const heldId = handsEntity(a);
   const own = heldId !== null ? heldMembers(w, heldId) : [];
-  const met = weapon ? sweepBlade(w, a, prev, pts, offs, weapon, own) : overlapUnarmed(w, a, v3(pts[0]), own);
+  const met = weapon ? sweepBlade(w, a, prev, pts, offs, weapon, own) : sweepUnarmed(w, a, prev, v3(pts[0]), own);
   if (!met) return null;
 
   const T = VERB_TUNING;
@@ -237,8 +240,12 @@ export function worldStrike(
       }
       if (!(E > 0)) return result('clang', rebound());
       // The push (§5.2, "kick out a prop", SPEC:432): J = √(2·E·μ) along the swing, applied in this tick's phase 4d.
-      const J = Math.sqrt(2 * E * reducedMass(e.mass, T.strikeMassKg));
+      const J = Math.sqrt(2 * E * reducedMass(e.mass, strikerMassKg(a, m, weapon !== null)));
       w.entities.queueImpulse(e.id, scale(met.dir, J), met.point);
+      // TODO "giant blows on cover pieces": a ruler's blow on a free entity is scored here with its own E, so a swat at a
+      // pit cover's branch or grass bundle can break it by impact; AC-2(b) wants "a break of a cover entity from foot
+      // load" (§4.11, loads.ts). The scale³ striker mass keeps the push a giant's; whether a ruler's strike should score
+      // integrity on cover entities at all is for P20/P28 to settle.
       w.breaking.hit(e, E, met.point, { kind: 'fighter', id: a.id, part: 'zone' });
       if (w.entities.get(e.id) === e) creditEntity(e, a);
       return result('push', rebound());

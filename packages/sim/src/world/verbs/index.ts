@@ -219,6 +219,17 @@ export class VerbSystem {
     return fo && fo.target > 0 ? fo.target : null;
   }
 
+  /**
+   * Sets the fighter's focus as an accepted `focus` command sets it (P15: the radial's Cut and Dig aim their swing at
+   * their target): an entity (`at` null), or the ground (target 0) at `at`; verbAim follows it from now on, and phase 1b
+   * keeps or clears it as it does any focus. The caller has validated the target.
+   */
+  setFocus(f: Fighter, target: number, at: V3 | null): void {
+    const s = this.state(f);
+    s.focus = { target, at: at ? copy3(at) : null };
+    this.aim(f, s);
+  }
+
   /** The focus as the sim holds it: the entity (0 = the ground) and the ground point. */
   focusOf(f: Fighter): { target: number; at: V3 | null } | null {
     const fo = this.byFighter.get(f.id)?.focus;

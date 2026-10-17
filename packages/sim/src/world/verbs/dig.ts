@@ -12,10 +12,11 @@
 // - Where the dirt goes (§4.13): the spoil point S = terrain.findSpoilPoint (no ever-dug vertex within spoilSetbackM, so
 //   spoil never refills the hole, RT-2). Then (1) a dirt pile within pileMergeR of S that stays ≤ pileCapKg grows (its
 //   hull rescaled to the new volume); else (2) while fewer than maxPilesNear piles lie within pilesNearR of S, a new
-//   pile (a low 8-point hull of the volume) is set down at S (beside the piles already there, pileSpot); else (3) the
-//   volume is raised into the terrain at S, the remainder at the next spoil point (the berm). So a pit makes at most 12
-//   piles near any spoil point and a berm, not 1,180 bodies. (An 8 × 6 m pit's spoil ring is wider than pilesNearR, so its
-//   far side may get piles of its own: 20 in all in the kernel test, verbs.dig.test.ts.)
+//   pile (a low 8-point hull of the volume) is set down at S (or beside the piles and things already there,
+//   newPileNear); else (3) the volume is raised into the terrain at S, the remainder at the next spoil point (the berm).
+//   pilesNearR (15 m) is the per-pit budget, so a ruler pit makes at most 12 piles and a berm, not 1,180 bodies. Dirt
+//   the berm can't take (nothing free within spoilSearchMaxM) is set down as a pile at the nearest free spot beyond the
+//   setback (placeFar), never lost silently (spoilLostM3 counts the float rounding).
 // - Then: nav tiles under the dig and the spoil marked dirty; ground cover under the dig cleared; every anchored stake
 //   whose driven end is now above the terrain un-anchored (free, awake); a `dig` event (the noise bus hears it).
 //
@@ -25,14 +26,13 @@ import { getPose } from '../../body/poses';
 import type { VerbCommand } from '../../sim/commands';
 import type { Fighter } from '../../sim/fighter';
 import { defineTuning } from '../../tuning/registry';
-import { groundDepth } from '../breaking';
 import { groundRestY } from '../factory';
 import { MATERIALS, propertyAtMost } from '../materials';
 import { principalAxis, shapeVolume } from '../shapes';
 import { TERRAIN_TUNING } from '../terrain';
 import type { Entity, Shape, V3 } from '../types';
 import type { World } from '../world';
-import { aimedSwing, wieldedEntity } from './cut';
+import { aimedSwing, committedSwing, wieldedEntity } from './cut';
 import { inTakeReach } from './hands';
 import { cmdPoint, registerVerb, verbEvent, type VerbHandler } from './targets';
 import { toolDigs, verbGeom } from './tools';
@@ -50,7 +50,6 @@ export const DIG_TUNING = defineTuning(
   {
     pileHeightRatio: 0.5,
     pileTopRatio: 0.3,
-    pileDropM: 0.02,
     handDigActFrac: 0.5,
   },
   {
@@ -60,7 +59,6 @@ export const DIG_TUNING = defineTuning(
       min: 0.01,
     },
     pileTopRatio: { unit: 'top half-width ÷ base half-width', source: 'NEW: §4.13 "a low 8-point hull of the volume" (a square frustum)', min: 0, max: 1 },
-    pileDropM: { unit: 'm above the ground', source: 'NEW: a new pile is set down just clear of the ground (as Place sets placeDropM)', min: 0 },
     handDigActFrac: { unit: '× handDigFrames', source: 'NEW: §5.10 (the scoop lands at this fraction of the work action)', min: 0, max: 1 },
   },
 );
@@ -117,49 +115,69 @@ function hullBounds(e: Entity, points: readonly number[]): { min: V3; max: V3 } 
   return { min, max };
 }
 
-/** Whether a square footprint of half-width `a` at (x, z) overlaps any dirt pile's horizontal bounds. */
-function footprintTaken(piles: readonly { min: V3; max: V3 }[], x: number, z: number, a: number): boolean {
-  return piles.some((b) => !(b.max.x <= x - a || b.min.x >= x + a || b.max.z <= z - a || b.min.z >= z + a));
+/** Every dirt pile's world bounds (piles made this tick included: queries find them only after the next step). */
+function pileBounds(w: World): { min: V3; max: V3 }[] {
+  const out: { min: V3; max: V3 }[] = [];
+  for (const e of w.entities.all()) if (isDirtPile(e) && e.shape.kind === 'hull') out.push(hullBounds(e, e.shape.points));
+  return out;
 }
 
 /**
- * Where a new pile of base half-width `a` is set down (§4.13: "created at S"). INTERPRETATION: §4.13 doesn't say what
- * happens when S is already under a pile (it is, whenever the dug ground hasn't grown since the last pile: S is the
- * terrain's first spoil point, which no pile moves), and one set on top of another stood in a balanced dirt tower 12
- * piles high (rule 3). So the pile goes at S when S is clear, else at the first clear spot on rings `2a` apart around S
- * (each ring in a fixed angular order from +x toward +z) that also keeps spoilSetbackM from dug ground, as S does: dirt
- * heaped beside dirt. At most maxPilesNear rings out (no more piles can be near); failing that, at S.
+ * Whether a pile `shape` (base half-width `a`) can be set down at (x, z): its footprint inside the terrain, clear of every
+ * pile's bounds (piles of this tick too), and, resting on the ground placeDropM clear, overlapping no entity and no
+ * fighter's capsule (queries.overlaps, as of the last step).
  */
-function pileSpot(w: World, S: { x: number; z: number }, a: number): { x: number; z: number } {
-  const piles: { min: V3; max: V3 }[] = [];
-  for (const e of w.entities.all()) if (isDirtPile(e) && e.shape.kind === 'hull') piles.push(hullBounds(e, e.shape.points));
-  if (!footprintTaken(piles, S.x, S.z, a)) return S;
+function spotFree(w: World, x: number, z: number, shape: Shape, a: number, piles: readonly { min: V3; max: V3 }[]): boolean {
   const t = w.terrain;
-  const rings = Math.max(1, Math.ceil(TERRAIN_TUNING.maxPilesNear));
-  for (let k = 1; k <= rings; k++) {
-    const n = 6 * k;
-    for (let i = 0; i < n; i++) {
-      const th = (2 * Math.PI * i) / n;
-      const x = S.x + 2 * a * k * Math.cos(th);
-      const z = S.z + 2 * a * k * Math.sin(th);
-      const v = t.vertexIndex(x, z);
-      if (t.isNearDug(v.gi, v.gj) || footprintTaken(piles, x, z, a)) continue;
-      return { x, z };
-    }
-  }
-  return S;
+  if (x - a < t.minX || z - a < t.minZ || x + a > t.minX + t.tilesX * t.tileSize || z + a > t.minZ + t.tilesZ * t.tileSize) return false;
+  if (piles.some((b) => !(b.max.x <= x - a || b.min.x >= x + a || b.max.z <= z - a || b.min.z >= z + a))) return false;
+  const y = groundRestY(w, x, z, shape, IDQ) + VERB_TUNING.placeDropM;
+  return w.queries.overlaps(shape, { p: { x, y, z }, q: IDQ }, { terrain: false, entities: 'all', ropes: false, fighters: 'kcc' }).length === 0;
 }
 
-/** A new pile of `volumeM3` set down at S, or beside the piles already there (pileSpot), resting on the ground pileDropM clear. */
-function newPile(w: World, S: { x: number; z: number }, volumeM3: number, credit: readonly string[]): Entity {
+/**
+ * The first spot for a pile on rings `2a` apart around `c` (ring k0 to k1; ring 0 is `c` itself; each ring in a fixed
+ * angular order from +x toward +z) that keeps spoilSetbackM from dug ground and is free (spotFree); null when none is.
+ */
+function ringSpot(w: World, c: { x: number; z: number }, shape: Shape, a: number, k0: number, k1: number): { x: number; z: number } | null {
+  const t = w.terrain;
+  const piles = pileBounds(w);
+  for (let k = k0; k <= k1; k++) {
+    const n = k === 0 ? 1 : 6 * k;
+    for (let i = 0; i < n; i++) {
+      const th = (2 * Math.PI * i) / n;
+      const x = c.x + 2 * a * k * Math.cos(th);
+      const z = c.z + 2 * a * k * Math.sin(th);
+      const v = t.vertexIndex(x, z);
+      if (t.isNearDug(v.gi, v.gj)) continue;
+      if (spotFree(w, x, z, shape, a, piles)) return { x, z };
+    }
+  }
+  return null;
+}
+
+/**
+ * A new pile of `volumeM3` (§4.13: "created at S"), set down resting on the ground placeDropM clear (as Place sets a
+ * thing down). INTERPRETATION: §4.13 doesn't say what happens when S is taken. S is the terrain's first spoil point,
+ * which no pile moves, so while the dug ground doesn't grow every new pile would land on the last (one set on top of
+ * another stood in a balanced dirt tower 12 piles high, rule 3). So the pile goes at S when S is free (spotFree: inside
+ * the terrain, clear of every pile and entity), else at the first free spot on rings around S that also keeps
+ * spoilSetbackM from dug ground, at most maxPilesNear rings out: dirt heaped beside dirt. null when there is none (the
+ * dirt then goes to the berm).
+ */
+function newPileNear(w: World, S: { x: number; z: number }, volumeM3: number, credit: readonly string[]): Entity | null {
   const shape = dirtPileShape(volumeM3);
   const a = shape.points[3];
-  const at = pileSpot(w, S, a);
+  const at = ringSpot(w, S, shape, a, 0, Math.max(1, Math.ceil(TERRAIN_TUNING.maxPilesNear)));
+  return at ? setPile(w, at, shape, credit) : null;
+}
+
+function setPile(w: World, at: { x: number; z: number }, shape: Shape, credit: readonly string[]): Entity {
   const y = groundRestY(w, at.x, at.z, shape, IDQ);
   return w.entities.create({
     material: TERRAIN_TUNING.material,
     shape,
-    p: { x: at.x, y: y + DIG_TUNING.pileDropM, z: at.z },
+    p: { x: at.x, y: y + VERB_TUNING.placeDropM, z: at.z },
     q: IDQ,
     state: 'free',
     look: 'dirtPile',
@@ -167,49 +185,118 @@ function newPile(w: World, S: { x: number; z: number }, volumeM3: number, credit
   });
 }
 
-/**
- * The dirt policy of §4.13 for `volumeM3` dug at (x, z): a pile near the spoil point grows, else a new pile there while
- * fewer than maxPilesNear lie near, else the berm (terrain.raise at the spoil point, the remainder at the next).
- * Returns the pile that took it (null for the berm, or when no spoil point lies within spoilSearchMaxM) and the spoil
- * points used.
- */
-export function placeSpoil(w: World, x: number, z: number, volumeM3: number, credit: readonly string[]): { pile: number | null; points: { x: number; z: number }[] } {
+/** The nearest pile within pileMergeR of (x, z) that stays ≤ pileCapKg with `volumeM3` more (ties: the lower id), or null. */
+function pileToGrow(w: World, x: number, z: number, volumeM3: number): Entity | null {
   const T = TERRAIN_TUNING;
-  if (!(volumeM3 > 0)) return { pile: null, points: [] };
-  const S = w.terrain.findSpoilPoint(x, z);
-  if (!S) return { pile: null, points: [] };
   const density = MATERIALS[T.material].density;
   let grow: Entity | null = null;
   let growD = Infinity;
-  let near = 0;
   for (const e of w.entities.all()) {
     if (!isDirtPile(e)) continue;
-    const d = Math.hypot(e.pose.p.x - S.x, e.pose.p.z - S.z);
-    if (d <= T.pilesNearR) near++;
+    const d = Math.hypot(e.pose.p.x - x, e.pose.p.z - z);
     if (d <= T.pileMergeR && d < growD && propertyAtMost(e.mass + density * volumeM3, T.pileCapKg)) {
       grow = e;
       growD = d;
     }
   }
-  if (grow) {
-    w.entities.reshape(grow, dirtPileShape(shapeVolume(grow.shape) + volumeM3));
-    grow.body?.wakeUp();
-    for (const id of credit) if (!grow.credit.includes(id)) grow.credit = [...grow.credit, id].sort();
-    return { pile: grow.id, points: [S] };
+  return grow;
+}
+
+/** The pile grows by `volumeM3`: its hull rescaled to the new volume about its base (mass = density × volume). */
+function growPile(w: World, e: Entity, volumeM3: number, credit: readonly string[]): void {
+  w.entities.reshape(e, dirtPileShape(shapeVolume(e.shape) + volumeM3));
+  e.body?.wakeUp();
+  for (const id of credit) if (!e.credit.includes(id)) e.credit = [...e.credit, id].sort();
+}
+
+/** Dirt no rule could place, per world (a dev read-out, never saved and never read by the sim). */
+const LOST = new WeakMap<World, number>();
+
+/**
+ * The volume of dirt (m³) a world's digs could not place since it was built (a dev read-out: float32 rounding of the
+ * raised heights, a few nm³ a dig, or a dig with no free spot anywhere on the terrain). Never saved; no rule reads it.
+ */
+export function spoilLostM3(w: World): number {
+  return LOST.get(w) ?? 0;
+}
+
+/**
+ * Spoil left over (m³) at or below which it is the float32 rounding of raise's heights (≈ 1e-7 m per vertex, a few
+ * grams of dirt), counted lost rather than made into a pile. A numerical tolerance, not a starting value.
+ */
+const SPOIL_ROUNDING_M3 = 1e-6;
+
+/**
+ * Dirt the berm couldn't take (no spoil point within spoilSearchMaxM: everything near is dug or at its cap): set down
+ * as a pile at the nearest free spot beyond the dug ground and its setback, searching rings around the dig to the
+ * terrain's edge (a pile there grows when it can). DEVIATION (P15 review: "don't lose dirt silently"): this pile is over
+ * maxPilesNear's budget; §4.13 places spoil only within spoilSearchMaxM. A remainder at the float rounding level, or
+ * one with no free spot on the whole terrain, is counted lost (spoilLostM3).
+ * TODO "spoil beyond the search": a far pile is a body the 600-body budget (SPEC:803) doesn't count on; M3's terrain
+ * edits may want a wider spoil search instead.
+ */
+function placeFar(w: World, x: number, z: number, volumeM3: number, credit: readonly string[]): { pile: number | null; point: { x: number; z: number } | null } {
+  if (!(volumeM3 > SPOIL_ROUNDING_M3)) {
+    LOST.set(w, spoilLostM3(w) + Math.max(0, volumeM3));
+    return { pile: null, point: null };
   }
-  if (near < T.maxPilesNear) return { pile: newPile(w, S, volumeM3, credit).id, points: [S] };
-  // The berm: raised at the spoil point, the rest at the next one (raise never touches dug ground or its setback).
+  const shape = dirtPileShape(volumeM3);
+  const a = shape.points[3];
+  const T = TERRAIN_TUNING;
+  const t = w.terrain;
+  const k0 = Math.max(1, Math.floor((T.digRadiusM + T.spoilMinGapM) / (2 * a)));
+  const extent = Math.max(t.tilesX * t.tileSize, t.tilesZ * t.tileSize);
+  const at = ringSpot(w, { x, z }, shape, a, k0, Math.ceil(extent / (2 * a)));
+  if (!at) {
+    LOST.set(w, spoilLostM3(w) + volumeM3);
+    return { pile: null, point: null };
+  }
+  const grow = pileToGrow(w, at.x, at.z, volumeM3);
+  if (grow) {
+    growPile(w, grow, volumeM3, credit);
+    return { pile: grow.id, point: at };
+  }
+  return { pile: setPile(w, at, shape, credit).id, point: at };
+}
+
+/**
+ * The dirt policy of §4.13 for `volumeM3` dug at (x, z): a pile within pileMergeR of the spoil point S grows, else a new
+ * pile at S (or beside it, newPileNear) while fewer than maxPilesNear lie within pilesNearR of S, else the berm
+ * (terrain.raise at S, the remainder at the next spoil point). Dirt the berm can't take goes to placeFar. Returns the
+ * pile that took the dirt (null: the berm) and the spoil points used.
+ */
+export function placeSpoil(w: World, x: number, z: number, volumeM3: number, credit: readonly string[]): { pile: number | null; points: { x: number; z: number }[] } {
+  const T = TERRAIN_TUNING;
+  if (!(volumeM3 > 0)) return { pile: null, points: [] };
+  const S = w.terrain.findSpoilPoint(x, z);
   const points: { x: number; z: number }[] = [];
   let rest = volumeM3;
-  let s: { x: number; z: number } | null = S;
-  while (s && rest > SPOIL_EPS_M3) {
-    const placed = w.terrain.raise(s.x, s.z, rest).raisedM3;
-    points.push(s);
-    if (!(placed > 0)) break;
-    rest -= placed;
-    if (rest > SPOIL_EPS_M3) s = w.terrain.findSpoilPoint(x, z);
+  if (S) {
+    const grow = pileToGrow(w, S.x, S.z, volumeM3);
+    if (grow) {
+      growPile(w, grow, volumeM3, credit);
+      return { pile: grow.id, points: [S] };
+    }
+    let near = 0;
+    for (const e of w.entities.all()) if (isDirtPile(e) && Math.hypot(e.pose.p.x - S.x, e.pose.p.z - S.z) <= T.pilesNearR) near++;
+    if (near < T.maxPilesNear) {
+      const pile = newPileNear(w, S, volumeM3, credit);
+      if (pile) return { pile: pile.id, points: [S] };
+    }
+    // The berm: raised at the spoil point, the rest at the next one (raise never touches dug ground or its setback).
+    let s: { x: number; z: number } | null = S;
+    while (s && rest > SPOIL_EPS_M3) {
+      const placed = w.terrain.raise(s.x, s.z, rest).raisedM3;
+      points.push(s);
+      if (!(placed > 0)) break;
+      rest -= placed;
+      if (rest > SPOIL_EPS_M3) s = w.terrain.findSpoilPoint(x, z);
+    }
+    if (!(rest > SPOIL_EPS_M3)) return { pile: null, points };
   }
-  return { pile: null, points };
+  const far = placeFar(w, x, z, rest, credit);
+  if (far.point) points.push(far.point);
+  return { pile: far.pile, points };
 }
 
 // ---------------------------------------------------------------------------
@@ -253,7 +340,7 @@ export function digAt(w: World, x: number, z: number, depthMul: number, by: Figh
     const ax = principalAxis(e.shape);
     const reach = Math.max(Math.abs(ax.min), Math.abs(ax.max)) + ax.crossHalf;
     if (Math.hypot(e.pose.p.x - x, e.pose.p.z - z) > r + reach) continue;
-    if (groundDepth(w, e.shape, e.pose) <= 0) w.entities.unanchor(e);
+    if (w.entities.depthBelowGround(e.shape, e.pose) <= 0) w.entities.unanchor(e);
   }
   w.events.push({ type: 'dig', point: { x, y, z }, volumeM3: dug.volumeM3, pile: spoil.pile });
   return { volumeM3: dug.volumeM3, pile: spoil.pile, spoil: spoil.points };
@@ -272,10 +359,10 @@ function groundPoint(w: World, cmd: VerbCommand): V3 | null {
 
 /**
  * dig (§5.0, §5.10): `{ verb: 'dig', target: 0, at, charge }` on the ground. With a wielded tool that digs: the tool's
- * committed swing at the ground point (aimedSwing), once (the strike digs where it meets the ground, strike.ts); with
- * empty hands: hand-digging, on while charge > 0, one scoop per work action of handDigFrames (pose digScoop) landing at
- * handDigActFrac of it within the hands' reach (inTakeReach), at handDigDepthMul of a strike. Anything else in the hands
- * is refused `noDigTool`.
+ * committed swing at the ground point (aimedSwing: a turn at faceTurnRate, then the swing), once (the strike digs where
+ * it meets the ground, strike.ts); with empty hands: hand-digging, on while charge > 0, one scoop per work action of
+ * handDigFrames (pose digScoop) landing at handDigActFrac of it within the hands' reach (inTakeReach), at
+ * handDigDepthMul of a strike. Anything else in the hands is refused `noDigTool`.
  */
 const digVerb: VerbHandler = {
   verb: 'dig',
@@ -295,15 +382,13 @@ const digVerb: VerbHandler = {
     return null;
   },
   start(w, f, cmd) {
+    const p = groundPoint(w, cmd);
+    if (!p) return null;
     if (f.inventory?.hands) {
       // A strike-dig is one swing, not a repeating verb (the player swings again to dig again).
       w.verbs.stopContinuous(f);
-      const r = aimedSwing(w, f, { target: 0, at: cmd.at });
-      if (r) verbEvent(w, f, 'dig', false, r);
-      return null;
+      return aimedSwing(w, f, 0, cmdPoint(cmd.at!), 'dig');
     }
-    const p = groundPoint(w, cmd);
-    if (!p) return null;
     const frames = Math.max(1, Math.round(VERB_TUNING.handDigFrames));
     const actAt = Math.max(1, Math.min(frames, Math.round(frames * DIG_TUNING.handDigActFrac)));
     return {
@@ -317,6 +402,12 @@ const digVerb: VerbHandler = {
     };
   },
   land(w, f, cmd) {
+    if (f.inventory?.hands) {
+      // The aimed swing's turn landed: the swing.
+      const r = committedSwing(w, f);
+      if (r) verbEvent(w, f, 'dig', false, r);
+      return;
+    }
     const p = groundPoint(w, cmd)!;
     digAt(w, p.x, p.z, VERB_TUNING.handDigDepthMul, f);
     verbEvent(w, f, 'dig', true);
