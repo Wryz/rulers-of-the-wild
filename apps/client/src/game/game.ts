@@ -516,6 +516,8 @@ export class Game {
     const [x, z] = first ? this.theme.enemySpawns[0] : [p.x > 0 ? -2.2 : 2.2, -p.z * 0.5];
     const f = this.spawn('brawler', x, z, { hpMul: 1 + 0.12 * (this.wave - 1) }, !first);
     f.name = 'Brawler';
+    // Rolling: each opponent is a battle in the log (one cut short is filed as 'left').
+    this.recorder.start({ round: this.wave, arena: this.theme.name, opponent: f.name, boss: false });
   }
 
   // ---------------------------------------------------------------------------
@@ -682,6 +684,8 @@ export class Game {
     this.cine.update(dt);
     if (due(this.bannerIn)) this.hud.hideBanner();
     if (due(this.respawnIn)) {
+      // (Filed once the knockout's been seen through, not at the blow.)
+      this.recorder.stop('won');
       this.wave++;
       this.spawnEnemy();
       this.hud.hideBanner();
