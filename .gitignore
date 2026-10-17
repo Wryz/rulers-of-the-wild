@@ -2,3 +2,5 @@ node_modules
 dist
 .vercel
 *.log
+# Developer screenshots: saves and manifest (tools/shots/README.md)
+tools/shots/out/
