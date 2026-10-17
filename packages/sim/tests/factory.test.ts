@@ -572,7 +572,7 @@ describe('stones and flint', () => {
       expect(e.mass).toBeCloseTo(c.mass, 9);
       expect(e.pose.q).toEqual({ x: 0, y: 0, z: 0, w: 1 });
       expect(e.sharpPoints).toEqual([]); // flint: "no edge yet"
-      const [ex, ey, ez] = extents((e.shape as { points: number[] }).points);
+      const [ex, ey, ez] = extents((e.shape as Extract<Shape, { kind: 'hull' }>).points);
       expect(ex / Math.max(ey, ez)).toBeLessThan(TOOL_TUNING.compactMaxAspect);
     }
     expect(ent(w, spawnStone(w, { p: { x: 9, y: 2, z: 3 }, mass: 2 })).shape).toEqual(stoneHull(2, 0, 'stone'));
