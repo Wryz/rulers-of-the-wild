@@ -6,8 +6,13 @@
 import type { BoneName } from '../body/skeleton';
 import { BONE_ZONE, zoneMassShares } from '../body/mass';
 import { defineTuning } from '../tuning/registry';
+import type { SpeciesId } from '../world/types';
 import type { HurtZone } from './combat';
 import type { Fighter } from './fighter';
+// SPECIES_BODY (sim/species.ts, filled by P03 in parallel with this package; an empty placeholder at ca53ce7), read
+// through the module namespace so this file compiles both before and after P03 lands. species.ts imports only the
+// registry and types, so this adds no import cycle.
+import * as speciesModule from './species';
 
 /** The damage rule (folder "Damage rule", §9). */
 export const DAMAGE_TUNING = defineTuning(
@@ -64,6 +69,7 @@ export const MOVE_TUNING = defineTuning(
     pullWalkMul: 0.2,
     limpStanceMul: 0.4,
     limpStepHeightMul: 0.5,
+    limpMinStepFrames: 4,
   },
   {
     sprintMul: { unit: '× speed', source: 'NEW: DS run 3.77 → sprint 5.28 m/s (SPEC:370)', min: 1 },
@@ -79,7 +85,8 @@ export const MOVE_TUNING = defineTuning(
     carryNoSprintKg: { unit: 'kg', source: 'NEW', min: 0 },
     dragSpeedMul: { unit: '× walk', source: 'NEW', min: 0, max: 1 },
     pullWalkMul: { unit: '× walk', source: 'NEW: braced while pulling', min: 0, max: 1 },
-    // Not in §9: the optional limp gait of §6.4 (FootworkStyle.limp, P02a) gives these two factors in prose only.
+    // Not in §9: the optional limp gait of §6.4 (FootworkStyle.limp, P02a) gives its two factors in prose only, and
+    // its quickened swing needs a floor (DS's own shortest step).
     limpStanceMul: {
       unit: '× amount',
       source: "NEW: §6.4 limp row: the bad leg's stance time × (1 − this × amount)",
@@ -87,6 +94,12 @@ export const MOVE_TUNING = defineTuning(
       max: 1,
     },
     limpStepHeightMul: { unit: '× step height', source: "NEW: §6.4 limp row: the bad leg's step height ×", min: 0, max: 1 },
+    limpMinStepFrames: {
+      unit: 'ticks',
+      source: "DS footwork.ts: its shortest hurried step (Math.max(4, dur − 2)); the floor on a limp's quickened swing",
+      min: 1,
+      step: 1,
+    },
   },
 );
 
@@ -108,13 +121,28 @@ export function zoneToughness(d: Fighter, zone: HurtZone): number {
   return d.toughnessJ + (d.armour[zone] ?? 0);
 }
 
+/** The part of SPECIES_BODY this module reads (a row per species; absent until P03 fills sim/species.ts). */
+type SpeciesMassModes = { SPECIES_BODY?: Partial<Record<SpeciesId, { massShareMode: 'bone' | 'zone' }>> };
+
 /**
- * The struck bone's mass (kg), the target's side of m_eff (§4.3, orchestrator decision 2): d.mass × its share.
- * `mode` is the species' `SPECIES_BODY[species].massShareMode` (sim/species.ts); with 'zone' the bone counts with
- * its whole HurtZone (the SPEC:876 shares, a playtest lever). The caller passes it: this module can't read species
- * data without importing the world's species table into combat.ts's dependencies.
+ * Where a species' m_eff comes from: `SPECIES_BODY[d.species].massShareMode`, read at use time (a live table, the
+ * §4.15 playtest lever); 'bone' for a fighter with no species (DungeonStyle's) or no row.
  */
-export function boneMass(d: Fighter, bone: BoneName, mode: 'bone' | 'zone' = 'bone'): number {
+function massShareMode(d: Fighter): 'bone' | 'zone' {
+  if (!d.species) return 'bone';
+  // TODO(P02a-fix, once P03 has merged): import { SPECIES_BODY } from './species' by name and drop this cast and the
+  // optional chain (SPECIES_BODY then has a row for every SpeciesId). The cast compiles against both the placeholder
+  // and P03's table, and fails the typecheck if P03's rows lose `massShareMode: 'bone' | 'zone'`.
+  return (speciesModule as SpeciesMassModes).SPECIES_BODY?.[d.species]?.massShareMode ?? 'bone';
+}
+
+/**
+ * The struck bone's mass (kg), the target's side of m_eff (§4.3, orchestrator decision 2): d.mass × its share. With
+ * the species' `massShareMode` 'zone' (SPECIES_BODY, sim/species.ts) the bone counts with its whole HurtZone instead
+ * (the SPEC:876 shares, a playtest lever, §4.15). Call it as `boneMass(d, bone)` (§1.5.4), so that lever reaches
+ * every caller; `mode` overrides the species' setting for tests and tools only.
+ */
+export function boneMass(d: Fighter, bone: BoneName, mode: 'bone' | 'zone' = massShareMode(d)): number {
   return mode === 'zone' ? d.mass * zoneMassShares()[BONE_ZONE[bone]] : d.mass * d.boneShare[bone];
 }
 

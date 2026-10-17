@@ -273,8 +273,14 @@ export class Fighter {
   // M1 (docs/M1-DESIGN.md §1.5.3). Every default reproduces DungeonStyle; the world sets the rest.
   // ---------------------------------------------------------------------------
 
-  /** Body mass (kg); null: the humanoid body (BODY_MASS_TUNING) × scale³. */
+  /** Body mass (kg); null: the humanoid body (`baseMassKg`) × scale³. */
   massKg: number | null = null;
+  /**
+   * The humanoid body's mass at scale 1 (kg), from BODY_MASS_TUNING when the fighter is made, with `boneShare`: both
+   * are per-entity state fixed at creation (§1.5.11), so a live edit of the table reaches new fighters only and an
+   * existing one keeps bone masses that add up (its mass × its shares). Saved with the fighter (P04).
+   */
+  baseMassKg = humanoidMass();
   /** Each bone's share of `mass` (m_eff of a struck bone, §4.3), from BODY_MASS_TUNING when the fighter is made. */
   boneShare: Readonly<Record<BoneName, number>> = boneMassShares();
   /** The species' hide (J), the toughness every zone has (0 for humans and apes; rulers use their zones). */
@@ -307,7 +313,10 @@ export class Fighter {
   throwAim: { dir: Vector3; speedFrac: number; techSpeed: number } | null = null;
   /** MOVE_SPRINT | MOVE_CROUCH, from the last move command. */
   moveFlags = 0;
-  /** Ticks left on a buffered jump press (MOVE_TUNING.jumpBufferFrames); the character controller consumes it. */
+  /**
+   * Ticks left on a buffered jump press (MOVE_TUNING.jumpBufferFrames). CombatSim owns the countdown (one tick off
+   * after each mover call, in separate()); the character controller only reads it and zeroes it when it jumps.
+   */
   jumpRequest = 0;
   /** Idle life paused: no weight shift, look-around, feint or breathing (AC-5's "AI paused", §12.2 I16). */
   idlePaused = false;
@@ -356,9 +365,9 @@ export class Fighter {
     return this.state !== 'ko';
   }
 
-  /** Body mass (kg): `massKg`, or the humanoid body's live mass × scale³. */
+  /** Body mass (kg): `massKg`, or the humanoid body as it was when this fighter was made × scale³. */
   get mass(): number {
-    return this.massKg ?? humanoidMass() * this.scale ** 3;
+    return this.massKg ?? this.baseMassKg * this.scale ** 3;
   }
 
   /** Can act freely (walk / start an attack / start a defense). */
@@ -916,7 +925,12 @@ export class Fighter {
     this.breathPhase += (2.2 + 4.5 * e) / 60;
     return (this.heldBreath = Math.sin(this.breathPhase) * (0.01 + 0.045 * e * e));
   }
-  /** The chest's last breathing offset (held while idle life is paused). */
+  /**
+   * The chest's last breathing offset (held while idle life is paused). Fighter state like `breathPhase`: a save
+   * made during a pause has to carry it, or the chest jumps on the first tick after loading.
+   * TODO(P04): include heldBreath (with breathPhase and IdleBehavior's clocks, timers and offsets) in
+   * Fighter.toRecord()/restoreRecord().
+   */
   private heldBreath = 0;
 
   /**
