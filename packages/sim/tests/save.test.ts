@@ -14,19 +14,23 @@
 //   in the inventory below (and, if it is state, in its record).
 // - save → load → save is byte-identical for the M1 loader's scope (entities, joints, terrain with the dug mask, rulers)
 //   and for everything else the loader restores exactly (fighters, CombatSim's state, counters, streams, commands,
-//   impulses …); the loaded world continues: pending commands land at their ticks, two loads of one save stay
-//   bit-identical to each other; a knocked-down player loads down (slab moving, controller and zones off) and gets up
-//   as the original does; an impulse queued for an entity removed since is left out (phase 4d drops it), so the save
-//   loads; the scene queries see every restored body before the first step (supportAt, rays, a teleport onto a box);
-//   the navmesh is rebuilt over the loaded ground with its dirty queue.
-// - A world at rest, saved and loaded, matches the original within 1 cm and 1° over 10 s (an M3 preview, SPEC:730).
+//   impulses, contact episodes, a fighter's verb state with its command in canonical key order …); the loaded world
+//   continues: pending commands land at their ticks, two loads of one save stay bit-identical to each other; a
+//   knocked-down player loads down (slab moving, controller and zones off) and gets up as the original does; an
+//   impulse queued for an entity removed since is left out (phase 4d drops it), so the save loads; the scene queries
+//   see every restored body before the first step (supportAt, rays, a teleport onto a box); the navmesh is rebuilt over
+//   the loaded ground with its dirty queue.
+// - A world at rest, saved and loaded, matches the original within 1 cm and 1° over 10 s (an M3 preview, SPEC:730), and
+//   the contact episodes it restores carry on as the original's.
 // - Tuning: loadWorld leaves the registry alone unless applyTuning; with it, the sim tables are the saving world's (a
 //   stray sim value goes back to its default, the client's tables are untouched); a failed load puts it back.
 // - The v1 fixture (tests/fixtures/save-v1.json) loads, so M3's migrations have a v1 to start from. To rewrite it after a
 //   deliberate format change (bump formatVersion and add a migration instead once saves exist in the wild):
 //     ROTW_WRITE_SAVE_FIXTURE=1 npx vitest run packages/sim/tests/save.test.ts
 // - Broken saves are refused with a `save record:` error naming the field, before a world is built (an impulse on an
-//   entity the loaded world wouldn't have, once generation has run).
+//   entity the loaded world wouldn't have, once generation has run). Contacts are read with ContactSystem's signed
+//   subject (a fighter id, or an entity id negated) and checked against the counters, in their form and order; a
+//   fighter's verb state is checked field by field.
 //
 // Scene numbers (sizes, masses, positions, ticks) are test constants, never tuning (§9).
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -616,11 +620,31 @@ const INVENTORY: Record<string, Record<string, string>> = {
     dv: 'saved: bodies[].slab.dv',
   },
   RulerBodies: { world: 'not saved: a link', mover: 'not saved: code (RulerMover)' },
-  ContactSystem: { world: 'not saved: a link' },
-  Deaths: { world: 'not saved: a link' },
-  VerbSystem: { world: 'not saved: a link' },
+  ContactSystem: {
+    world: 'not saved: a link',
+    episodes:
+      'saved: contacts (one record per group: contacts[].creature, the subject, a fighter id or an entity id negated; contacts[].owner; contacts[].touching, contacts[].episodeStart, contacts[].cooldownUntil)',
+    graceUntil: 'saved: contactGrace',
+    resync: 'not saved: the restored groups still touching, from a load to its first phase 9 (null at every tick end); a load sets it again from contacts[].touching',
+    restarts: "not saved: the load's own narrow-phase starts, held from a load to its first phase 9 (null at every tick end); a load makes them again",
+    scored: 'not saved: a dev read-out (impacts scored so far), never read by the sim',
+    unscored: 'not saved: dev read-outs (pairs and episodes left unscored, by reason), never read by the sim',
+  },
+  Deaths: {
+    world: 'not saved: a link',
+    pending: 'not saved: KOs noted where they happen (phases 1c, 3, 9) for phase 15 of the same tick, which empties it; empty at a tick end',
+    respawns: "saved: deaths (a dead player's fighter id → its respawn tick)",
+    corpses: "saved: corpses (a creature's fighter id → the tick its corpse may go)",
+  },
+  VerbSystem: {
+    world: 'not saved: a link',
+    byFighter: "saved: verbs (by fighter id: the focus, a continuous verb that is on, a creature's tug; a removed fighter's state is dropped)",
+  },
   MindRegistry: { world: 'not saved: a link', minds: 'saved: minds (by fighter id) and rng.minds' },
-  NoiseBus: { world: 'not saved: a link (the bus is empty at the end of a tick)' },
+  NoiseBus: {
+    world: 'not saved: a link',
+    queue: "not saved: noises, hurts and wounds waiting for phase 17b's fold, which empties it (minds emit in phase 2); empty at a tick end (§8.3)",
+  },
   Spawner: { world: 'not saved: a link' },
   NavSystem: {
     world: 'not saved: a link',
@@ -695,13 +719,8 @@ function missingStep(v: unknown, path: string): string | null {
 const AWAITING: Record<string, string> = {
   cover: 'GroundCover (P21)',
   joints: 'JointStore (P10)',
-  verbs: 'VerbSystem (P14)',
   spawner: 'Spawner (P22)',
-  contacts: 'ContactSystem (P09)',
-  contactGrace: 'ContactSystem (P09)',
   felling: 'Felling (P10)',
-  deaths: 'Deaths (P09)',
-  corpses: 'Deaths (P09)',
 };
 
 describe('completeness (RR-19)', () => {
@@ -865,14 +884,15 @@ const EXACT = [
   'projectiles',
   'prevBlade',
   'rulers',
+  'contacts',
   'felling',
   'deaths',
   'corpses',
 ] as const;
-// Not compared: `bodies` (the zones' pose history is reset on load, MAP gap-7's exact restore is M3's), `contacts` and
-// `contactGrace` (a zone reset opens a grace, §4.3), `navDirty` (the navmesh is rebuilt). The test below lists them, so
-// a new key must be placed in one list or the other.
-const NOT_EXACT = ['bodies', 'contacts', 'contactGrace', 'navDirty'] as const;
+// Not compared: `bodies` (the zones' pose history is reset on load, MAP gap-7's exact restore is M3's), `contactGrace`
+// (a zone reset opens a grace, §4.3), `navDirty` (the navmesh is rebuilt). The test below lists them, so a new key must
+// be placed in one list or the other.
+const NOT_EXACT = ['bodies', 'contactGrace', 'navDirty'] as const;
 
 describe('save → load → save', () => {
   it('is byte-identical for entities, joints, terrain with the dug mask and rulers, and for all the loader restores exactly', async () => {
@@ -1060,6 +1080,26 @@ describe('save → load → save', () => {
     expect(dist(l.entities.get(ids.log)!.vel.lin, w.entities.get(ids.log)!.vel.lin)).toBeLessThan(0.01);
   });
 
+  it("keeps a fighter's verb state (focus, a continuous verb, a tug), writing its command in canonical key order", async () => {
+    const w = await make();
+    const ids = populate(w);
+    run(w, 10, new Rng(19));
+    // A continuous verb as P16's pull would leave it (hand-made, as P14's own test does), its command's keys out of order.
+    const cmd = { charge: 255, verb: 'pull', kind: 'verb', target: ids.coil, player: 1, tick: 5 } as VerbCommand;
+    const grip = { x: 0.5, y: 0, z: 0.1 };
+    w.verbs.restoreRecord([{ fighter: 1, focus: { target: ids.log, at: null }, cont: { verb: 'pull', cmd, ticks: 7, data: [['strokes', 2], ['yank', 3]] }, tug: { entity: ids.log, grip } }]);
+    const a = serializeWorld(w);
+    const rec = (parsed(a) as unknown as SaveV1).verbs;
+    expect(rec).toHaveLength(1);
+    expect(Object.keys((rec[0].cont as { cmd: object }).cmd)).toEqual(['tick', 'player', 'kind', 'verb', 'target', 'charge']);
+    const l = await load(a);
+    expect(sections(serializeWorld(l), ['verbs']).verbs).toBe(sections(a, ['verbs']).verbs);
+    const p = l.player!;
+    expect(l.verbs.focusOf(p)).toEqual({ target: ids.log, at: null });
+    expect(l.verbs.continuousOf(p)).toEqual({ verb: 'pull', cmd: { tick: 5, player: 1, kind: 'verb', verb: 'pull', target: ids.coil, charge: 255 }, ticks: 7, data: { strokes: 2, yank: 3 } });
+    expect(l.verbs.workTarget(p)).toBe(ids.log);
+  });
+
   it('lets the scene queries see every restored body from the first tick: supportAt, a ray, a teleport onto a box', async () => {
     const w = await make();
     const box = spawnBox(w, { p: { x: 4, y: 1, z: 4 }, size: [2, 2, 2], material: 'dryWood', state: 'fixed', look: 'crate' });
@@ -1125,7 +1165,7 @@ function angleDeg(a: Quat, b: Quat): number {
 const dist = (a: V3, b: V3): number => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 
 describe('a world at rest', () => {
-  it('saved and loaded, matches the original within 1 cm and 1° over 10 s', async () => {
+  it("saved and loaded, matches the original within 1 cm and 1° over 10 s, and its contacts carry on as the original's", async () => {
     const w = await make();
     const ids = populate(w);
     // Logs and stones on the ground, a stack on the crate.
@@ -1138,12 +1178,21 @@ describe('a world at rest', () => {
     }
     const moving = w.entities.all().filter((e) => e.body && e.body.isEnabled() && e.body.isDynamic() && e.restTicks < 30);
     expect(moving.map((e) => e.id)).toEqual([]);
-    const l = await load(serializeWorld(w));
+    const saved = serializeWorld(w);
+    // The contact episodes it restores (§4.3, RR-19): resting entities (subjects as negated ids) on the terrain and on
+    // each other, still touching.
+    const restored = (parsed(saved) as unknown as SaveV1).contacts;
+    expect(restored.filter((c) => c.creature < 0 && c.touching > 0).length).toBeGreaterThan(3);
+    expect(restored.some((c) => c.owner.startsWith('entity:') && c.touching > 0)).toBe(true);
+    const contactsOf = (x: World): string => canonicalJson(saveRecord(x).contacts);
+    const l = await load(saved);
     let worstM = 0;
     let worstDeg = 0;
     for (let t = 1; t <= 600; t++) {
       w.step();
       l.step();
+      // Not ended by the loaded world's first phase 9 (the load's narrow phase re-raised them), never begun again.
+      if (t === 1 || t % 60 === 0) expect(contactsOf(l), `contacts after ${t} ticks`).toBe(contactsOf(w));
       if (t % 60 !== 0) continue;
       await yieldNow();
       for (const e of w.entities.all()) {
@@ -1372,6 +1421,69 @@ describe('broken saves', () => {
     refuse((s) => (s.entities as unknown[]).reverse(), 'entities are not in increasing id order at entities[1]');
     refuse((s) => ((s.rng as Record<string, unknown>).fighters = [[9, 1]]), 'rng.fighters[0] names fighter 9');
     refuse((s) => (s.bodies as Record<string, unknown>[]).push({ fighter: 7, kcc: null, zonesHistory: [], slab: null, ruler: null }), 'bodies[1] names fighter 7');
+  });
+
+  it('reads contacts with a signed subject (a fighter, or an entity negated), checked against the counters, in their form and order', () => {
+    const s0 = parsed(good) as unknown as SaveV1;
+    // A body landed on the terrain: an entity subject, as ContactSystem writes it; it reads as it is.
+    expect(s0.contacts.some((c) => c.creature < 0)).toBe(true);
+    expect(readSave(good).contacts).toEqual(s0.contacts);
+    const group = (c: Record<string, unknown>) => ({ creature: -1, owner: 'terrain', touching: 1, episodeStart: 3, cooldownUntil: -1, ...c });
+    const one = (c: Record<string, unknown>) => (s: Record<string, unknown>) => {
+      s.contacts = [group(c)];
+    };
+    // Both kinds of subject, each against each kind of owner it can have, in order.
+    const all = [group({ owner: 'entity:2' }), group({ owner: 'terrain' }), group({ creature: 1, owner: 'entity:1' }), group({ creature: 1, owner: 'terrain' })];
+    expect(readSave(edited(good, (s) => (s.contacts = all))).contacts).toEqual(all);
+    refuse(one({ creature: 0 }), 'contacts[0].creature is 0, not a fighter id (> 0) or a negated entity id (< 0)');
+    refuse(one({ creature: 1.5 }), 'contacts[0].creature is 1.5, not a whole number');
+    refuse(one({ owner: 'tree:1' }), 'contacts[0].owner is "tree:1", not \'terrain\'');
+    refuse(one({ creature: -999 }), 'save record: contacts[0].creature names entity 999, which is not below counters.entity');
+    refuse(one({ creature: 9 }), 'save record: contacts[0].creature names fighter 9, which is not below counters.fighter');
+    refuse(one({ owner: 'rope:4' }), 'save record: contacts[0].owner names joint 4, which is not below counters.joint');
+    refuse(one({ owner: 'fighter:1' }), "save record: contacts[0] is entity 1 against fighter:1, not ContactSystem's form");
+    refuse(one({ owner: 'entity:1' }), "save record: contacts[0] is entity 1 against entity:1, not ContactSystem's form");
+    refuse((s) => (s.contacts = [...all].reverse()), 'save record: contacts are not sorted by (creature, owner) without repeats at contacts[1]');
+    refuse((s) => (s.contacts = [group({}), group({ touching: 2 })]), 'save record: contacts are not sorted by (creature, owner) without repeats at contacts[1]');
+    refuse((s) => (s.contactGrace = [[999, 40]]), 'save record: contactGrace[0] names fighter 999, which is not below counters.fighter');
+    refuse(
+      (s) =>
+        (s.contactGrace = [
+          [1, 40],
+          [1, 41],
+        ]),
+      'save record: contactGrace is not in increasing fighter order at contactGrace[1]',
+    );
+  });
+
+  it("checks a fighter's verb state field by field, and its fighter and entities against the save", () => {
+    const rec = (r: Record<string, unknown>) => (s: Record<string, unknown>) => {
+      s.verbs = [{ fighter: 1, focus: null, cont: null, tug: null, ...r }];
+    };
+    const pull = (c: Record<string, unknown> = {}, cmd: Record<string, unknown> = {}) => ({
+      verb: 'pull',
+      cmd: { tick: 5, player: 1, kind: 'verb', verb: 'pull', target: 0, charge: 255, ...cmd },
+      ticks: 7,
+      data: [['yank', 3]],
+      ...c,
+    });
+    expect(readSave(edited(good, rec({ focus: { target: 2, at: { x: 1, y: 0, z: 1 } }, cont: pull() }))).verbs).toHaveLength(1);
+    refuse((s) => (s.verbs = [{ fighter: 1, focus: null, cont: null }]), 'save record: verbs[0].tug is missing, not there');
+    refuse(rec({ mood: 1 }), "save record: verbs[0] has a field this version doesn't have: mood");
+    refuse(rec({ focus: { target: -2, at: null } }), 'verbs[0].focus.target is -2, not a whole number ≥ 0');
+    refuse(rec({ cont: pull({}, { dir: 1 }) }), "save record: verbs[0].cont.cmd has a field this version doesn't have: dir");
+    refuse(rec({ cont: pull({}, { verb: 'cut' }) }), 'save record: verbs[0].cont.cmd.verb is "cut", not the continuous verb "pull"');
+    refuse(rec({ cont: pull({ data: [['yank', 3], ['a', 1]] }) }), 'save record: verbs[0].cont.data[1][0] is "a", not a key after the one before it');
+    refuse(rec({ fighter: 7 }), "save record: verbs[0] names fighter 7, who isn't among the fighters");
+    refuse(rec({ tug: { entity: 999, grip: { x: 0, y: 0, z: 0 } } }), 'save record: verbs[0].tug.entity names entity 999, which is not below counters.entity');
+    refuse(
+      (s) =>
+        (s.verbs = [
+          { fighter: 1, focus: null, cont: null, tug: null },
+          { fighter: 1, focus: null, cont: null, tug: null },
+        ]),
+      'save record: verbs are not in increasing fighter order at verbs[1]',
+    );
   });
 
   it('refuses an impulse on an entity the loaded world would not have', async () => {

@@ -176,6 +176,11 @@ export class ContactSystem {
    * loading it marks them again.
    */
   private resync: Set<Episode> | null = null;
+  /**
+   * The starts the load's own narrow phase raised (restoredStarts), for the next process() to rebuild the restored counts
+   * from. Never saved, for the same reason as `resync`: a load makes them again.
+   */
+  private restarts: readonly { a: Owner; b: Owner }[] | null = null;
 
   constructor(world: World) {
     this.world = world;
@@ -196,6 +201,23 @@ export class ContactSystem {
     const resync = this.resync;
     this.resync = null;
     const resynced = new Set<Episode>();
+    const restarts = this.restarts;
+    this.restarts = null;
+    // The load's narrow-phase starts first (restoredStarts): they rebuild the restored episodes' counts, as the first
+    // step's own re-raised starts do below. One for no restored episode is a contact the saved world already had (or
+    // never counted): dropped, never a new episode.
+    if (resync && restarts) {
+      for (const p of restarts) {
+        const ep = this.episodeOf(p.a, p.b, false);
+        if (!ep || !resync.has(ep)) continue;
+        if (!resynced.has(ep)) {
+          resynced.add(ep);
+          ep.touching = 0;
+        }
+        ep.touching++;
+        this.unscored.continuing++;
+      }
+    }
     for (const p of pairs) {
       if (!p.started) continue;
       const ep = this.episodeOf(p.a, p.b, true);
@@ -338,11 +360,14 @@ export class ContactSystem {
    * episode going on, never a new one, never scored), and ends at that tick, with its cooldown, a restored episode none
    * of whose pairs is re-raised (it separated in that step, where the saved world's next step raised the stop).
    * Episode starts and cooldown ends stand as saved, so a bounce after the load is still a bounce.
-   * Contract for P13: restore into the freshly built world, before its first step, and don't prime the narrow phase
-   * (a world that has already stepped these bodies re-raises nothing, and the counts of contacts that go on would drop).
+   * Contract for P13: restore into the freshly built world, before its first step. A load that primes the narrow phase
+   * first (P13's loadWorld steps the rebuilt world by zero time so its scene queries see every body) hands that step's
+   * pairs to restoredStarts: its starts are the re-raised ones, and the first step raises them no more (without them the
+   * counts of contacts that go on would drop to 0 at the first process()).
    */
   restoreRecord(r: ContactRecV1[]): void {
     this.episodes.clear();
+    this.restarts = null;
     const resync = new Set<Episode>();
     for (const rec of r) {
       const subject: Merged = rec.creature > 0 ? { kind: 'fighter', id: rec.creature } : { kind: 'entity', id: -rec.creature };
@@ -353,6 +378,16 @@ export class ContactSystem {
       if (ep.touching > 0) resync.add(ep);
     }
     this.resync = resync.size > 0 ? resync : null;
+  }
+
+  /**
+   * After restoreRecord, the pairs of the load's zero-length step (P13's refreshQueries): its starts are the narrow
+   * phase re-raising every collider pair that still overlaps, which restoreRecord's resync expects from the first step.
+   * They are held for the next process(), where they rebuild the restored episodes' counts and nothing else.
+   */
+  restoredStarts(pairs: readonly ContactPair[]): void {
+    const starts = pairs.filter((p) => p.started).map((p) => ({ a: p.a, b: p.b }));
+    this.restarts = this.resync && starts.length > 0 ? starts : null;
   }
 
   /** (fighter, untilTick), sorted: the open contact graces (§8.3 `contactGrace`). */

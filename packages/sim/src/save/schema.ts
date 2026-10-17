@@ -3,8 +3,8 @@
 // Each system writes its own records (toRecord) and reads them back (restoreRecord); save/serialize.ts assembles them
 // into SaveV1 in the key order below, save/canonical.ts writes the text, save/load.ts checks and loads it. The types
 // the design leaves to their system's package are open records until that package fills them in here (TODO(P11) the
-// ruler body, TODO(P14) the verb state): every system stub's toRecord()/restoreRecord() already returns and takes these
-// types, so the save is assembled through stable signatures.
+// ruler body; the verb state stays open because P14's own record extends it): every system stub's
+// toRecord()/restoreRecord() already returns and takes these types, so the save is assembled through stable signatures.
 //
 // Additions to §8.3's SaveV1 (each a deviation recorded in the package's report):
 // - `options`: the WorldOptions the world was built with (scene, terrain, size, player, sparringApe), without which a
@@ -169,7 +169,10 @@ export interface BodiesRecV1 {
   ruler: RulerBodyRecV1 | null;
 }
 
-/** A fighter's verb state (buffer, held ends, continuous verbs). TODO(P14): its exact fields. */
+/**
+ * A fighter's verb state: its fields are P14's VerbStateRecord (world/verbs/index.ts: the focus, a continuous verb that
+ * is on, a creature's tug), which extends this open record; save/load.ts checks every one of them.
+ */
 export interface VerbStateRecV1 {
   fighter: number;
   [field: string]: unknown;
@@ -177,7 +180,12 @@ export interface VerbStateRecV1 {
 
 /** One (creature, other owner) touching count of ContactSystem (§4.3, RR-19). */
 export interface ContactRecV1 {
+  /**
+   * The group's subject, a signed id (§8.3 leaves its form open; §4.3 counts an entity's integrity episodes too): > 0 a
+   * fighter (the lower id when both sides are fighters), < 0 an entity's id negated (a group with no fighter), never 0.
+   */
   creature: number;
+  /** The other side: 'terrain', 'entity:<id>', 'fighter:<id>' or 'rope:<joint>'. */
   owner: string;
   touching: number;
   episodeStart: number;

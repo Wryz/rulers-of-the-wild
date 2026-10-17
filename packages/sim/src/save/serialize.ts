@@ -4,10 +4,10 @@
 // Every system writes its own records (entities, joints, fighters, minds, verbs, the spawner, the bodies, contacts,
 // felling, deaths, navigation's dirty queue, CombatSim's own state); this file assembles them in SaveV1's key order and
 // writes the few records it owns itself with explicit writers in a fixed key order:
-// - commands (the pending queue, and a fighter's buffered or working verb command): a command's key order is whatever
-//   its maker gave it, so it is rewritten in its type's declared order, keeping only its type's fields (the key lists
-//   are checked against the command types when compiled, so a field added to a type can't be left out; load.ts reads
-//   the same lists);
+// - commands (the pending queue, a fighter's buffered or working verb command, the command of a continuous verb that is
+//   on in the verb state): a command's key order is whatever its maker gave it, so it is rewritten in its type's
+//   declared order, keeping only its type's fields (the key lists are checked against the command types when compiled,
+//   so a field added to a type can't be left out; load.ts reads the same lists);
 // - a ruler's RulerState, its wounds and their causes (`rulers`);
 // - the tuning overrides (sim tables only: a table whose folder is "Client …" belongs to the client's presentation and
 //   game loop, rules 6 and 8, and is never saved);
@@ -24,6 +24,7 @@ import type { ButtonCommand, Command, MetaCommand, MoveCommand, TuningEdit, Verb
 import type { Fighter } from '../sim/fighter';
 import { TUNING, type TuningEntry, tuningOverrides } from '../tuning/registry';
 import type { ImpactCause, RulerState, V3, WoundRecord } from '../world/types';
+import type { VerbStateRecord } from '../world/verbs/index';
 import type { World } from '../world/world';
 import { canonicalJson } from './canonical';
 import {
@@ -37,6 +38,7 @@ import {
   type SaveV1,
   type SlabRecV1,
   type TuningOverrideV1,
+  type VerbStateRecV1,
 } from './schema';
 
 /** Assembles the whole world's save record (SaveV1, in its key order). */
@@ -92,7 +94,7 @@ export function saveRecord(w: World): SaveV1 {
     joints: w.joints.toRecord(),
     fighters: fighters.map((f) => fighterRecord(w, f)),
     minds: w.minds.toRecord(),
-    verbs: w.verbs.toRecord(),
+    verbs: w.verbs.toRecord().map(verbStateRecord),
     spawner: w.spawner.toRecord(),
     drops: c.drops,
     projectiles: c.projectiles,
@@ -245,6 +247,13 @@ function fighterRecord(w: World, f: Fighter): FighterRecV1 {
   if (r.work?.cmd) r.work.cmd = verbCommandRecord(r.work.cmd);
   if (r.verbRequest) r.verbRequest.cmd = verbCommandRecord(r.verbRequest.cmd);
   return r;
+}
+
+/** P14's record (toRecord's own copy), with a continuous verb's command in its canonical key order, as a fighter's. */
+function verbStateRecord(r: VerbStateRecV1): VerbStateRecV1 {
+  const rec = r as VerbStateRecord;
+  if (rec.cont) rec.cont.cmd = verbCommandRecord(rec.cont.cmd);
+  return rec;
 }
 
 // ---------------------------------------------------------------------------

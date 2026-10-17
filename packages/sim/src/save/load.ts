@@ -36,8 +36,8 @@
 // 7. the world RNG streams and the id counters; the navmesh rebuilt over the loaded ground and its dirty queue
 //    restored;
 // 8. every collider the load made put into the scene queries by a zero-length Rapier step that moves nothing (so the
-//    first tick's queries before its phase-7 step see the world the save saw: refreshQueries); the events construction
-//    pushed cleared.
+//    first tick's queries before its phase-7 step see the world the save saw: refreshQueries), its starts handed to the
+//    contact pipeline so the restored episodes keep their counts; the events construction pushed cleared.
 // Rapier's body order after a load differs from the saving world's (restored bodies are made after the generated ones
 // kept), so a loaded world matches the saved one within SPEC:730's 1 cm and 1° at rest, not bit for bit; two loads of
 // one save are bit-identical to each other.
@@ -51,6 +51,7 @@ import { WEAPONS } from '../sim/weapons';
 import { resetTuning, restoreTuning, setTuningValue, TUNING, tuningSnapshot } from '../tuning/registry';
 import { MATERIALS } from '../world/materials';
 import { physicsReady } from '../world/physics';
+import type { VerbStateRecord } from '../world/verbs/index';
 import type {
   CauseFeature,
   CauseKind,
@@ -294,11 +295,13 @@ function bodyState(b: RAPIER.RigidBody): number[] {
  * constructor primes the terrain the same way), and the first tick after a load queries before its phase-7 step: dev
  * ops and teleports (phase 1c), minds' perception rays (2), the movers' supportAt (3). The saved world had every one of
  * these colliders in its broad phase, so without this a load would change those outcomes (a giant standing on a
- * restored pit cover would read the pit floor). So: one Rapier step of zero length, its events discarded (pairs already
- * touching at the save then start no new contact on the first tick, as in the saved world). A zero-length step moves no
- * body and changes no velocity (measured: bit for bit, with resting stacks, sliding bodies, kinematic capsules and
- * motorised, rope, spring and fixed joints); that is checked here, so a Rapier that did otherwise fails the load loudly
- * instead of changing the world quietly.
+ * restored pit cover would read the pit floor). So: one Rapier step of zero length. Its events never reach phase 9 as
+ * new contacts (pairs already touching at the save start no new contact on the first tick, as in the saved world): its
+ * starts go to ContactSystem.restoredStarts, which counts them toward the restored episodes only, so the counts the save
+ * holds carry on (the first step raises them no more). A zero-length step moves no body and changes no velocity
+ * (measured: bit for bit, with resting stacks, sliding bodies, kinematic capsules and motorised, rope, spring and fixed
+ * joints); that is checked here, so a Rapier that did otherwise fails the load loudly instead of changing the world
+ * quietly.
  * TODO(P05-fix): PhysicsWorld.refreshQueries(), primeQueries' general form, so physics.ts owns the Rapier step; the
  * loader then calls it.
  */
@@ -315,7 +318,7 @@ function refreshQueries(w: World): void {
   } finally {
     rapier.timestep = dt;
   }
-  w.physics.drain();
+  const pairs = w.physics.drain();
   rapier.bodies.forEach((b) => {
     const was = before.get(b.handle);
     const now = bodyState(b);
@@ -323,6 +326,9 @@ function refreshQueries(w: World): void {
       throw new Error(`loadWorld: the zero-length step that refreshes the scene queries changed Rapier body ${b.handle}`);
     }
   });
+  // Its starts are the rebuilt narrow phase re-raising every pair that still overlaps: the contact pipeline rebuilds
+  // the restored episodes' counts from them in the first phase 9 (the first step raises them no more).
+  w.contacts.restoredStarts(pairs);
 }
 
 /**
@@ -465,6 +471,19 @@ function crossCheck(s: SaveV1): void {
   s.bodies.forEach((b, i) => known(b.fighter, `bodies[${i}]`));
   s.rulers.forEach(([id], i) => known(id, `rulers[${i}]`));
   s.minds.forEach((m, i) => known(m.fighter, `minds[${i}]`));
+  // The verb state (verbState()): one record per fighter in the save, by id; the entities it names below the counter
+  // (a focus or tug may outlive its entity until the next phase 1b, so it needn't be in the save, but an id the world
+  // hasn't given yet would latch onto the next entity made).
+  (s.verbs as VerbStateRecord[]).forEach((r, i) => {
+    known(r.fighter, `verbs[${i}]`);
+    if (i > 0 && !(r.fighter > s.verbs[i - 1].fighter)) throw new Error(`save record: verbs are not in increasing fighter order at verbs[${i}]`);
+    for (const [id, field] of [
+      [r.focus?.target ?? 0, 'focus.target'],
+      [r.tug?.entity ?? 0, 'tug.entity'],
+    ] as const) {
+      if (id >= s.counters.entity) throw new Error(`save record: verbs[${i}].${field} names entity ${id}, which is not below counters.entity (${s.counters.entity})`);
+    }
+  });
   for (const e of s.entities) if (e.id >= s.counters.entity) throw new Error(`save record: entity ${e.id} is not below counters.entity (${s.counters.entity})`);
   for (const id of s.removed) if (id >= s.counters.entity) throw new Error(`save record: removed entity ${id} is not below counters.entity (${s.counters.entity})`);
   for (const j of s.joints) if (j.id >= s.counters.joint) throw new Error(`save record: joint ${j.id} is not below counters.joint (${s.counters.joint})`);
@@ -481,6 +500,35 @@ function crossCheck(s: SaveV1): void {
   for (let i = 1; i < s.joints.length; i++) {
     if (!(s.joints[i].id > s.joints[i - 1].id)) throw new Error(`save record: joints are not in increasing id order at joints[${i}]`);
   }
+  // Contacts (contact()): each id below its counter (a group outlives its fighter or entity until its cooldown ends, and
+  // a grace its fighter until it runs out, so neither has to be in the save), one record per group in ContactSystem's
+  // form (a fighter is the subject whenever the group has one, the lower of two fighters or two entities), sorted.
+  const counted = (kind: 'fighter' | 'entity' | 'joint', id: number, field: string) => {
+    const counter = s.counters[kind];
+    if (!Number.isSafeInteger(id) || id >= counter) throw new Error(`save record: ${field} names ${kind} ${id}, which is not below counters.${kind} (${counter})`);
+  };
+  s.contacts.forEach((c, i) => {
+    const p = `contacts[${i}]`;
+    const subject = c.creature > 0 ? 'fighter' : 'entity';
+    const id = Math.abs(c.creature);
+    counted(subject, id, `${p}.creature`);
+    const m = CONTACT_OWNER.exec(c.owner);
+    if (m?.[1]) {
+      const other = Number(m[2]);
+      counted(m[1] === 'rope' ? 'joint' : (m[1] as 'fighter' | 'entity'), other, `${p}.owner`);
+      if (m[1] === subject ? other <= id : m[1] === 'fighter') {
+        throw new Error(`save record: ${p} is ${subject} ${id} against ${c.owner}, not ContactSystem's form (the fighter, or the lower id, is the subject)`);
+      }
+    }
+    const q = s.contacts[i - 1];
+    if (q && !(q.creature < c.creature || (q.creature === c.creature && q.owner < c.owner))) {
+      throw new Error(`save record: contacts are not sorted by (creature, owner) without repeats at ${p}`);
+    }
+  });
+  s.contactGrace.forEach(([id], i) => {
+    counted('fighter', id, `contactGrace[${i}]`);
+    if (i > 0 && !(id > s.contactGrace[i - 1][0])) throw new Error(`save record: contactGrace is not in increasing fighter order at contactGrace[${i}]`);
+  });
 }
 
 function options(v: unknown, p: string): SaveV1['options'] {
@@ -992,11 +1040,36 @@ function mind(v: unknown, p: string): MindRecV1 {
   return o as unknown as MindRecV1;
 }
 
-/** A fighter's verb state (P14's record; its fields are P14's to check). */
-function verbState(v: unknown, p: string): SaveV1['verbs'][number] {
-  const o = obj(v, p);
-  nat(o.fighter, `${p}.fighter`);
-  return o as SaveV1['verbs'][number];
+/**
+ * A fighter's verb state (P14's VerbSystem.toRecord, world/verbs/index.ts), every field checked: the focus (an entity,
+ * or 0 for the ground, and a point), a continuous verb that is on (its command read as any verb command, in its type's
+ * key order; the handler's numbers as [key, value] pairs sorted by key) and a creature's tug. The fighter, the record
+ * order and the entity ids are checked in crossCheck.
+ */
+function verbState(v: unknown, p: string): VerbStateRecord {
+  const o = exactKeys(obj(v, p), ['fighter', 'focus', 'cont', 'tug'], p);
+  return {
+    fighter: nat(o.fighter, `${p}.fighter`),
+    focus: nullable(o.focus, `${p}.focus`, (x, q) => {
+      const f = exactKeys(obj(x, q), ['target', 'at'], q);
+      return { target: nat(f.target, `${q}.target`), at: nullable(f.at, `${q}.at`, v3) };
+    }),
+    cont: nullable(o.cont, `${p}.cont`, (x, q) => {
+      const c = exactKeys(obj(x, q), ['verb', 'cmd', 'ticks', 'data'], q);
+      const verb = oneOf(c.verb, VERB_IDS, `${q}.verb`);
+      const cmd = fields<VerbCommand>(obj(c.cmd, `${q}.cmd`), `${q}.cmd`, VERB_KEYS, VERB_REQUIRED, VERB_READ);
+      if (cmd.verb !== verb) fail(`${q}.cmd.verb`, cmd.verb, `the continuous verb ${short(verb)}`);
+      const data = arr(c.data, `${q}.data`).map((d, i) => pair(d, `${q}.data[${i}]`, str, num));
+      data.forEach(([k], i) => {
+        if (i > 0 && !(k > data[i - 1][0])) fail(`${q}.data[${i}][0]`, k, 'a key after the one before it (sorted, no repeats)');
+      });
+      return { verb, cmd, ticks: nat(c.ticks, `${q}.ticks`), data };
+    }),
+    tug: nullable(o.tug, `${p}.tug`, (x, q) => {
+      const t = exactKeys(obj(x, q), ['entity', 'grip'], q);
+      return { entity: nat(t.entity, `${q}.entity`), grip: v3(t.grip, `${q}.grip`) };
+    }),
+  };
 }
 
 function spawner(v: unknown, p: string): SaveV1['spawner'] {
@@ -1130,11 +1203,25 @@ function cause(v: unknown, p: string): ImpactCause {
   };
 }
 
+/** A contact group's other owner, as ContactSystem keys it. */
+const CONTACT_OWNER = /^(?:terrain|(entity|fighter|rope):([1-9][0-9]*))$/;
+
+/**
+ * One ContactSystem group (§8.3 `contacts`, RR-19). §8.3 types `creature` as a number, and §4.3 applies the episode rule
+ * to an entity's integrity too, per (entity, other owner), without saying how that subject is written. P09's
+ * ContactSystem.toRecord writes a signed subject id: > 0 a fighter (the lower id when both sides are fighters), < 0 an
+ * entity's id negated (a group with no fighter in it), never 0 (ids start at 1). The ids are checked against their
+ * counters, and the record's form and order, in crossCheck.
+ */
 function contact(v: unknown, p: string): SaveV1['contacts'][number] {
   const o = exactKeys(obj(v, p), ['creature', 'owner', 'touching', 'episodeStart', 'cooldownUntil'], p);
+  const creature = int(o.creature, `${p}.creature`);
+  if (creature === 0) fail(`${p}.creature`, creature, 'a fighter id (> 0) or a negated entity id (< 0)');
+  const owner = str(o.owner, `${p}.owner`);
+  if (!CONTACT_OWNER.test(owner)) fail(`${p}.owner`, owner, "'terrain', 'entity:<id>', 'fighter:<id>' or 'rope:<joint>'");
   return {
-    creature: nat(o.creature, `${p}.creature`),
-    owner: str(o.owner, `${p}.owner`),
+    creature,
+    owner,
     touching: nat(o.touching, `${p}.touching`),
     episodeStart: int(o.episodeStart, `${p}.episodeStart`),
     cooldownUntil: int(o.cooldownUntil, `${p}.cooldownUntil`),
