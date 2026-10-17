@@ -95,7 +95,7 @@ export interface LoadOptions {
  * Builds the world a save describes (see the top of this file). applyTuning (default false): restore the save's
  * tuningOverrides into the process-wide registry (RR-17).
  */
-export async function loadWorld(bytes: Uint8Array, opts?: { nav?: 'full' | 'off'; applyTuning?: boolean }): Promise<World> {
+export async function loadWorld(bytes: Uint8Array, opts?: LoadOptions): Promise<World> {
   const save = readSave(bytes);
   await physicsReady();
   // (Synchronous from here: no other code runs between the tuning edits and the build.)

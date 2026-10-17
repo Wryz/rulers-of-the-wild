@@ -7,8 +7,13 @@
 // - commands (the pending queue, and a fighter's buffered or working verb command): a command's key order is whatever
 //   its maker gave it, so it is rewritten in its type's declared order, keeping only its type's fields;
 // - a ruler's RulerState, its wounds and their causes (`rulers`);
-// - the tuning overrides (sim tables only: a table whose folder is "Client …" is the client's, rule 8, never saved);
+// - the tuning overrides (sim tables only: a table whose folder is "Client …" belongs to the client's presentation and
+//   game loop, rules 6 and 8, and is never saved);
 // - the counters, the RNG states, the options, the queued impulses.
+//
+// A fighter driven by a brain that isn't a creature mind (a DungeonStyle BrawlerAI added by hand) is refused: a world
+// makes players and creatures only, and the save holds a brain only as a mind (§6.8; minds[].inner for the ape's).
+// TODO(M3): a save of a test world with DungeonStyle enemies, if one is ever needed.
 //
 // Saved at the end of a tick (phase 19 or between steps), when nothing is pending but what the save holds: the
 // command queue, the queued impulses, the dirty nav tiles (MAP gap-7 §3.8).
@@ -123,7 +128,7 @@ export function isClientTuning(e: Pick<TuningEntry, 'folder'>): boolean {
 
 /**
  * The tuning values that differ from their registered defaults, sorted (table, key), the client's tables left out:
- * they are presentation and time effects (rule 8), and a save is the sim's state.
+ * they are presentation and the game loop's time effects (rules 6 and 8), and a save is the sim's state.
  */
 export function savedTuningOverrides(): TuningOverrideV1[] {
   const client = new Set(TUNING.filter(isClientTuning).map((e) => e.name));
