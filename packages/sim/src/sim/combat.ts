@@ -4,11 +4,14 @@ import type { PoseName } from '../body/poses';
 import { AIDirector, type Brain, MAX_HEFT } from './ai';
 import { type Button, type Fighter } from './fighter';
 import { RectWalkable, type Walkable } from '../world/collision';
-import type { Finish, FighterMover, GroundQuery, ImpactCause, RulerZoneId, WorldPort } from '../world/types';
-import { type Command, CommandQueue, moveVector } from './commands';
-import { DAMAGE_TUNING, hpFromEnergy, MOVE_TUNING, zoneToughness } from './rules';
+import type { Finish, FighterMover, GroundQuery, ImpactCause, RulerZoneId, Work, WorldPort } from '../world/types';
+import { getTuningValue } from '../tuning/registry';
+import { type Command, COMMAND_STEPS, CommandQueue, MOVE_CROUCH, MOVE_SPRINT, moveVector } from './commands';
+import { boneMass, DAMAGE_TUNING, hpFromEnergy, impactEnergy, launchSpeed, MOVE_TUNING, reducedMass, zoneToughness } from './rules';
+// ruler.ts imports this module for types only, so this adds no import cycle at runtime (§1.3, RF-8).
+import { RULER_TUNING, rulerVolumes } from './ruler';
 import { bodyCapsules, overlap as capsuleOverlap, segDist as segDistance, strikingLimbs } from './bodyShapes';
-import { angleDelta, approachAngle, DT, Rng } from './math';
+import { angleDelta, approachAngle, clamp, DT, Rng } from './math';
 import { aimBallistic, centreOfMass, integrate, type Projectile, projectileDir, projectilePoints, pointVelocity, substeps } from './projectiles';
 import { DEFENSES, type DefenseKind, type Height, type MoveDef, moveLength, spinProgress } from './moves';
 import { chooseDefense, moveContext, selectPlayerMove } from './select';
@@ -129,6 +132,16 @@ interface Contact {
   swing?: Vector3;
 }
 
+/** A blow's numbers by the one damage rule (§4.4): HP = max(0, energy − toughness) / K. */
+interface RuleBlow {
+  hp: number;
+  energy: number;
+  toughness: number;
+}
+
+/** How far (m per tick, × scale) a fighter steps in to what it bends down for: a weapon, or a work action's target. */
+const PICKUP_STEP = 0.045;
+
 /** Below this much swing power a weapon just thuds against the body. */
 const MIN_POWER = 0.45;
 
@@ -157,6 +170,7 @@ export const FACING = {
 };
 
 const _want = new Vector3();
+const _dv = new Vector3();
 const MIN_SEPARATION = 0.66;
 /** Collision radius of a standing fighter against walls. */
 export const BODY_RADIUS = 0.3;
@@ -261,6 +275,41 @@ export function buttonMove(f: Fighter, button: Button): { move: MoveDef | null; 
 /** A flat floor at y = 0: legacy CombatSim's ground (every height test below reads 0 from it, as DS did). */
 export const FLAT_GROUND: GroundQuery = Object.freeze({ heightAt: () => 0 });
 
+/**
+ * retarget's preference for a big opponent: DungeonStyle's 0.35 m per unit of scale over 1, capped for a ruler at
+ * RULER_TUNING.retargetBiasCapM (docs/M1-DESIGN.md §4.6; MAP gap-0 §6.6).
+ */
+function sizeBias(o: Fighter): number {
+  const bias = (o.scale - 1) * 0.35;
+  return o.ruler ? Math.min(bias, RULER_TUNING.retargetBiasCapM) : bias;
+}
+
+/** The size locomote's lock-on range scales with: a ruler counts as no bigger than RULER_TUNING.lockScale (§4.6). */
+function lockSize(f: Fighter): number {
+  return f.ruler ? Math.min(f.scale, RULER_TUNING.lockScale) : f.scale;
+}
+
+/** Stamina regen with a load in the hands (§5.1, SPEC:387): max(carryRegenMin, 1 − carryRegenPerKg × m); 1 with none. */
+function loadRegen(f: Fighter): number {
+  return f.load ? Math.max(MOVE_TUNING.carryRegenMin, 1 - MOVE_TUNING.carryRegenPerKg * f.load.massKg) : 1;
+}
+
+/**
+ * A standing ruler `r` bearing down on `o`: its own horizontal velocity (walk and slide) along the line to `o` above
+ * RULER_TUNING.separateSkipSpeed (docs/M1-DESIGN.md §3 phase 3: "a standing ruler whose closing speed exceeds" it;
+ * RF-5). The ruler's own speed, not the pair's: someone walking into a standing ruler is still pushed out of its body
+ * (its zones are sensors the character controller walks through), while a charge or a walking giant meets them.
+ * (Tripped rulers are skipped before this, as DungeonStyle skips every downed body.)
+ */
+function rulerCloses(r: Fighter, o: Fighter): boolean {
+  if (!r.ruler) return false;
+  const dx = o.pos.x - r.pos.x;
+  const dz = o.pos.z - r.pos.z;
+  const d = Math.hypot(dx, dz);
+  if (d <= 1e-4) return false;
+  return ((r.walkVel.x + r.vel.x) * dx + (r.walkVel.z + r.vel.z) * dz) / d > RULER_TUNING.separateSkipSpeed;
+}
+
 /** What a DS knockback or strike by `a` records as its cause (a creature's body, or a weapon it holds or threw). */
 function creatureCause(a: Fighter, held: boolean): ImpactCause {
   return { kind: 'creature', entityId: null, fighterId: a.id, credit: a.playerId ? [a.playerId] : [], held, feature: 'creature' };
@@ -349,6 +398,19 @@ export class CombatSim {
   physicsOwnsDowned = false;
   /** Maps a command's player number to that player's fighter (World.players). null: M0's reading, the fighter id. */
   playerFighter: ((player: number) => Fighter | undefined) | null = null;
+  /**
+   * Developer-mode invariant checks (docs/M1-DESIGN.md §4.1, RF-6), off by default: on, `addDrop` throws in world mode,
+   * where every dropped or landed weapon is an entity the world takes back (`onWeaponDropped` and `onProjectileLanded`
+   * return true). The sim has no build mode of its own, so whoever builds a world in a dev build turns this on.
+   * It never changes an outcome: it only stops a run that has broken the invariant.
+   */
+  devChecks = false;
+  /**
+   * Who is sprinting this tick (MOVE_SPRINT held, moving, fresh enough, light enough, §5.5): decided in tickTimers,
+   * where the drain replaces the regen, and read by locomote in the same tick, so the two agree at the stamina floor.
+   * Rebuilt every tick before it is read; never saved.
+   */
+  private readonly sprinters = new Set<Fighter>();
 
   constructor(seed = 7) {
     this.rng = new Rng(seed);
@@ -386,6 +448,7 @@ export class CombatSim {
     const i = this.fighters.indexOf(f);
     if (i >= 0) this.fighters.splice(i, 1);
     this.ais.delete(f);
+    this.sprinters.delete(f);
     for (const o of this.fighters) if (o.target === f) o.target = null;
   }
 
@@ -424,6 +487,9 @@ export class CombatSim {
     for (const f of fs) this.autoDefend(f);
     for (const f of fs) this.tryBufferedAttack(f);
     for (const f of fs) this.tryPickup(f);
+    // World mode: a buffered verb starts here, re-validated (docs/M1-DESIGN.md §3 phase 3, §5.0).
+    const world = this.world;
+    if (world) for (const f of fs) world.tryVerb(f);
     for (const f of fs) this.bleed(f);
     for (const f of fs) this.locomote(f);
     this.separate();
@@ -459,7 +525,13 @@ export class CombatSim {
           if (c.button === 'pickup') {
             if (f.state !== 'pickup') f.pickupRequest = 12;
           } else if (c.button === 'jump') f.jumpRequest = MOVE_TUNING.jumpBufferFrames;
-          else f.press(c.button);
+          else if ((c.button === 'lpunch' || c.button === 'rpunch') && f.load?.mode === 'rope') {
+            // Holding a rope end, a punch hauls on it (docs/M1-DESIGN.md §3 phase 1a, §5.12): the press becomes a
+            // `pull` verb (on), handed to the world with this tick's verbs, in queue order. The client sends pull on
+            // and off itself (§10.7); this is the sim's own reading of a press, so a punch never swings with a rope
+            // end in the hand, whatever a client sends. Kicks still kick.
+            rest.push({ tick: c.tick, player: c.player, kind: 'verb', verb: 'pull', target: 0, charge: COMMAND_STEPS - 1 });
+          } else f.press(c.button);
           break;
       }
     }
@@ -478,7 +550,7 @@ export class CombatSim {
     if (this.ais.get(f)?.ownsTarget) return;
     const cur = f.target && f.target.alive ? f.target : null;
     if (cur && f.state === 'attack') return;
-    const reach = (o: Fighter) => f.distanceTo(o) - (o.scale - 1) * 0.35;
+    const reach = (o: Fighter) => f.distanceTo(o) - sizeBias(o);
     let best: Fighter | null = null;
     let bestD = Infinity;
     for (const o of this.opponents(f)) {
@@ -497,13 +569,21 @@ export class CombatSim {
     if (f.counter && --f.counter.frames <= 0) f.counter = null;
     if (!f.counter) f.perfectCounter = false;
     // Stamina: running burns it; easing off brings it back (slower when hurt).
-    if (f.alive) {
+    const sprint = this.canSprint(f);
+    if (sprint) this.sprinters.add(f);
+    else this.sprinters.delete(f);
+    if (sprint) {
+      // Sprinting (§5.5): a steady drain and no regen.
+      f.stamina = Math.max(0, f.stamina - MOVE_TUNING.sprintStaminaPerS * DT);
+    } else if (f.alive) {
       const run = f.footwork.run * f.motion.gait;
       const resting = f.free ? (run > 0.3 ? -0.035 * run : 0.085) : f.state === 'attack' ? 0 : 0.03;
       const hurt = 0.5 + 0.5 * (f.hp / f.stats.maxHp);
       // Holding a heavy weapon up is work in itself: you get your breath back slower.
       const burden = 1 - Math.min(0.5, 0.06 * heft(f.weapon, f.scale));
-      f.stamina = Math.max(0, Math.min(1, f.stamina + (resting > 0 ? resting * hurt * burden : resting) * DT));
+      // So is a load in the hands (§5.1, SPEC:387): exactly 1 with empty hands.
+      const loaded = loadRegen(f);
+      f.stamina = Math.max(0, Math.min(1, f.stamina + (resting > 0 ? resting * hurt * burden * loaded : resting) * DT));
     }
     for (const k of Object.keys(f.defenseCooldown) as DefenseKind[]) {
       if (f.defenseCooldown[k] > 0) f.defenseCooldown[k]--;
@@ -518,6 +598,17 @@ export class CombatSim {
     if (f.target && f.target.state !== 'hitstun' && f.target.state !== 'guardbreak' && f.target.state !== 'knockdown') {
       f.combo = 0;
     }
+  }
+
+  /**
+   * Sprinting this tick (§5.5): MOVE_SPRINT held while walking freely, stamina above sprintMinStamina, not crouched
+   * (crouching wins over a sprint held with it), and nothing heavier than carryNoSprintKg in the hands (§5.1).
+   */
+  private canSprint(f: Fighter): boolean {
+    if ((f.moveFlags & MOVE_SPRINT) === 0 || (f.moveFlags & MOVE_CROUCH) !== 0) return false;
+    if (!f.alive || !f.free || f.stamina <= MOVE_TUNING.sprintMinStamina) return false;
+    if ((f.load?.massKg ?? 0) > MOVE_TUNING.carryNoSprintKg) return false;
+    return Math.hypot(f.moveInput.x, f.moveInput.z) > 0.1;
   }
 
   private advance(f: Fighter) {
@@ -688,6 +779,9 @@ export class CombatSim {
   private autoDefend(f: Fighter) {
     // (A sparring dummy — an AI told to stand there — doesn't react either.)
     if (!f.autoDefense || !f.alive || this.ais.get(f)?.cfg.passive) return;
+    // Arms full: carrying or dragging, nothing comes up on its own (§5.1; an ape punishes a player who drags a log
+    // through its home).
+    if (f.load && (f.load.mode === 'carry' || f.load.mode === 'drag')) return;
     // Rocked by one, you can still get the guard up for the next once the first jolt has
     // passed — covering up, not slipping (that takes balance you haven't got back yet).
     const covering = f.state === 'hitstun' && f.stateFrame >= COVER_AFTER;
@@ -777,6 +871,11 @@ export class CombatSim {
   private tryBufferedAttack(f: Fighter) {
     const b = f.buffer;
     if (!b) return;
+    // No strikes with a load carried in the arms (a tool is wielded, not carried, §5.1): the press is spent.
+    if (f.load?.mode === 'carry') {
+      f.buffer = null;
+      return;
+    }
     if (b.frames-- <= 0 || !f.alive) {
       f.buffer = null;
       return;
@@ -791,8 +890,9 @@ export class CombatSim {
   private locomote(f: Fighter) {
     const lockT = f.target && f.target.alive ? f.target : null;
     const lockD = lockT ? f.distanceTo(lockT) : Infinity;
-    // Squaring up to a giant happens further out.
-    const big = lockT ? Math.max(f.scale, lockT.scale) : 1;
+    // Squaring up to a giant happens further out (a ruler counts as no bigger than RULER_TUNING.lockScale, §4.6: the
+    // player doesn't square up to the giant from 14.85 m).
+    const big = lockT ? Math.max(lockSize(f), lockSize(lockT)) : 1;
     f.lockedOn = lockD < (f.lockedOn ? FACING.unlockRange : FACING.lockRange) * big;
     // A downed or tripped body's position belongs to its physics body (the world's slab or ruler body).
     const external = this.physicsOwnsDowned && (f.state === 'knockdown' || f.state === 'ko' || f.state === 'tripped');
@@ -806,7 +906,18 @@ export class CombatSim {
     // Footwork. Free fighters walk; hand strikes can keep stepping at reduced speed;
     // everything else keeps (and bleeds off) the momentum it had going in.
     const handStrike = f.state === 'attack' && f.move?.layer === 'upper';
-    if (f.free || handStrike) {
+    const drive = f.drive;
+    if (drive && f.free) {
+      // A mind's drive (the giant, scripted charges; §6.1, §6.4): walk along its heading, reaching its speed at its
+      // acceleration. (The mind turns the heading at its own rate; updateFacing turns the body after it.)
+      _want.set(Math.sin(drive.heading), 0, Math.cos(drive.heading)).multiplyScalar(drive.speed);
+      _dv.subVectors(_want, f.walkVel);
+      const most = drive.accel * DT;
+      const change = _dv.length();
+      if (change > most) _dv.multiplyScalar(most / change);
+      f.walkVel.add(_dv);
+      f.state = f.walkVel.lengthSq() > 0.04 || drive.speed > 0.1 ? 'walk' : 'idle';
+    } else if (f.free || handStrike) {
       const mi = f.moveInput;
       const raw = Math.hypot(mi.x, mi.z);
       const len = Math.min(1, raw);
@@ -822,7 +933,9 @@ export class CombatSim {
         const sp =
           f.stats.walkSpeed * len * f.motion.speed * (locked && dot < -0.3 ? 0.72 : 1) * turnFirst * (handStrike ? 0.6 : 1) *
           // Lugging something heavy slows you down.
-          (1 - Math.min(0.25, 0.035 * heft(f.weapon, f.scale)));
+          (1 - Math.min(0.25, 0.035 * heft(f.weapon, f.scale))) *
+          // Sprint, crouch and what the hands hold (§5.1, §5.5, §5.12): exactly 1 for none of them.
+          this.gaitMul(f);
         _want.set(mi.x / raw, 0, mi.z / raw).multiplyScalar(sp);
       }
       // Accelerate rather than snap, so starts/stops have weight — more of it the more
@@ -860,6 +973,25 @@ export class CombatSim {
   }
 
   /**
+   * How the walk speed is scaled this tick (§5.1, §5.5, §5.12): sprinting × sprintMul, crouched × crouchSpeedMul; a
+   * carried load (a rope end counts as one, at the rope's mass) by the carry curve, a dragged one × dragSpeedMul;
+   * hauling on a rope (braced: posture haulRope) × pullWalkMul. Exactly 1 with none of them, so DungeonStyle's speed
+   * is unchanged bit for bit.
+   */
+  private gaitMul(f: Fighter): number {
+    let k = 1;
+    if (this.sprinters.has(f)) k *= MOVE_TUNING.sprintMul;
+    else if ((f.moveFlags & MOVE_CROUCH) !== 0) k *= MOVE_TUNING.crouchSpeedMul;
+    const load = f.load;
+    if (load) {
+      if (load.mode === 'drag') k *= MOVE_TUNING.dragSpeedMul;
+      else k *= Math.max(MOVE_TUNING.carrySpeedMin, 1 - MOVE_TUNING.carrySpeedPerKg * load.massKg);
+      if (load.mode === 'rope' && f.posture?.id === 'haulRope') k *= MOVE_TUNING.pullWalkMul;
+    }
+    return k;
+  }
+
+  /**
    * Soft lock-on: fighters turn toward their target, but not instantly. Strafing leads
    * the body into the strafe, small offsets are left alone, and committed moves only get
    * a little aim assist early in their wind-up — so angles and positioning matter.
@@ -880,7 +1012,11 @@ export class CombatSim {
 
     let desired: number | null = null;
     let deadzone = 0;
-    if (t && f.lockedOn) {
+    if (f.drive && f.free) {
+      // Driven by a mind: the body turns to the drive's heading, as a free walker turns to where it goes.
+      desired = f.drive.heading;
+      rate = FACING.freeTurnRate;
+    } else if (t && f.lockedOn) {
       const toT = Math.atan2(t.pos.x - f.pos.x, t.pos.z - f.pos.z);
       desired = toT;
       if (moving && f.free) {
@@ -911,6 +1047,9 @@ export class CombatSim {
         const a = fs[i];
         const b = fs[j];
         if (!a.alive || !b.alive || a.state === 'knockdown' || b.state === 'knockdown' || a.state === 'tripped' || b.state === 'tripped') continue;
+        // World mode: a standing ruler bearing down on someone isn't pushed off them; its zones meet theirs and the
+        // contact pipeline scores the hit this tick (docs/M1-DESIGN.md §4.4, RF-5).
+        if (this.world && (rulerCloses(a, b) || rulerCloses(b, a))) continue;
         const dx = b.pos.x - a.pos.x;
         const dz = b.pos.z - a.pos.z;
         const d = Math.hypot(dx, dz);
@@ -1005,12 +1144,13 @@ export class CombatSim {
         }
         if (worst < 0.03 * Math.max(1, a.scale) || !at) continue;
         const dir = new Vector3(d.pos.x - a.pos.x, 0, d.pos.z - a.pos.z).normalize();
-        if (!dodged && hitGuard && (d.state === 'blockstun' || (d.state === 'defend' && d.defense?.def.kind === 'block'))) {
+        if (!dodged && hitGuard && !d.ruler && (d.state === 'blockstun' || (d.state === 'defend' && d.defense?.def.kind === 'block'))) {
           // The guard caught it.
           a.hitThisAttack = true;
           this.block(a, d, m, at, dir);
-        } else if (kick && !dodged && m.id === 'teep') {
+        } else if (kick && !dodged && m.id === 'teep' && !d.ruler) {
           // A push kick that lands with the shin / knee still shoves: that's its job.
+          // (Not a ruler: a strike never shoves its body, SPEC:305; it bumps off like any other jam, below.)
           a.hitThisAttack = true;
           a.impact('rebound', 2, 10);
           const mass = (a.scale * a.scale) / (d.scale * d.scale);
@@ -1127,6 +1267,11 @@ export class CombatSim {
       if (a.hitThisAttack || contacts.some((c) => c.attacker === a)) continue;
       const swinging = a.inWeaponContact();
       if (!swinging && !a.inActiveFrames()) continue;
+      // World mode: the world's things take the place of the arena's props (docs/M1-DESIGN.md §5.2).
+      if (this.world) {
+        this.strikeWorld(this.world, a, swinging);
+        continue;
+      }
       const solidAt = this.walkable.solidAt?.bind(this.walkable);
       if (!solidAt) break;
       const pts = swinging && a.weapon ? bladePoints(a, a.weapon).slice(-3) : [strikePoint(a, a.move!, new Vector3())];
@@ -1149,6 +1294,25 @@ export class CombatSim {
     for (const c of contacts) this.applyStrike(c);
   }
 
+  /**
+   * A swing that found no body this tick, offered to the world (docs/M1-DESIGN.md §5.2, the strike seam): armed, the
+   * blade's samples from last tick's to this tick's (a fast swing can't skip a trunk); unarmed, the fist or foot. What
+   * the world reports it met (a tree chopped, a rope cut, the ground dug, a prop pushed, or a clang) stops the strike
+   * there, one world contact per swing, with the reaction the world chose.
+   */
+  private strikeWorld(world: WorldPort, a: Fighter, swinging: boolean) {
+    const w = swinging && a.weapon ? a.weapon : null;
+    const pts = w ? bladePoints(a, w) : [strikePoint(a, a.move!, new Vector3())];
+    const offs = w ? sampleOffsets(w) : [0];
+    const prev = w ? this.prevBlade.get(a) : undefined;
+    const hit = world.strike(a, prev && prev.length === pts.length ? prev : null, pts, offs, w);
+    if (!hit) return;
+    a.hitThisAttack = true;
+    a.impact(hit.reaction.mode, hit.reaction.hold, hit.reaction.retract);
+    // (The world reports its own effects as world events; a clang is DungeonStyle's.)
+    if (hit.effect === 'clang') this.events.push({ type: 'clang', f: a, point: hit.point.clone(), metal: false });
+  }
+
   private applyStrike({ attacker: a, defender: d, move: m, height, point, zone, bone, power = 1, haft = false, swing }: Contact) {
     // Two contacts in one frame: the first may already have dropped them, or cut off the
     // arm the second was coming from.
@@ -1157,7 +1321,8 @@ export class CombatSim {
     if (dir.lengthSq() < 1e-6) dir.copy(a.forward);
     dir.normalize();
 
-    if (d.state === 'defend' && d.defense) {
+    // (Rulers never defend or block, §4.6: every strike on one goes to hit(), and from there to the ruler's rule.)
+    if (!d.ruler && d.state === 'defend' && d.defense) {
       const def = d.defense.def;
       // (One you threw yourself, on Q / E, is set almost at once — you saw it coming.)
       const inPosition = d.defense.phase !== 'startup' || d.stateFrame >= def.startup - 1 || (d.defenseManual && d.stateFrame >= 1);
@@ -1177,13 +1342,15 @@ export class CombatSim {
         return;
       }
     }
-    if (d.state === 'blockstun' && m.blockable && height !== 'low' && canGuard(d)) {
+    if (!d.ruler && d.state === 'blockstun' && m.blockable && height !== 'low' && canGuard(d)) {
       this.block(a, d, m, point, dir);
       return;
     }
     // Not enough behind it (still accelerating, or the follow-through is spent): the
     // weapon just thuds against the body and stops.
-    if (m.weapon && power < MIN_POWER) {
+    // (On a ruler the rule decides even a weak swing: rulerHit bumps off what doesn't beat the zone, and nothing a
+    // strike does shoves its body, SPEC:305, §4.6.)
+    if (m.weapon && power < MIN_POWER && !d.ruler) {
       a.impact('rebound', 2, 10);
       this.knock(d, a, true);
       d.vel.addScaledVector(dir, 0.4);
@@ -1268,7 +1435,20 @@ export class CombatSim {
     else a.impact('rebound', 2, m.weapon ? 11 : 8);
   }
 
-  private hit(a: Fighter, d: Fighter, m: MoveDef, point: Vector3, dir: Vector3, zone: HurtZone, bone: BoneName, power = 1, haft = false, thrown: WeaponDef | null = null, swing?: Vector3) {
+  /**
+   * A blow lands. `rule` (world mode, thrown weapons, §4.4): the blow's HP, energy and toughness by the one damage rule,
+   * which replace DungeonStyle's damage (its multiplier chain) and the toughness line; DS's knockback, hitstun, gore
+   * and events stay. (It is §1.5.2's `ruleDamageHp`, with the energy and toughness it came from for the `hit` event.)
+   * Trailing and defaulted, so the tests' positional calls keep their meaning.
+   */
+  private hit(a: Fighter, d: Fighter, m: MoveDef, point: Vector3, dir: Vector3, zone: HurtZone, bone: BoneName, power = 1, haft = false, thrown: WeaponDef | null = null, swing?: Vector3, rule: RuleBlow | null = null) {
+    // A ruler takes every blow through its own rule (docs/M1-DESIGN.md §4.6): its zones, toughness, wounds, recovery
+    // and the attacker's stick or rebound. None of what follows (poise, knockdown, hitstun, pushes, gore, bleeding)
+    // happens to it. For a thrown weapon `rule.hp` carries the blow's energy as E / K (see projectileStrike).
+    if (d.ruler && this.world) {
+      this.world.rulerHit(a, d, m, point, dir, zone, bone, power, haft, thrown, rule ? rule.hp : null);
+      return;
+    }
     // (A thrown weapon is no longer in the thrower's hand.)
     const held = thrown ?? a.weapon;
     // Caught on the haft: a blunt knock, not a cut.
@@ -1278,16 +1458,29 @@ export class CombatSim {
     const armored = armoredAgainst(d, m);
     // A tired arm hits softer (nothing behind it).
     const behind = thrown ? 1 : 0.5 + 0.5 * a.swingStamina;
-    let dmg = blowDamage(a, d, m, power, haft, thrown);
-    // The one damage rule (rule 2, SPEC:283; docs/M1-DESIGN.md §4.4): the blow carries dmg × meleeJPerDmg joules and
-    // the zone's toughness (hide + worn armour) takes its share first. With no toughness (every M1 human and ape)
-    // the line is skipped, so dmg stays exactly DungeonStyle's ((x·18)/18 is not always x).
-    const toughness = zoneToughness(d, zone);
+    let dmg: number;
+    let toughness: number;
     let energy = 0;
-    if (toughness > 0) {
-      energy = dmg * DAMAGE_TUNING.meleeJPerDmg;
-      dmg = hpFromEnergy(energy, toughness);
+    if (rule) {
+      // Thrown, in world mode: the rule already gave the HP (§4.4).
+      dmg = rule.hp;
+      energy = rule.energy;
+      toughness = rule.toughness;
+    } else {
+      dmg = blowDamage(a, d, m, power, haft, thrown);
+      // The one damage rule (rule 2, SPEC:283; docs/M1-DESIGN.md §4.4): the blow carries dmg × meleeJPerDmg joules
+      // and the zone's toughness (hide + worn armour) takes its share first. With no toughness (every M1 human and
+      // ape) the line is skipped, so dmg stays exactly DungeonStyle's ((x·18)/18 is not always x).
+      toughness = zoneToughness(d, zone);
+      if (toughness > 0) {
+        energy = dmg * DAMAGE_TUNING.meleeJPerDmg;
+        dmg = hpFromEnergy(energy, toughness);
+      }
     }
+    // DungeonStyle's instant kills (the crown split, losing the head or a leg) only for a blow that beats the zone's
+    // toughness (RR-12): an armoured zone or a hide can't be split or cut off by a blow that does no damage. With no
+    // toughness this is always true, so nothing changes for M1's humans and apes (or legacy CombatSim).
+    const beats = toughness === 0 || energy > toughness;
     d.hp = Math.max(d.minHp, d.hp - dmg);
     // Body shots empty the tank.
     d.stamina = Math.max(0, d.stamina - (zone === 'abdomen' ? 0.09 : zone === 'chest' ? 0.04 : 0.02) * Math.min(2, dmg / 8));
@@ -1330,7 +1523,7 @@ export class CombatSim {
     // Only a cut across the neck takes the head off.
     const head = bone === 'head' && w && !haft ? this.headStrike(a, d, m, w, point, swing, power, !!thrown) : null;
     let fatal: Fatal | null = null;
-    if (head?.fatal && d.minHp <= 0) {
+    if (head?.fatal && d.minHp <= 0 && beats) {
       fatal = head.fatal;
       d.hp = 0;
       // Wells up out of the top of the head.
@@ -1346,10 +1539,11 @@ export class CombatSim {
     const wound = w && w.cut > 0 && !d.isSevered(bone) ? this.addWound(d, bone, point, dmg, w.cut) : null;
     let sever: BoneName | null = null;
     const at = SEVER_AT[bone];
-    if (w && at && canSever(w, at) && d.minHp <= 0 && !d.isSevered(at) && !fatal && (at !== 'head' || head?.neck)) {
+    if (beats && w && at && canSever(w, at) && d.minHp <= 0 && !d.isSevered(at) && !fatal && (at !== 'head' || head?.neck)) {
       const dealt = (d.limbDamage[at] ?? 0) + dmg * w.cleave * (m.weight === 'heavy' ? 1.3 : 1);
       d.limbDamage[at] = dealt;
       // Your own limbs only come off with the blow that finishes you.
+      // TODO "multiplayer: check for death, not KO (SPEC:423)": a downed player bleeds out before dying (RR-22).
       const allowed = d.team !== 'player' || ko;
       const tough = (LIMB_TOUGHNESS[at] ?? 30) * d.scale ** 1.5;
       if (allowed && (dealt >= tough || (ko && w.cleave >= 0.45 && this.rng.chance(0.65)))) sever = at;
@@ -1411,7 +1605,7 @@ export class CombatSim {
       sever,
       fatal,
       tear,
-      ...(toughness > 0 ? { energy, toughness } : {}),
+      ...(rule || toughness > 0 ? { energy, toughness } : {}),
     });
   }
 
@@ -1538,7 +1732,8 @@ export class CombatSim {
 
   /** Bleeding: every open cut drains a little health; enough of it and they go down. */
   private bleed(f: Fighter) {
-    if (!f.wounds.length) return;
+    // (A ruler doesn't bleed DungeonStyle's way: its wounds are RulerState's, §4.6.)
+    if (f.ruler || !f.wounds.length) return;
     let rate = 0;
     for (const w of f.wounds) {
       w.bleed = Math.max(w.floor, w.bleed * 0.9993);
@@ -1556,6 +1751,9 @@ export class CombatSim {
 
   /** Puts a weapon on the floor. */
   addDrop(weapon: WeaponDef, x: number, z: number, yaw = 0, from?: Vector3): Drop {
+    // In world mode a weapon is an entity the world takes back (onWeaponDropped, onProjectileLanded), never a DS drop
+    // (docs/M1-DESIGN.md §4.1, RF-6).
+    if (this.devChecks && this.world) throw new Error(`CombatSim.addDrop: a ${weapon.id} reached a DS drop in world mode`);
     const p = new Vector3(x, 0, z);
     this.walkable.resolve(p, 0.25);
     p.y = this.groundQuery.heightAt(p.x, p.z);
@@ -1568,6 +1766,11 @@ export class CombatSim {
   /** Lets go of the weapon in hand (it lands by the rear hand). */
   dropWeapon(f: Fighter) {
     if (!f.weapon) return;
+    // World mode: the tool in the hand is an entity, and the world lets go of it (§2.12, §5.1): no DS drop.
+    if (this.world?.onWeaponDropped(f)) {
+      f.weapon = null;
+      return;
+    }
     const at = fistPoint(f.rig, 'R', new Vector3());
     const w = f.weapon;
     f.weapon = null;
@@ -1607,6 +1810,13 @@ export class CombatSim {
    * Tired arms throw wilder.
    */
   private release(f: Fighter, m: MoveDef) {
+    // A throw aimed by the player (the throw verb, §5.11): a direction, never a target, at the rule's speed. One use:
+    // the world reads it too (a body launched along it), then it is spent either way.
+    const aimed = f.throwAim;
+    // World mode: something too big for a projectile leaves the hands as a physics body (§5.11).
+    const launched = this.world?.throwRelease(f, m) ?? false;
+    f.throwAim = null;
+    if (launched) return;
     const spec = m.throw!;
     let w: WeaponDef | null;
     if (spec.ammo) {
@@ -1619,8 +1829,8 @@ export class CombatSim {
       f.weapon = null;
     }
     const hand = fistPoint(f.rig, m.limb === 'handL' ? 'L' : 'R', new Vector3());
-    const t = f.target && f.target.alive ? f.target : null;
-    const aim = t ? t.rig.chest.pos.clone() : hand.clone().addScaledVector(f.forward, 6);
+    const t = !aimed && f.target && f.target.alive ? f.target : null;
+    const aim = aimed ? hand.clone().add(aimed.dir) : t ? t.rig.chest.pos.clone() : hand.clone().addScaledVector(f.forward, 6);
     const flat0 = new Vector3(aim.x - hand.x, 0, aim.z - hand.z);
     if (flat0.lengthSq() < 1e-6) flat0.copy(f.forward);
     flat0.normalize();
@@ -1630,14 +1840,16 @@ export class CombatSim {
     const dir0 = spins ? _up.clone() : flat0.clone();
     const com = centreOfMass(w);
     const pos = hand.clone().addScaledVector(dir0, com * f.scale);
-    // Longer arms whip faster.
-    const speed = spec.speed * Math.sqrt(f.scale);
-    let shot = aimBallistic(pos, aim, speed);
+    // Longer arms whip faster. (Aimed: launchSpeed(m, techSpeed) × the charge, the 400 J cap included, SPEC:285.)
+    const speed = aimed ? launchSpeed(w.mass * f.scale ** 3, aimed.techSpeed) * aimed.speedFrac : spec.speed * Math.sqrt(f.scale);
+    let shot = aimed ? null : aimBallistic(pos, aim, speed);
     if (t && shot) {
       aim.addScaledVector(t.vel, shot.time * 0.5);
       shot = aimBallistic(pos, aim, speed) ?? shot;
     }
-    const vel = shot?.vel ?? flat0.clone().multiplyScalar(speed * 0.9).setY(speed * 0.3);
+    const vel = aimed
+      ? aimed.dir.clone().normalize().multiplyScalar(speed)
+      : (shot?.vel ?? flat0.clone().multiplyScalar(speed * 0.9).setY(speed * 0.3));
     const wild = 0.02 + 0.04 * (1 - f.stamina);
     vel.applyAxisAngle(_up, this.rng.range(-wild, wild));
     vel.y += this.rng.range(-wild, wild) * speed;
@@ -1666,12 +1878,16 @@ export class CombatSim {
    * the floor like any other, for whoever gets to it.
    */
   private stepProjectiles() {
+    const world = this.world;
     for (let i = this.projectiles.length - 1; i >= 0; i--) {
       const p = this.projectiles[i];
       p.age++;
       const n = substeps(p);
       let landed = false;
+      // World mode: what the flight met in the world (it stops there and the world takes it back).
+      let metWorld = false;
       for (let k = 0; k < n && !landed; k++) {
+        const from = world ? p.pos.clone() : null;
         integrate(p, DT / n);
         const { points, at } = projectilePoints(p);
         if (p.live) {
@@ -1684,10 +1900,27 @@ export class CombatSim {
             }
           }
         }
+        if (world && from) {
+          // World mode (§4.1, RF-6): no 2-D wall test (a walkable bitmap reads every trunk, slope and staked log as a
+          // wall at any height); the world casts this flight segment against its entities and terrain instead. On a
+          // hit the weapon stops where the segment met it (toi: the fraction of from → to), still moving, and the
+          // world turns it back into an entity there (onProjectileLanded), so the contact pipeline scores the blow.
+          const to = p.pos.clone();
+          const met = world.projectile(p, from, to);
+          if (met) {
+            p.pos.copy(from).lerp(to, clamp(met.toi, 0, 1));
+            const speed = p.vel.length();
+            this.events.push({ type: 'thud', projectile: p, point: met.point.clone(), speed, wall: met.owner.kind !== 'terrain' });
+            p.live = false;
+            metWorld = true;
+            landed = true;
+            break;
+          }
+        }
         // Walls and props.
         const w = this.walkable;
         _probe.copy(p.pos);
-        if (!w.isWalkable(p.pos.x, p.pos.z) || w.solidAt?.(_probe, 0.05)) {
+        if (!world && (!w.isWalkable(p.pos.x, p.pos.z) || w.solidAt?.(_probe, 0.05))) {
           const speed = p.vel.length();
           if (p.live || speed > 2) this.events.push({ type: 'thud', projectile: p, point: p.pos.clone(), speed, wall: true });
           p.live = false;
@@ -1717,8 +1950,9 @@ export class CombatSim {
       if (landed || p.age > 900) {
         this.projectiles.splice(i, 1);
         const dir = projectileDir(p);
-        if (p.vel.length() > 0.5 && p.age <= 900) this.events.push({ type: 'thud', projectile: p, point: p.pos.clone(), speed: p.vel.length(), wall: false });
-        this.addDrop(p.weapon, p.pos.x, p.pos.z, Math.atan2(dir.x, dir.z));
+        if (!metWorld && p.vel.length() > 0.5 && p.age <= 900) this.events.push({ type: 'thud', projectile: p, point: p.pos.clone(), speed: p.vel.length(), wall: false });
+        // World mode: it is an entity again, at the projectile's pose with its velocity (§5.11): no DS drop.
+        if (!world?.onProjectileLanded(p)) this.addDrop(p.weapon, p.pos.x, p.pos.z, Math.atan2(dir.x, dir.z));
       }
     }
   }
@@ -1736,7 +1970,7 @@ export class CombatSim {
     // What's leading: for a spinning weapon, the edge (on the side the head turns
     // toward); for one flying straight, the point.
     let leading: boolean;
-    if (p.omega === 0) leading = along > w.length * 0.6 && projectileDir(p).dot(_v.copy(vp).normalize()) > 0.7;
+    if (p.omega === 0) leading = along > w.length * 0.6 && projectileDir(p).dot(_v.copy(vp).normalize()) > DAMAGE_TUNING.leadingCos;
     else {
       const edge = _e.crossVectors(p.axis, projectileDir(p)).normalize();
       leading = edge.dot(_v.copy(vp).normalize()) > 0.35;
@@ -1772,7 +2006,8 @@ export class CombatSim {
     // Bounces back off whatever it hit, tumbling.
     p.vel.multiplyScalar(-0.18);
     p.omega *= 0.3;
-    if (d.state === 'defend' && d.defense) {
+    // (Rulers never block, §4.6.)
+    if (!d.ruler && d.state === 'defend' && d.defense) {
       const def = d.defense.def;
       const facing = d.forward.dot(dir) < -0.3;
       if (def.blocks.includes(height) && facing && canGuard(d)) {
@@ -1780,11 +2015,12 @@ export class CombatSim {
         return;
       }
     }
-    if (d.state === 'blockstun' && height !== 'low' && canGuard(d) && d.forward.dot(dir) < -0.3) {
+    if (!d.ruler && d.state === 'blockstun' && height !== 'low' && canGuard(d) && d.forward.dot(dir) < -0.3) {
       this.block(p.owner, d, m, c.point, dir, w);
       return;
     }
-    this.hit(p.owner, d, m, c.point, dir, c.zone, c.bone, 1, !cuts, w, p.vel.clone().normalize());
+    const rule = this.world ? thrownRule(d, c.zone, c.bone, w, mass, vp, head && leading) : null;
+    this.hit(p.owner, d, m, c.point, dir, c.zone, c.bone, 1, !cuts, w, p.vel.clone().normalize(), rule);
   }
 
   /** Grab (or swap for) the nearest weapon in reach; with none in reach, drop yours. */
@@ -1834,7 +2070,7 @@ export class CombatSim {
         f.yaw = approachAngle(f.yaw, Math.atan2(dx, dz), 0.12);
         const near = 0.45 * f.scale;
         if (d > near) {
-          const k = Math.min(0.045 * f.scale, d - near) / d;
+          const k = Math.min(PICKUP_STEP * f.scale, d - near) / d;
           f.pos.x += dx * k;
           f.pos.z += dz * k;
         }
@@ -1853,8 +2089,73 @@ export class CombatSim {
         }
       }
     }
+    const work = f.work;
+    if (work && this.world) {
+      // A committed work action (docs/M1-DESIGN.md §5.0): turn to it and step in, then its effect lands at actAt
+      // through the world, which re-validates it.
+      if (f.stateFrame < work.actAt) faceWork(f, work);
+      if (f.stateFrame === work.actAt) {
+        this.world.completeWork(f);
+        // The world may have ended the action or started another: the fighter's state is the world's from here.
+        if (f.work !== work || f.state !== 'pickup') return;
+      }
+    }
     if (f.stateFrame >= f.stunFrames) f.enterLocomotion(6);
   }
+}
+
+/**
+ * A VERB_TUNING value (world/verbs/tuning.ts, P14), read through the registry by name at use time: combat.ts never
+ * imports a world module (docs/M1-DESIGN.md §4.4). Reached only in world mode, where the verb system has registered
+ * the table; without it this throws, naming the table.
+ */
+function verbTuning(key: 'faceTurnRate' | 'standOffM'): number {
+  const v = getTuningValue('VERB_TUNING', key);
+  if (typeof v !== 'number') throw new Error(`VERB_TUNING.${key} is not a number`);
+  return v;
+}
+
+/**
+ * A work action's approach (docs/M1-DESIGN.md §5.0): turn toward `faceAt` by VERB_TUNING.faceTurnRate of the
+ * remaining angle per tick, and step in as for a weapon on the floor until within VERB_TUNING.standOffM of it (× scale,
+ * as DungeonStyle's squat reach is).
+ */
+function faceWork(f: Fighter, w: Work) {
+  const dx = w.faceAt.x - f.pos.x;
+  const dz = w.faceAt.z - f.pos.z;
+  const d = Math.hypot(dx, dz);
+  if (d <= 1e-6) return;
+  f.yaw += angleDelta(f.yaw, Math.atan2(dx, dz)) * verbTuning('faceTurnRate');
+  const near = verbTuning('standOffM') * f.scale;
+  if (d > near) {
+    const k = Math.min(PICKUP_STEP * f.scale, d - near) / d;
+    f.pos.x += dx * k;
+    f.pos.z += dz * k;
+  }
+}
+
+/**
+ * How sharp a blade without its own `sharpness` counts in the thrown rule (docs/M1-DESIGN.md §4.4: "default
+ * `edge === 'blade' ? 0.8 : 0`"). TODO(P02a-fix): a §9 starting value with no table yet; it belongs in DAMAGE_TUNING
+ * (sim/rules.ts) as `bladeSharpness` 0.8 (unit sharpness, source §4.4, D-12). Only DungeonStyle's weapons lack the
+ * field; every tool the world makes carries its head's sharpness (synthWeapon, §5.2).
+ */
+const BLADE_SHARPNESS = 0.8;
+
+/**
+ * A thrown weapon's blow by the one damage rule (world mode; docs/M1-DESIGN.md §4.4, D-12): m_eff = the reduced mass of
+ * the weapon and the struck bone, v = the arriving part's speed relative to the body, s = the weapon's sharpness when
+ * its point or edge leads (DungeonStyle's leading test), else 0; HP = max(0, E − T) / K against the zone's toughness.
+ * A ruler's zone and toughness are its own rule's (rulerHit classifies the zone, §4.6), so for a ruler T = 0 here and
+ * `hp` carries E / K: rulerHit recovers E = hp × K.
+ */
+function thrownRule(d: Fighter, zone: HurtZone, bone: BoneName, w: WeaponDef, mass: number, vp: Vector3, leads: boolean): RuleBlow {
+  const mEff = reducedMass(mass, boneMass(d, bone));
+  const v = Math.hypot(vp.x - d.vel.x - d.walkVel.x, vp.y, vp.z - d.vel.z - d.walkVel.z);
+  const s = leads ? (w.sharpness ?? (w.edge === 'blade' ? BLADE_SHARPNESS : 0)) : 0;
+  const energy = impactEnergy(mEff, v, s);
+  const toughness = d.ruler ? 0 : zoneToughness(d, zone);
+  return { hp: hpFromEnergy(energy, toughness), energy, toughness };
 }
 
 /** Which side of the defender a strike arrives from: +1 their right, -1 their left. */
@@ -1959,7 +2260,8 @@ export function bodySpheres(d: Fighter): HurtSphere[] {
 function overlapBody(points: Vector3[], r: number, d: Fighter, reach?: number[]): { point: Vector3; zone: HurtZone; bone: BoneName; index: number } | null {
   let best: { point: Vector3; zone: HurtZone; bone: BoneName; index: number } | null = null;
   let bestKey = -Infinity;
-  const spheres = bodySpheres(d);
+  // A ruler's melee volumes add its knees and elbows to the body (§2.8): without them no soft zone is in reach.
+  const spheres = d.ruler ? rulerVolumes(d) : bodySpheres(d);
   for (let i = 0; i < points.length; i++) {
     const p = points[i];
     for (const s of spheres) {
@@ -1977,7 +2279,8 @@ function overlapBody(points: Vector3[], r: number, d: Fighter, reach?: number[])
 }
 
 function overlap(strike: Vector3, radius: number, d: Fighter, height: Height): { point: Vector3; zone: HurtZone; bone: BoneName } | null {
-  for (const s of hurtSpheres(d, height)) {
+  // (A fist or foot finds a ruler's volumes at whatever height they are: a kick at a giant's knee lands on the knee.)
+  for (const s of d.ruler ? rulerVolumes(d) : hurtSpheres(d, height)) {
     const dist = strike.distanceTo(s.center);
     if (dist < radius + s.r) {
       _c.subVectors(strike, s.center);
