@@ -104,6 +104,8 @@ export const VERB_TUNING = defineTuning(
     carryShoulderUpM: 1.55,
     carryShoulderSideM: 0.2,
     repeatStopInput: 0.1,
+    takeReachM: 0.85,
+    workStepM: 0.045,
   },
   {
     targetRadiusM: { unit: 'm', source: 'SPEC:406' },
@@ -191,6 +193,16 @@ export const VERB_TUNING = defineTuning(
     carryShoulderUpM: { unit: 'm × scale above the feet', source: 'NEW: a long load on the shoulder (§5.1 carryShoulder)', min: 0 },
     carryShoulderSideM: { unit: 'm × scale to the right', source: 'NEW: a long load on the shoulder (§5.1 carryShoulder)' },
     repeatStopInput: { unit: 'move input (0..1)', source: 'NEW: §5.4 "strokes until … the player moves" (DS: moving = input > 0.1)', min: 0, max: 1 },
+    takeReachM: {
+      unit: 'm × scale, horizontal from the feet',
+      source: "NEW: §5.0 Reach, rule 3: a take's hands close only this near the target (DS advancePickup's grab reach, 0.85 × scale)",
+      min: 0,
+    },
+    workStepM: {
+      unit: 'm × scale per tick',
+      source: "DS (PICKUP_STEP, combat.ts:144): a work action's step-in (CombatSim faceWork), which plans a take's walk-in",
+      min: 0,
+    },
   },
 );
 

@@ -1,6 +1,7 @@
 // Hands, belt and back, and the verb system's machinery (docs/M1-DESIGN.md §5.0, §5.1, §5.2 focus, §5.13; package
-// P14), headless, through commands only: take (wield, carry, drag, a rope end), drop, stow, draw; the 40 / 150 kg
-// limits; the drag lab as a test ([B lab: drag.ts]: 150 kg at ≥ 1.5 m/s with 600 N, 300 kg < 0.05 m/s); belt and back
+// P14), headless, through commands only: take (wield, carry, drag, a rope end; the walk-in and the hands' reach at
+// actAt; two-handed tools and a severed left forearm), drop (in any state), stow, draw; the 40 / 150 kg limits; the drag
+// lab as a test ([B lab: drag.ts]: 150 kg at ≥ 1.5 m/s with 600 N, 300 kg < 0.05 m/s); belt and back
 // limits; forced releases on knockdown and KO; a hit cancelling a work action; re-validation at start and at actAt
 // (RF-15); credit; the focus and verbAim; the radial's options; the system's save record.
 //
@@ -15,7 +16,7 @@ import { PLAYER_MOVES } from '../src/sim/moves';
 import { resetTuning, setTuningValue } from '../src/tuning/registry';
 import { groundRestY, logPrism, LYING_ALONG_X, prismRForMass, spawnBox, spawnLog, spawnRopeCoil, spawnStarterAxe, spawnStick, spawnStone, spawnTree } from '../src/world/factory';
 import { PHYSICS_TUNING, physicsReady } from '../src/world/physics';
-import type { Anchor, JointRecord, V3, WorldEvent } from '../src/world/types';
+import type { Anchor, JointRecord, RefuseReason, V3, WorldEvent } from '../src/world/types';
 import { type VerbStateRecord } from '../src/world/verbs/index';
 import { validateVerb, type VerbHandler, verbsFor, withVerbHandler } from '../src/world/verbs/targets';
 import { heldMembers, verbGeom } from '../src/world/verbs/tools';
@@ -212,6 +213,106 @@ describe('take (§5.1): wield, carry, drag, or refused', () => {
     expect(verbs(evs)).toEqual([expect.objectContaining({ verb: 'take', ok: false, reason: 'outOfRange' })]);
     expect(p.state).not.toBe('pickup');
   });
+
+  it('a far take walks in to standOffM before the hands close, which they do only within the hands’ reach (§5.0, rule 3)', async () => {
+    // A 1 m stick lying across the way at 1.6, 2.0 and 2.2 m: in range (2.5 m from the chest), out of the bend's own
+    // step-in. The player walks to it, then bends: the hands close within takeReachM of the feet.
+    for (const z of [1.6, 2.0, 2.2]) {
+      const w = await make();
+      const p = w.player!;
+      const id = stick(w, 1, 0.02, 0, z);
+      w.step();
+      const z0 = p.pos.z;
+      verb(w, { verb: 'take', target: id });
+      let start = -1;
+      let landed = -1;
+      let gap = Infinity;
+      for (let t = 0; t < 200 && landed < 0; t++) {
+        const r = w.step();
+        if (start < 0 && p.state === 'pickup') start = w.tick;
+        if (verbs(r.world, 'take').length) {
+          expect(verbs(r.world, 'take'), `z ${z}`).toEqual([expect.objectContaining({ ok: true, entity: id })]);
+          landed = w.tick;
+          gap = z - 0.02 - p.pos.z;
+        }
+      }
+      untilFree(w);
+      expect(p.inventory!.hands?.entity, `z ${z}`).toBe(id);
+      // It walked in, and the hands closed in their reach (DS's 0.85 m grab reach), near the stand-off.
+      expect(p.pos.z - z0, `z ${z}`).toBeGreaterThan(z - 0.02 - z0 - VERB_TUNING.takeReachM);
+      expect(gap, `z ${z}`).toBeLessThanOrEqual(VERB_TUNING.takeReachM);
+      expect(gap, `z ${z}`).toBeLessThanOrEqual(VERB_TUNING.standOffM + 0.05);
+      // The walk came before the bend: the hands closed later than a near take's would.
+      const base = Math.round(VERB_TUNING.takeFramesBase + VERB_TUNING.takeFramesPerKg * ent(w, id).mass);
+      expect(landed - start, `z ${z}`).toBeGreaterThan(Math.round(base * VERB_TUNING.takeGrabFrac));
+    }
+  });
+
+  it('a take whose target is still out of the hands’ reach at actAt is refused outOfReach with no effect', async () => {
+    // Moved during the work action from 1.2 m to 2.1 m ahead: still in range (2.5 m from the chest), out of reach.
+    const w = await make();
+    const p = w.player!;
+    const id = stick(w, 1, 0.02, 0, 1.2);
+    w.step();
+    verb(w, { verb: 'take', target: id });
+    run(w, 4);
+    expect(p.work?.kind).toBe('take');
+    const e = ent(w, id);
+    w.entities.setPose(e, { p: { x: 0, y: e.pose.p.y, z: 2.1 }, q: e.pose.q });
+    const evs = untilFree(w);
+    expect(verbs(evs, 'take')).toEqual([expect.objectContaining({ ok: false, reason: 'outOfReach' })]);
+    expect(p.inventory!.hands).toBeNull();
+    expect(p.weapon).toBeNull();
+    expect(e.state).toBe('free');
+    expect(e.credit).toEqual([]);
+    expect(e.releasedBy).toBeFalsy();
+
+    // Above the reach of a standing player's hands (a stick on a fixed 2.6 m block in front): refused the same way.
+    const w2 = await make(23);
+    const p2 = w2.player!;
+    spawnBox(w2, { p: { x: 0, y: 1.3, z: 1.0 }, size: [1.2, 2.6, 0.5], material: 'dryWood', state: 'fixed', look: 'box' });
+    const high = spawnStick(w2, { p: { x: 0, y: 2.63, z: 1.0 }, length: 1, r: 0.02 });
+    run(w2, 10);
+    expect(ent(w2, high).pose.p.y).toBeGreaterThan(2.5);
+    expect(validateVerb(w2, p2, { tick: 0, player: 1, kind: 'verb', verb: 'take', target: high })).toEqual({ ok: true });
+    verb(w2, { verb: 'take', target: high });
+    const evs2 = untilFree(w2);
+    expect(verbs(evs2, 'take')).toEqual([expect.objectContaining({ ok: false, reason: 'outOfReach' })]);
+    expect(p2.inventory!.hands).toBeNull();
+    expect(ent(w2, high).state).toBe('free');
+    expect(ent(w2, high).credit).toEqual([]);
+  });
+
+  it('a two-handed tool can’t be wielded or drawn with the left forearm severed (DS tryPickup); a one-handed one can', async () => {
+    const w = await make();
+    const p = w.player!;
+    const twoHand = stick(w, 1, 0.02, -0.4, 1.0);
+    const oneHand = spawnStone(w, { p: { x: 0.4, y: 0.15, z: 1.0 }, mass: 1 });
+    w.step();
+    const take = (target: number) => validateVerb(w, p, { tick: 0, player: 1, kind: 'verb', verb: 'take', target });
+    expect(take(twoHand)).toEqual({ ok: true });
+    // On the back while both arms are on; then the left forearm goes.
+    verb(w, { verb: 'take', target: twoHand });
+    untilFree(w);
+    expect(p.weapon?.style).toBe('twoHand');
+    verb(w, { verb: 'stow', target: 0, slot: 3 });
+    untilFree(w);
+    expect(p.inventory!.back).toBe(twoHand);
+    p.severed.add('foreArmL');
+    verb(w, { verb: 'draw', target: 0, slot: 3 });
+    expect(verbs(untilFree(w), 'draw')).toEqual([expect.objectContaining({ ok: false, reason: 'cantAct' })]);
+    expect(p.inventory!.back).toBe(twoHand);
+    expect(p.inventory!.hands).toBeNull();
+    // A stick on the ground: refused; a stone (one-handed): wielded.
+    const loose = stick(w, 1, 0.02, 0, 1.4);
+    w.step();
+    expect(take(loose)).toEqual({ ok: false, reason: 'cantAct' });
+    expect(take(oneHand)).toEqual({ ok: true });
+    verb(w, { verb: 'take', target: oneHand });
+    untilFree(w);
+    expect(p.weapon?.id).toBe('stone');
+    expect(p.weapon?.style).toBe('oneHand');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -312,6 +413,38 @@ describe('wield and drop (§5.1, §5.2)', () => {
     expect(Math.hypot(v.x, v.z)).toBeGreaterThan(0.5);
     // A drop while free is a short committed action.
     expect(p.state).toBe('pickup');
+  });
+
+  it('drop works in any state: during hitstun the hands empty on the next tick, with no work action while not free', async () => {
+    for (const what of ['wield', 'carry'] as const) {
+      const w = await make();
+      const p = w.player!;
+      const id = what === 'wield' ? stick(w, 1, 0.02, 0, 1.2) : log(w, 20, 2.2, 0, 1.2);
+      w.step();
+      verb(w, { verb: 'take', target: id });
+      untilFree(w);
+      expect(p.inventory!.hands?.mode).toBe(what);
+      p.enterHitstun(30, 'hitHigh');
+      expect(p.free).toBe(false);
+      verb(w, { verb: 'drop', target: 0 });
+      const evs = run(w, 1);
+      expect(verbs(evs, 'drop'), what).toEqual([expect.objectContaining({ ok: true, entity: id })]);
+      expect(p.inventory!.hands, what).toBeNull();
+      expect(p.weapon).toBeNull();
+      expect(p.load).toBeNull();
+      expect(ent(w, id).state, what).toBe('free');
+      expect(ent(w, id).releasedBy?.fighter, what).toBe(p.id);
+      expect(p.verbRequest).toBeNull();
+      // Still in hitstun: no drop action started, then or once the hitstun is over.
+      expect(p.state).toBe('hitstun');
+      expect(p.work).toBeNull();
+      const states = new Set<string>();
+      for (let t = 0; t < 40; t++) {
+        w.step();
+        states.add(p.state);
+      }
+      expect([...states], what).not.toContain('pickup');
+    }
   });
 
   it('taking with a tool in hand swaps it: the old tool comes down where the new one lay', async () => {
@@ -698,6 +831,52 @@ describe('the radial (§5.13) and validation (§5.0)', () => {
     const order = verbsFor(w, p, { kind: 'entity', id: tree, at }).map((o) => o.verb);
     const rank = ['take', 'lash', 'tie', 'bend', 'untie', 'cut', 'shape'];
     expect([...order].sort((a, b) => rank.indexOf(a) - rank.indexOf(b))).toEqual(order);
+  });
+
+  it('lists every verb in §5.13’s fixed order with its own reason, once P15-P17 register (stand-in handlers)', async () => {
+    const w = await make();
+    const p = w.player!;
+    const recs = standInJoints(w);
+    // A rooted tree with a vine 2 m up whose loose end lies toward the player.
+    const { tree, vine } = spawnTree(w, { at: { x: 0, z: 2.6 }, diameter: 0.3, height: 8, vine: { anchorH: 2, lengthM: 4, yaw: Math.PI } });
+    w.step();
+    expect(recs.size).toBe(1);
+    // Stand-ins that refuse with a reason of their own, so each option shows whose rules it ran.
+    const standIn = (verb: VerbHandler['verb'], reason: RefuseReason, second = false): VerbHandler => ({
+      verb,
+      target: 'entity',
+      second,
+      validate: () => reason,
+      start: () => null,
+    });
+    const handlers = [
+      standIn('lash', 'noRope', true),
+      standIn('tie', 'noRope'),
+      standIn('bend', 'tooThick', true),
+      standIn('untie', 'outOfReach'),
+      standIn('cut', 'noEdge'),
+      standIn('shape', 'tooHard'),
+    ];
+    const withAll = <T>(run: () => T): T => handlers.reduceRight<() => T>((inner, h) => () => withVerbHandler(h, inner), run)();
+    const at = new Vector3(0, 1, 2.45);
+    withAll(() => {
+      expect(verbsFor(w, p, { kind: 'entity', id: tree, at })).toEqual([
+        { verb: 'take', needsSecond: false, label: 'Take', reasonIfDisabled: 'immovable' },
+        { verb: 'lash', needsSecond: true, label: 'Lash', reasonIfDisabled: 'noRope' },
+        { verb: 'tie', needsSecond: false, label: 'Tie', reasonIfDisabled: 'noRope' },
+        { verb: 'bend', needsSecond: true, label: 'Bend', reasonIfDisabled: 'tooThick' },
+        { verb: 'cut', needsSecond: false, label: 'Cut', reasonIfDisabled: 'noEdge' },
+        { verb: 'shape', needsSecond: false, label: 'Shape', reasonIfDisabled: 'tooHard' },
+      ]);
+      // A hanging vine: Untie, then Take end, then Cut; no plain Take, no Bend, no Shape.
+      expect(verbsFor(w, p, { kind: 'entity', id: vine!.rope, at: new Vector3(0, 0.05, 0.6) })).toEqual([
+        { verb: 'lash', needsSecond: true, label: 'Lash', reasonIfDisabled: 'noRope' },
+        { verb: 'tie', needsSecond: false, label: 'Tie', reasonIfDisabled: 'noRope' },
+        { verb: 'untie', needsSecond: false, label: 'Untie', reasonIfDisabled: 'outOfReach' },
+        { verb: 'take', needsSecond: false, label: 'Take end' },
+        { verb: 'cut', needsSecond: false, label: 'Cut', reasonIfDisabled: 'noEdge' },
+      ]);
+    });
   });
 
   it('refuses a dead fighter, an unknown target and an anchor off the target’s surface', async () => {

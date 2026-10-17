@@ -24,7 +24,7 @@ import type { Entity, Inventory, Pose3, PostureId, V3 } from '../types';
 import type { World } from '../world';
 import { WORLD_TUNING } from '../worldTuning';
 import { anchorPoint, backSlot, chestPoint, handPoint, registerVerb, ropeJoints, verbEvent, type VerbHandler, type WorkSpec } from './targets';
-import { heldMembers, heldShape, isElongated, isRooted, isRopeEntity, synthWeapon, takeMode, toolClass, verbGeom } from './tools';
+import { heldMembers, heldShape, isElongated, isRooted, isRopeEntity, synthWeapon, takeMode, toolClass, type ToolClass, verbGeom } from './tools';
 import { VERB_TUNING } from './tuning';
 
 type Hands = NonNullable<Inventory['hands']>;
@@ -423,6 +423,46 @@ export function ropeEndInReach(w: World, f: Fighter, rope: number): { joint: num
 // The verbs
 // ---------------------------------------------------------------------------
 
+/**
+ * Is `p` within the hands' reach for a take (§5.0 Reach, rule 3: what you can't reach, you can't take)? Within
+ * takeReachM × scale of the feet horizontally (DungeonStyle's grab reach: advancePickup closes the hands only within
+ * 0.85 × scale), and no higher than handReachM × scale above the chest point (the highest point a standing player
+ * reaches, about 2.5 m up). Measured horizontally from the feet because a take squats: a stick on the ground at
+ * standOffM is about 1.34 m from the chest, beyond handReachM, yet plainly in the hands' reach.
+ */
+export function inTakeReach(f: Fighter, p: V3): boolean {
+  const t = VERB_TUNING;
+  const s = f.scale;
+  return Math.hypot(p.x - f.pos.x, p.z - f.pos.z) <= t.takeReachM * s && p.y - chestPoint(f).y <= t.handReachM * s;
+}
+
+/** The point a take reaches for: a tied rope's loose end, or the target's surface point nearest the chest. */
+function takePoint(w: World, f: Fighter, e: Entity): V3 | null {
+  if (isRopeEntity(e) && e.state === 'tied') return ropeEndInReach(w, f, e.id)?.point ?? null;
+  return w.queries.projectPoint(e.id, chestPoint(f)).point;
+}
+
+/**
+ * The frames a take spends walking in before its own bend (§5.0: the player "steps in to standOffM" before the hands
+ * close). CombatSim's faceWork steps workStepM × scale toward faceAt on every frame before actAt (frames 1 .. actAt − 1)
+ * and stops at standOffM × scale. When the step-in that fits in the bend (grab − 1 frames) already brings the target
+ * within takeReachM, none; otherwise the frames the step-in needs to reach standOffM, so a highlighted thing 2 m away
+ * is walked to before the hands close. The hands' reach is checked again at actAt (inTakeReach), so a walk-in that is
+ * blocked or a target that moves ends in 'outOfReach' with no effect.
+ */
+function walkInFrames(f: Fighter, at: V3, grab: number): number {
+  const t = VERB_TUNING;
+  const s = f.scale;
+  const step = t.workStepM * s;
+  if (!(step > 0)) return 0;
+  const d = Math.hypot(at.x - f.pos.x, at.z - f.pos.z);
+  const near = t.standOffM * s;
+  const after = d <= near ? d : Math.max(near, d - Math.max(0, grab - 1) * step);
+  if (after <= t.takeReachM * s) return 0;
+  const ticks = Math.ceil((d - near) / step - GEOM_EPS);
+  return Math.max(0, ticks + 1 - grab);
+}
+
 /** Is a held object of this mode held in both hands? */
 function twoHandedFor(w: World, entity: number, mode: 'wield' | 'carry' | 'drag'): boolean {
   if (mode === 'drag') return true;
@@ -454,22 +494,46 @@ function validSlot(f: Fighter, slot: number | undefined): slot is number {
   return slot === backSlot(f) || (slot >= 0 && slot < Math.min(VERB_TUNING.beltSlots, backSlot(f)));
 }
 
-/** take (§5.1): wield a tool, carry ≤ 40 kg × scale², drag ≤ 150 kg × scale², or take a rope's loose end. */
+/**
+ * A two-handed tool needs both hands: with the left forearm severed it can't be wielded (DS tryPickup and
+ * advancePickup refuse a twoHand weapon then, and DS drops one when that arm is severed).
+ */
+function oneArmedTwoHand(f: Fighter, cls: ToolClass | null): boolean {
+  return !!cls && WEAPONS[cls].style === 'twoHand' && f.isSevered('foreArmL');
+}
+
+/**
+ * take (§5.1): wield a tool, carry ≤ 40 kg × scale², drag ≤ 150 kg × scale², or take a rope's loose end. A work action
+ * of takeFramesBase + takeFramesPerKg·m frames whose hands close at takeGrabFrac of it, after a walk-in when the target
+ * is beyond the bend's own step-in (walkInFrames); at actAt the target must be in the hands' reach (inTakeReach), or the
+ * take is refused 'outOfReach' with no effect.
+ */
 const take: VerbHandler = {
   verb: 'take',
   target: 'entity',
-  validate(w, f, cmd) {
+  validate(w, f, cmd, stage) {
     const inv = f.inventory;
     if (!inv) return 'cantAct';
     const e = w.entities.get(cmd.target)!;
-    if (isRopeEntity(e) && e.state === 'tied') return ropeEndInReach(w, f, e.id) ? null : 'noRopeEnd';
+    if (isRopeEntity(e) && e.state === 'tied') {
+      const end = ropeEndInReach(w, f, e.id);
+      if (!end) return 'noRopeEnd';
+      return stage === 'land' && !inTakeReach(f, end.point) ? 'outOfReach' : null;
+    }
     if (inv.hands && heldMembers(w, inv.hands.entity).includes(e.id)) return 'handsFull';
     if (e.state !== 'free' || isRooted(e) || w.entities.isAnchored(e)) return 'immovable';
     for (const id of heldMembers(w, e.id)) {
       const m = w.entities.get(id)!;
       if (m.state !== 'free' || isRooted(m)) return 'immovable';
     }
-    return takeMode(w, e.id, f.scale) ? null : 'tooHeavy';
+    const plan = takeMode(w, e.id, f.scale);
+    if (!plan) return 'tooHeavy';
+    if (plan.mode === 'wield' && oneArmedTwoHand(f, toolClass(w, e.id))) return 'cantAct';
+    if (stage === 'land') {
+      const p = takePoint(w, f, e);
+      if (!p || !inTakeReach(f, p)) return 'outOfReach';
+    }
+    return null;
   },
   start(w, f, cmd) {
     const t = VERB_TUNING;
@@ -477,16 +541,24 @@ const take: VerbHandler = {
     const end = isRopeEntity(e) && e.state === 'tied' ? ropeEndInReach(w, f, e.id) : null;
     const plan = end ? null : takeMode(w, e.id, f.scale);
     const mass = plan ? plan.massKg : e.mass;
-    const frames = Math.max(1, Math.round(t.takeFramesBase + t.takeFramesPerKg * mass));
-    const actAt = Math.max(1, Math.min(frames, Math.round(frames * t.takeGrabFrac)));
+    const base = Math.max(1, Math.round(t.takeFramesBase + t.takeFramesPerKg * mass));
+    const grab = Math.max(1, Math.min(base, Math.round(base * t.takeGrabFrac)));
     const faceAt = end ? end.point : w.queries.projectPoint(e.id, chestPoint(f)).point;
+    const walk = walkInFrames(f, faceAt, grab);
+    const frames = base + walk;
+    const actAt = grab + walk;
     const two = plan ? twoHandedFor(w, e.id, plan.mode) : false;
     const low = getPose(two ? 'pickupLow2' : 'pickupLow1');
-    const keys: TrackKey[] = [
+    const keys: TrackKey[] = [];
+    // Walking in, the body keeps the pose of what the hands hold now; then it bends as a near take does.
+    const cur = f.inventory?.hands;
+    const walking = cur ? holdPose(w, cur.entity, cur.mode === 'ropeEnd' ? null : cur.mode, cur.twoHanded) : 'guard';
+    if (walk > 0) keys.push({ f: walk, pose: getPose(walking), ease: 'inOut' });
+    keys.push(
       { f: actAt, pose: low, ease: 'inOut' },
       { f: Math.min(frames, actAt + t.takeHoldFrames), pose: low },
       { f: frames, pose: getPose(holdPose(w, e.id, plan?.mode ?? null, two)), ease: 'inOut' },
-    ];
+    );
     return { frames, actAt, faceAt, keys };
   },
   land(w, f, cmd) {
@@ -588,7 +660,8 @@ const draw: VerbHandler = {
     const id = slot === backSlot(f) ? inv.back : inv.belt[slot];
     if (id === null) return 'slotEmpty';
     const e = w.entities.get(id);
-    return e && e.state === 'stowed' ? null : 'slotEmpty';
+    if (!e || e.state !== 'stowed') return 'slotEmpty';
+    return oneArmedTwoHand(f, toolClass(w, id)) ? 'cantAct' : null;
   },
   start(_w, f) {
     return quickWork(f, VERB_TUNING.drawFrames, 1);
