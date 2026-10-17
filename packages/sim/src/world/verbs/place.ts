@@ -26,7 +26,10 @@
 //   see-saw it off), else 'noSupport'. The object then rests on its lower end and that support: its lower-end underside
 //   corner is pinned placeDropM above the lower support and the pitch is the one whose underside plane passes
 //   placeDropM above the support point (the command's quantised pitch is the client's estimate; the sim's is exact).
-//   INTERPRETATION: a sloped placement that is driven (an angled stake) needs no second support: it is anchored.
+//   INTERPRETATIONS: §5.7 casts "from the commanded pose by up to 0.6 m"; here the cast starts supportProbeUpM higher
+//   (as the lower end's ray does), so a client estimate that sinks the shape a little into its support still finds it.
+//   The centre-of-mass condition is added by rule 3 (a lean that would see-saw off is not offered as resting). A sloped
+//   placement that is driven (an angled stake) needs no second support: it is anchored.
 // - Clearance: every member, shrunk by placeShrinkM, overlaps no entity (other than its supports) and no fighter's
 //   damage colliders, the placer's own excepted (his hands are at it), and no fighter's capsule, the placer's included
 //   (a log through his own body is refused 'blocked'). Terrain is never tested (a driven end is in it).

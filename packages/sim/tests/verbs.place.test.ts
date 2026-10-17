@@ -9,7 +9,7 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { COMMAND_STEPS, toCm, type VerbCommand } from '../src/sim/commands';
 import { resetTuning } from '../src/tuning/registry';
-import { prismRForMass, spawnBox, spawnLog, spawnStick, spawnStone, spawnTree } from '../src/world/factory';
+import { prismRForMass, spawnBox, spawnGrass, spawnLog, spawnStick, spawnStone, spawnTree } from '../src/world/factory';
 import { PHYSICS_TUNING, physicsReady } from '../src/world/physics';
 import type { Entity, V3, WorldEvent } from '../src/world/types';
 import { axisPitch, PLACE_TUNING, planPlace, shrinkShape } from '../src/world/verbs/place';
@@ -308,6 +308,37 @@ describe('lying (§5.7)', () => {
     run(w, 30);
     hold(w, short);
     expect(refusal(w, verb(w, { verb: 'place', at: toCm({ x: 1.0, y: 0.1, z: 2 }), yaw: 64, pitch: 0 }))).toBe('noSupport');
+  });
+
+  it('a cover: bearers laid across a trench 0.4 m apart, and a grass bundle laid on two of them rests on them', async () => {
+    // AC-2(b)'s cover in small: rotten-wood bearers (r 0.02 m) across a 2 m trench, a 2 kg grass bundle (0.61 m long)
+    // laid between two bearers with its ends past them, so that rays from its two ends would pass between them.
+    const w = await make();
+    const p = w.player!;
+    for (let x = -2; x <= 2 + 1e-9; x += 0.25) for (let z = 1.5; z <= 2.5 + 1e-9; z += 0.25) w.terrain.lower(x, z, 20);
+    const bearers = [-0.4, 0, 0.4].map((x, i) => spawnStick(w, { p: { x: 3 + i * 0.3, y: 0.03, z: -1 }, length: 3, r: 0.02, material: 'rottenWood' }));
+    const grass = spawnGrass(w, { p: { x: -3, y: 0.05, z: -1 }, mass: 2 });
+    w.step();
+    [-0.4, 0, 0.4].forEach((x, i) => {
+      hold(w, bearers[i]);
+      place(w, { x, y: 0.03, z: 2 }, 0, 0);
+      expect(verbs(untilFree(w), 'place'), `bearer ${i}`).toEqual([expect.objectContaining({ ok: true, entity: bearers[i] })]);
+    });
+    run(w, 30);
+    const top = Math.max(...bearers.map((id) => ent(w, id).pose.p.y)) + 0.02;
+    const g = ent(w, grass);
+    expect(g.shape.kind).toBe('box');
+    if (g.shape.kind === 'box') expect(2 * g.shape.hx).toBeGreaterThan(0.6);
+    hold(w, grass);
+    place(w, { x: 0.2, y: top + 0.05, z: 2 }, 64, 0);
+    expect(verbs(untilFree(w), 'place')).toEqual([expect.objectContaining({ ok: true, entity: grass })]);
+    run(w, 120);
+    // On the bearers, flat, not fallen through.
+    expect(lowestY(g)).toBeGreaterThan(top - 0.01);
+    expect(lowestY(g)).toBeLessThan(top + 0.01);
+    expect(Math.abs(verbGeom.dirToWorld(g.pose, { x: 0, y: 1, z: 0 }).y)).toBeGreaterThan(0.999);
+    for (const id of bearers) expect(ent(w, id).pose.p.z).toBeCloseTo(2, 2);
+    expect(p.inventory!.hands).toBeNull();
   });
 });
 
