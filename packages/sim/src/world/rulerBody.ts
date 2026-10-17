@@ -193,6 +193,11 @@ interface RulerBody {
   readonly supports: Map<number, { tick: number; credit: string[] }>;
   /** The last support that vanished under it (a load break): a ledge trip this soon after it is a 'cover' trip. */
   coverBreak: { tick: number; cause: ImpactCause } | null;
+  /**
+   * The root's horizontal velocity as the last resolve proposed it (m/s; after the slope limit and the climb's cap, before
+   * the sweep), and that tick: legStrike reads it in phase 9 of the same tick (any other tick's reads as still).
+   */
+  move: { tick: number; x: number; z: number };
 }
 
 /** A shove queued in phase 3 for phase 4d (§4.7 step 5). */
@@ -283,6 +288,7 @@ export class RulerBodies {
       deflect: null,
       supports: new Map(),
       coverBreak: null,
+      move: { tick: -1, x: 0, z: 0 },
     });
   }
 
@@ -317,10 +323,12 @@ export class RulerBodies {
 
   /**
    * A standing ruler's shin met entity `e` (a new contact episode, phase 9b; `point` the contact, `n` its normal out of
-   * the shin): §4.7 step 6's rule for the leg itself, in D-11's order. A blocker (fixed, anchored, ≥ shoveLimitKg; not a
-   * fresh piece) met within deflectMaxDeg of its long axis is left to the mover, which deflects along it; otherwise,
-   * while the root moves faster than tripSpeed, an obstacle whose top lies between the ankle and the knee trips it
-   * 'obstacle', with the obstacle as the cause. Anything else (slow, a low or tall obstacle, a light one) is the mover's.
+   * the shin): §4.7 step 6's rule for the leg itself, in D-11's order, at the root speed this tick's resolve proposed
+   * (after the slope limit and the climb's cap). A blocker (fixed, anchored, ≥ shoveLimitKg; not a fresh piece) whose
+   * long axis lies within deflectMaxDeg of the motion (a round one: its tangent ⟂ n̂) is left to the mover, which
+   * deflects along it; otherwise, while the root moves faster than tripSpeed, an obstacle whose top lies between the
+   * ankle and the knee trips it 'obstacle', with the obstacle as the cause. Anything else (slow, a low or tall obstacle,
+   * a light one) is the mover's.
    * DEVIATION (§4.7 steps 4-6 decide the trip from the root's capsule sweep alone): SPEC:782 trips a ruler "when its
    * legs strike a blocking obstacle between ankle and knee height while it moves faster than 4 m/s", and a striding
    * shin reaches an obstacle before the 1.65 m capsule does (AC-5's log: 0.34 m, 3-4 ticks ahead at 6 m/s). By then the
@@ -336,25 +344,23 @@ export class RulerBodies {
     // A blocker whose top rises above its ankle (lower ones are stepped over, step 4), as the sweep's castBlocker.
     if (e.grace || !this.blocks(e) || !(entityTop(e) > f.pos.y + rulerAnkleM(f))) return;
     const T = RULER_BODY_TUNING;
-    const vx = f.vel.x + f.walkVel.x;
-    const vz = f.vel.z + f.walkVel.z;
-    const v = Math.hypot(vx, vz);
+    // v: the root's speed as this tick's phase 3 resolved it (after the slope limit and the climb's cap), as step 6.2
+    // reads it; a climbing giant driven fast moves at climbWalkMps.
+    const m = rb.move;
+    const v = m.tick === this.world.tick ? Math.hypot(m.x, m.z) : 0;
     if (!(v > T.tripSpeed)) return;
-    const ux = vx / v;
-    const uz = vz / v;
-    // n̂: horizontal, from the leg into the obstacle (the motion when the normal is vertical).
-    let nx = n.x;
-    let nz = n.z;
-    const nl = Math.hypot(nx, nz);
-    if (nl > TINY) {
-      nx /= nl;
-      nz /= nl;
-    } else {
-      nx = ux;
-      nz = uz;
+    const ux = m.x / v;
+    const uz = m.z / v;
+    // 6.1: along the obstacle, the mover deflects it when its capsule meets it. A long obstacle is judged by its axis
+    // against the motion alone (the normal of a shin's first touch may be vertical, or the motion itself when they began
+    // overlapped); a round one by the tangent ⟂ n̂ (n̂ horizontal, from the leg into it; the motion when it has none).
+    const axis = longAxisXZ(e);
+    let t: { x: number; z: number };
+    if (axis) t = axis;
+    else {
+      const nl = Math.hypot(n.x, n.z);
+      t = nl > TINY ? { x: -n.z / nl, z: n.x / nl } : { x: -uz, z: ux };
     }
-    // 6.1: along the obstacle, the mover deflects it when its capsule meets it.
-    const t = deflectAxis(e, nx, nz);
     const cos = Math.min(1, Math.abs(t.x * ux + t.z * uz));
     if (Math.acos(cos) < T.deflectMaxDeg * DEG) return;
     // 6.2: an obstacle whose top lies between the ankle and the knee.
@@ -650,6 +656,7 @@ export class RulerBodies {
     if (!climbing) [dx, dz] = this.slopeLimit(f, prev, dx, dz);
 
     // 4-6. The sweep against blocking-class entities: deflect, trip or block at the first hit.
+    rb.move = { tick: this.world.tick, x: dx / DT, z: dz / DT };
     const end = this.sweep(f, rb, r, prev, dx, dz, radius, true);
 
     // 1. Ground (relaxed while climbing: the root rises at climbRateMps, in place until the ground ahead is reachable).
@@ -1426,18 +1433,23 @@ function legBand(f: Fighter, groundY: number): { ankle: number; knee: number } {
  * it slides round the corner instead; on the long side the two are the same direction.
  */
 function deflectAxis(e: Entity, nx: number, nz: number): { x: number; z: number } {
+  const t = longAxisXZ(e);
+  if (t && Math.abs(t.x * nx + t.z * nz) <= Math.sin(RULER_BODY_TUNING.deflectMaxDeg * DEG)) return t;
+  return { x: -nz, z: nx };
+}
+
+/**
+ * A long obstacle's axis in the world, projected to xz and made unit (either sign), or null for a round one: a ball, a
+ * shape no longer than it is thick, or one whose axis is steeper than deflectAxisMinXZ (an upright trunk or stake).
+ */
+function longAxisXZ(e: Entity): { x: number; z: number } | null {
   const ax = principalAxis(e.shape);
   const q = e.pose.q;
   _q.set(q.x, q.y, q.z, q.w);
   _a.set(ax.dir.x, ax.dir.y, ax.dir.z).applyQuaternion(_q);
   const h = Math.hypot(_a.x, _a.z);
   const long = e.shape.kind !== 'ball' && ax.max - ax.min > 2 * ax.crossHalf;
-  if (long && h >= RULER_BODY_TUNING.deflectAxisMinXZ) {
-    const tx = _a.x / h;
-    const tz = _a.z / h;
-    if (Math.abs(tx * nx + tz * nz) <= Math.sin(RULER_BODY_TUNING.deflectMaxDeg * DEG)) return { x: tx, z: tz };
-  }
-  return { x: -nz, z: nx };
+  return long && h >= RULER_BODY_TUNING.deflectAxisMinXZ ? { x: _a.x / h, z: _a.z / h } : null;
 }
 
 /** m: the highest point of an entity's shape at its record pose (the pose as of the last physics step). */

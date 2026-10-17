@@ -677,6 +677,7 @@ const INVENTORY: Record<string, Record<string, string>> = {
     deflect: 'saved: bodies[].ruler (its deflect)',
     supports: 'saved: bodies[].ruler (its supports)',
     coverBreak: 'saved: bodies[].ruler (its coverBreak)',
+    move: "not saved: the root's velocity as this tick's phase 3 resolved it, with that tick, read by legStrike in phase 9 of the same tick (another tick's reads as still, so a load needs none)",
   },
   ContactSystem: {
     world: 'not saved: a link',

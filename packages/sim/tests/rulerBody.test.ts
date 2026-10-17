@@ -318,10 +318,14 @@ describe('the shin that strikes an obstacle (§4.7 step 6 for the leg, SPEC:782;
     expect(w.entities.get(log)).toBeUndefined();
   });
 
-  it('legStrike: a blocker whose top lies between ankle and knee trips a ruler moving faster than tripSpeed; slower, met along its axis, low, tall or light: no trip', async () => {
+  it('legStrike: a blocker whose top lies between ankle and knee trips a ruler moving faster than tripSpeed; slower, met along its axis (whatever the normal), low, tall or light: no trip', async () => {
     const w = await make();
-    const g = giant(w, 0, 0, EAST);
-    run(w, 2);
+    // The giant walks +x well away from the obstacles; legStrike reads the motion its phase 3 resolved this tick.
+    const g = giant(w, -45, -20, EAST);
+    const driveAt = (speed: number): void => {
+      g.drive = { heading: EAST, speed, accel: 50, climb: false };
+      run(w, 30);
+    };
     const across = spawnLog(w, { p: { x: 3, y: 1.0, z: 0 }, q: LOG_Z, length: 4.4, mass: 300, state: 'fixed' });
     // Its axis 20° off the motion (+x): met on its side, the mover deflects along it (6.1).
     const a20 = (20 * Math.PI) / 180;
@@ -336,25 +340,62 @@ describe('the shin that strikes an obstacle (§4.7 step 6 for the leg, SPEC:782;
     const ax = w.entities.get(along)!;
     const axis = { x: 2 * (ax.pose.q.x * ax.pose.q.y - ax.pose.q.w * ax.pose.q.z), z: 2 * (ax.pose.q.y * ax.pose.q.z + ax.pose.q.w * ax.pose.q.x) };
     expect(Math.atan2(axis.z, axis.x)).toBeCloseTo(a20, 6);
-    const tries = (id: number, speed: number, n: V3) => {
+    const tries = (id: number, n: V3) => {
       g.ruler!.pendingTrip = null;
-      g.vel.set(0, 0, 0);
-      g.walkVel.set(speed, 0, 0);
       const e = w.entities.get(id)!;
       w.rulers.legStrike(g, e, { x: e.pose.p.x - 0.2, y: 1.0, z: e.pose.p.z }, n);
-      return g.ruler!.pendingTrip;
+      const got = g.ruler!.pendingTrip;
+      g.ruler!.pendingTrip = null;
+      return got;
     };
     const X = { x: 1, y: 0, z: 0 };
-    expect(tries(across, 6, X)).toMatchObject({ why: 'obstacle', cause: { kind: 'entity', entityId: across } });
-    expect(tries(across, RULER_BODY_TUNING.tripSpeed, X)).toBeNull();
-    expect(tries(along, 6, { x: Math.sin(a20), y: 0, z: -Math.cos(a20) })).toBeNull();
-    expect(tries(low, 6, X)).toBeNull();
-    expect(tries(tall, 6, X)).toBeNull();
-    expect(tries(light, 6, X)).toBeNull();
+    const UPN = { x: 0, y: 1, z: 0 };
+    driveAt(6);
+    expect(Math.hypot(g.walkVel.x, g.walkVel.z)).toBeCloseTo(6, 6);
+    expect(tries(across, X)).toMatchObject({ why: 'obstacle', cause: { kind: 'entity', entityId: across } });
+    // A vertical normal (a shin first touching its top) changes nothing for a long obstacle across the path.
+    expect(tries(across, UPN)).toMatchObject({ why: 'obstacle', cause: { entityId: across } });
+    // Along it (20° off its axis): left to the mover, whatever the normal (its side's, vertical, or the motion itself,
+    // the began-overlapped fallback).
+    expect(tries(along, { x: Math.sin(a20), y: 0, z: -Math.cos(a20) })).toBeNull();
+    expect(tries(along, UPN)).toBeNull();
+    expect(tries(along, X)).toBeNull();
+    expect(tries(low, X)).toBeNull();
+    expect(tries(tall, X)).toBeNull();
+    expect(tries(light, X)).toBeNull();
+    driveAt(RULER_BODY_TUNING.tripSpeed - 0.1);
+    expect(tries(across, X)).toBeNull();
+    driveAt(6);
+    expect(tries(across, X)).not.toBeNull();
     // A fresh piece (in its grace) is no blocker.
     w.entities.setGrace(w.entities.get(across)!, { from: { kind: 'terrain' }, minUntil: w.tick + 10, maxUntil: w.tick + 600 });
-    expect(tries(across, 6, X)).toBeNull();
-    g.ruler!.pendingTrip = null;
+    expect(tries(across, X)).toBeNull();
+  });
+
+  it('legStrike reads the speed the mover resolved: a giant climbing out (climb set, driven at 6 m/s) moves at climbWalkMps and trips on nothing', async () => {
+    const w = await make();
+    const g = giant(w, -45, -20, EAST);
+    const stake = spawnStick(w, { p: { x: 3, y: 0.4, z: 0 }, q: UP, length: 1.4, r: 0.05, sharp: { end: 1, s: 0.6 } });
+    w.entities.anchor(w.entities.get(stake)!, 0.3);
+    const strike = () => {
+      g.ruler!.pendingTrip = null;
+      const e = w.entities.get(stake)!;
+      w.rulers.legStrike(g, e, { x: e.pose.p.x - 0.05, y: 0.8, z: e.pose.p.z }, { x: 1, y: 0, z: 0 });
+      const got = g.ruler!.pendingTrip;
+      g.ruler!.pendingTrip = null;
+      return got;
+    };
+    g.drive = { heading: EAST, speed: 6, accel: 50, climb: true };
+    const x0 = g.pos.x;
+    run(w, 30);
+    // Its legs are driven at 6 m/s, its root moves at the climb's 0.5 m/s.
+    expect(Math.hypot(g.walkVel.x, g.walkVel.z)).toBeGreaterThan(RULER_BODY_TUNING.tripSpeed);
+    expect((g.pos.x - x0) / (30 * DT)).toBeLessThan(RULER_BODY_TUNING.climbWalkMps + 1e-6);
+    expect(strike()).toBeNull();
+    // Not climbing, the same drive and strike trip it.
+    g.drive = { heading: EAST, speed: 6, accel: 50, climb: false };
+    run(w, 30);
+    expect(strike()).toMatchObject({ why: 'obstacle', cause: { entityId: stake } });
   });
 });
 
