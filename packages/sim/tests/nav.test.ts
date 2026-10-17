@@ -47,6 +47,16 @@ const ID_Q: Quat = { x: 0, y: 0, z: 0, w: 1 };
 const ALONG_X: Quat = { x: 0, y: 0, z: -Math.SQRT1_2, w: Math.SQRT1_2 };
 const ALONG_Z: Quat = { x: -0.5, y: 0.5, z: -0.5, w: 0.5 };
 
+/** Quaternion product a·b (b applied first). */
+function mulQ(a: Quat, b: Quat): Quat {
+  return {
+    w: a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+    x: a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+    y: a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+    z: a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+  };
+}
+
 const nav = (w: World): NavSystem => w.nav!;
 const at = (w: World, x: number, z: number): V3 => ({ x, y: w.terrain.heightAt(x, z), z });
 
@@ -541,6 +551,10 @@ describe('dirty tiles and rebuilds (§7, phase 16)', () => {
     // A staked log (fixed) on the surface, and a light free log of about its height the giant can step over.
     const staked = log(w, 10, -12, { length: 12, r: 0.3, along: 'x', state: 'fixed' });
     const light = log(w, 10, 12, { length: 6, r: 0.25, along: 'x', material: 'rottenWood' });
+    // A staked log lying diagonally (along (1, 0, 1)): its extrusion follows the log, not its 7 m-square AABB.
+    const diag = { x: -12, z: 24 };
+    const diagonal = log(w, diag.x, diag.z, { length: 10, r: 0.3, along: 'x', state: 'fixed' });
+    w.entities.setPose(diagonal, { p: diagonal.pose.p, q: mulQ({ x: 0, y: Math.sin(-Math.PI / 8), z: 0, w: Math.cos(Math.PI / 8) }, ALONG_X) });
     stepUntil(w, () => [...slabs, light].every((e) => n.bakedIds().includes(e.id)), 1200, 'the cover and the light log at rest');
     drain(w);
     // What the navmesh was told: stakes are blockers below the original ground (plain triangles), the cover and the
@@ -551,6 +565,8 @@ describe('dirty tiles and rebuilds (§7, phase 16)', () => {
     expect(slabs.every((s) => s.mass < NAV_TUNING.blockerMinKg)).toBe(true);
     expect([rec(staked).blocker, rec(staked).extrude]).toEqual([true, true]);
     expect([rec(light).blocker, rec(light).extrude]).toEqual([false, false]);
+    expect([rec(diagonal).blocker, rec(diagonal).extrude]).toEqual([true, true]);
+    expect(rec(diagonal).aabb.max.x - rec(diagonal).aabb.min.x).toBeGreaterThan(7);
 
     // The covered pit: walkable on the ruler layer (and the human one), at the cover's height, crossed straight.
     for (const layer of NAV_LAYERS) {
@@ -571,6 +587,11 @@ describe('dirty tiles and rebuilds (§7, phase 16)', () => {
     expect(pathLength(round.points)).toBeGreaterThan(18);
     expect(n.raycast('ruler', at(w, 10, 6), at(w, 10, 18)).clear).toBe(true);
     expect(pathLength(n.findPath('ruler', at(w, 10, 6), at(w, 10, 18)).points)).toBeLessThan(12.2);
+    // The diagonal log blocks the giant across it, while the corners of its AABB, 4.2 m from it, stay open ground.
+    expect(n.raycast('ruler', at(w, diag.x + 4, diag.z - 4), at(w, diag.x - 4, diag.z + 4)).clear).toBe(false);
+    expect(n.isWalkable('ruler', diag.x + 3, diag.z - 3)).toBe(true);
+    expect(n.isWalkable('ruler', diag.x - 3, diag.z + 3)).toBe(true);
+    expect(n.isWalkable('ruler', diag.x, diag.z)).toBe(false);
   });
 });
 

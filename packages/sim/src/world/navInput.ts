@@ -48,7 +48,7 @@ export interface NavEntityInput {
   readonly anchored: boolean;
   /** Fixed, anchored (isAnchored: lashed to an anchored entity counts) or at least blockerMinKg. */
   readonly blocker: boolean;
-  /** A blocker whose top rises above the original ground + the giant's ankle: an extruded box on the ruler layer. */
+  /** A blocker whose top rises above the original ground + the giant's ankle: extruded on the ruler layer. */
   readonly extrude: boolean;
   readonly aabb: NavAabb;
   readonly positions: Float32Array;
@@ -83,8 +83,7 @@ export function isNavBlocker(w: World, e: Entity, blockerMinKg: number): boolean
 }
 
 /**
- * Bakes an entity's navmesh record: its triangles at its current pose, its AABB, its class and (for a blocker) its
- * footprint. A blocker is extruded on the ruler layer when its top rises more than `extrudeAboveAnkleM` above the
+ * Bakes an entity's navmesh record: its triangles at its current pose, its AABB, its class and its footprint. A blocker is extruded on the ruler layer when its top rises more than `extrudeAboveAnkleM` above the
  * original ground under it (§7): "under it" is the lowest generated height at the AABB's centre and four corners, so a
  * log lying across a slope is judged from its low side (where the giant would meet it), and stakes inside a dug pit,
  * whose tops stay below the original ground, are never extruded (the cover over them stays walkable).
@@ -129,11 +128,11 @@ export function navOverlapsXZ(a: NavAabb, r: NavRect): boolean {
 /**
  * One tile's input: the terrain patch covering `rect` (the tile's rect grown by Recast's border) and the entities
  * given (already filtered to those overlapping it, in id order). `extrudeM` non-null (the ruler layer) replaces every
- * extruded blocker by a box over its AABB footprint from the AABB's bottom up `extrudeM` (§7).
+ * extruded blocker by its footprint extruded from the AABB's bottom up `extrudeM` (§7; see navExtrusion).
  */
 export function navTileGeometry(t: Terrain, rect: NavRect, ents: readonly NavEntityInput[], extrudeM: number | null): NavGeometry {
   const parts: { positions: ArrayLike<number>; indices: ArrayLike<number> }[] = [navTerrainPatch(t, rect)];
-  for (const e of ents) parts.push(extrudeM !== null && e.extrude ? navExtrusionBox(e.aabb, extrudeM) : e);
+  for (const e of ents) parts.push(extrudeM !== null && e.extrude ? navExtrusion(e, extrudeM) : e);
   return merge(parts);
 }
 
@@ -182,7 +181,23 @@ export function navTerrainPatch(t: Terrain, rect: NavRect): NavGeometry {
   return { positions, indices };
 }
 
-/** A closed box over `aabb`'s footprint from its bottom up `heightM` (the ruler layer's extruded blocker). */
+/**
+ * The ruler layer's extruded blocker: the entity's footprint (its convex hull on the ground plane) as a closed prism from
+ * its AABB's bottom up `heightM`. §7 says "a box from its AABB bottom": for a log lying along x or z the two are the
+ * same, but the AABB of a log lying diagonally is a square up to 0.7 × its length on a side, which would wall off far
+ * more ground than the log covers; the footprint keeps the extrusion to the log. A degenerate footprint (fewer than
+ * three points) falls back to the AABB box.
+ */
+export function navExtrusion(e: NavEntityInput, heightM: number): { positions: Float32Array; indices: Uint32Array } {
+  const fp = e.footprint;
+  if (fp.length < 6) return navExtrusionBox(e.aabb, heightM);
+  const y0 = e.aabb.min.y;
+  const points: number[] = [];
+  for (const y of [y0, y0 + heightM]) for (let k = 0; k < fp.length; k += 2) points.push(fp[k], y, fp[k + 1]);
+  return triangulate({ kind: 'hull', points }, { p: { x: 0, y: 0, z: 0 }, q: { x: 0, y: 0, z: 0, w: 1 } });
+}
+
+/** A closed box over `aabb`'s footprint from its bottom up `heightM`. */
 export function navExtrusionBox(aabb: NavAabb, heightM: number): { positions: Float32Array; indices: Uint32Array } {
   const hx = (aabb.max.x - aabb.min.x) / 2;
   const hz = (aabb.max.z - aabb.min.z) / 2;

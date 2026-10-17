@@ -240,7 +240,10 @@ interface LayerSpec {
   tilesZ: number;
   tileBits: number;
   polyBits: number;
-  /** Ruler layer: an extruded blocker's height (one voxel under walkableHeight, so nothing inside it is walkable). */
+  /**
+   * Ruler layer: an extruded blocker's height, one voxel under walkableHeight (§7 says "up to walkableHeight"; at exactly
+   * that height the floor inside a wide extrusion would have the headroom to count as walkable).
+   */
   extrudeM: number | null;
 }
 
@@ -955,7 +958,7 @@ interface Solid {
  * voxel under its top, is not ground (the inside of a box, the ground under a log, a boulder's flanks). Floor within a
  * voxel of an entity's top stays (the top of a box or a log is something to stand on), and so does an entity too thin
  * to have an inside (a cover slab, a branch), so a covered pit's cover stays walkable. An extruded blocker's inside is
- * its box's.
+ * its extrusion's (its footprint up to extrudeM).
  */
 function solidsOf(s: LayerSpec, ents: readonly NavEntityInput[]): Solid[] {
   const out: Solid[] = [];
