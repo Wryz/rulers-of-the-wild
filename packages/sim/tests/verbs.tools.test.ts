@@ -9,7 +9,7 @@
 // Scene numbers (lengths, masses, positions) are test constants, never tuning (§9).
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { DAMAGE_TUNING } from '../src/sim/rules';
-import { WEAPON_MOVES } from '../src/sim/weapons';
+import { GORE, TOOL_WEAPON_IDS, WEAPON_MOVES, WEAPONS } from '../src/sim/weapons';
 import { resetTuning } from '../src/tuning/registry';
 import { prismRForMass, spawnRopeCoil, spawnStarterAxe, spawnStick, spawnStone, spawnTree, stoneHull } from '../src/world/factory';
 import { FELL_TUNING } from '../src/world/felling';
@@ -247,6 +247,46 @@ describe('tool classes from properties (§5.2)', () => {
     expect(classifyHeld({ ...base, massKg: 0.3, lengthM: 0.15, aspect: 1.5, head: { ...edge, end: 0 } })).toBe('flintBlade');
     expect(classifyHeld({ ...base, massKg: 3, lengthM: 0.2, aspect: 1.5 })).toBe('stone');
     expect(classifyHeld({ ...base, massKg: 3.01, lengthM: 0.2, aspect: 1.5 })).toBeNull();
+  });
+});
+
+describe('the tool WeaponIds (§1.2 weapons.ts, §5.2, §5.11)', () => {
+  it('each class has a DS template by id, its gore row, and techniques that exist; the spear flies point first', () => {
+    const gore = {
+      stoneAxe: GORE.machete,
+      longAxe: GORE.machete,
+      spear: { crown: null, sever: 'none', decap: false, tear: true },
+      sharpStick: { crown: null, sever: 'none', decap: false, tear: true },
+      flintBlade: { crown: null, sever: 'none', decap: false, tear: true },
+      cudgel: { crown: 'crush', sever: 'none', decap: false, tear: false },
+      stick: { crown: null, sever: 'none', decap: false, tear: false },
+      stone: { crown: null, sever: 'none', decap: false, tear: false },
+    };
+    const techniques = {
+      stone: ['hack', 'chop'],
+      flintBlade: ['hack', 'hack'],
+      stick: ['sweep', 'overhead'],
+      cudgel: ['sweep', 'overhead'],
+      sharpStick: ['thrust', 'overhead'],
+      spear: ['thrust', 'thrust'],
+      stoneAxe: ['slash', 'chop'],
+      longAxe: ['sweep', 'overhead'],
+    };
+    expect([...TOOL_WEAPON_IDS].sort()).toEqual(Object.keys(gore).sort());
+    for (const id of TOOL_WEAPON_IDS) {
+      const t = WEAPONS[id];
+      expect(t.id, id).toBe(id);
+      expect(Object.prototype.hasOwnProperty.call(WEAPONS, id), id).toBe(true);
+      expect(GORE[id], id).toEqual(gore[id]);
+      expect([t.light, t.heavy], id).toEqual(techniques[id]);
+      for (const m of [t.light, t.heavy, ...Object.values(t.chain)]) expect(WEAPON_MOVES[m], `${id} ${m}`).toBeDefined();
+      expect(TOOL_TUNING[id], id).toBeDefined();
+    }
+    // A tool exists only as an entity: its template is not enumerated with the weapons that exist on their own.
+    for (const id of TOOL_WEAPON_IDS) expect(Object.keys(WEAPONS)).not.toContain(id);
+    const ts = WEAPON_MOVES.throwSpear;
+    expect(ts.throw).toEqual({ release: WEAPON_MOVES.throwOne.throw!.release, speed: 20, spin: 0 });
+    expect(ts.noHit).toBe(true);
   });
 });
 

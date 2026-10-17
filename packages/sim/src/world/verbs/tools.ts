@@ -18,7 +18,7 @@ import { createPlayer } from '../../sim/roster';
 import { blowDamage } from '../../sim/combat';
 import { IdCounter } from '../../sim/fighter';
 import { DAMAGE_TUNING } from '../../sim/rules';
-import { WEAPON_MOVES, WEAPONS, type WeaponDef } from '../../sim/weapons';
+import { TOOL_WEAPON_IDS, WEAPON_MOVES, WEAPONS, type WeaponDef } from '../../sim/weapons';
 import { JOINT_TUNING } from '../joints';
 import { isRopeLike, isSoftGround, isSpringy, MATERIALS, PROPERTY_EPS, propertyAtLeast, propertyAtMost, propertyMarginAtLeast } from '../materials';
 import { cylinderPoints, GEOM_EPS, principalAxis } from '../shapes';
@@ -27,7 +27,8 @@ import type { Entity, Pose3, Quat, Shape, SharpPoint, V3 } from '../types';
 import type { World } from '../world';
 import { TOOL_TUNING, VERB_TUNING } from './tuning';
 
-export type ToolClass = 'stick' | 'sharpStick' | 'spear' | 'stoneAxe' | 'longAxe' | 'cudgel' | 'stone' | 'flintBlade';
+/** A held object's tool class (§5.2): 'stick' | 'sharpStick' | 'spear' | 'stoneAxe' | 'longAxe' | 'cudgel' | 'stone' | 'flintBlade'. */
+export type ToolClass = (typeof TOOL_WEAPON_IDS)[number];
 
 /** A sharp point of a held object in the held entity's frame, with what it is to the object (§5.0's predicates). */
 export interface HeldFeature extends SharpPoint {

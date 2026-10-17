@@ -104,6 +104,18 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
   flintBlade: { id: 'flintBlade', name: 'Flint Blade', style: 'oneHand', edge: 'blade', length: 0.15, strikeFrom: 0.05, radius: 0.03, damageMul: 1.2, cut: 0.8, cleave: 0, bite: 4, tempo: 0.8, mass: 0.3, choke: 0, sharpness: 0.9, light: 'hack', heavy: 'hack', chain: { hack: 'hack' } },
 };
 
+/** The primitive tools' WeaponIds (docs/M1-DESIGN.md §5.2; world/verbs/tools.ts ToolClass). */
+export const TOOL_WEAPON_IDS = ['stick', 'sharpStick', 'spear', 'stoneAxe', 'longAxe', 'cudgel', 'stone', 'flintBlade'] as const satisfies readonly WeaponId[];
+
+// WEAPONS enumerates the weapons that exist on their own: DungeonStyle's drops and loadouts, each drawn by the client's
+// buildWeapon from its id. A tool never exists on its own: its WeaponDef is synthesised from the entity in the hands,
+// which the client draws from the entity's shapes (§5.2). So a tool's template is a WEAPONS entry by id (WEAPONS[id],
+// own-property lookups, GORE) but is not enumerated with the weapons.
+// DEVIATION (P14): §1.2 appends the templates to WEAPONS, and apps/client/tests/weaponModels.test.ts asks buildWeapon
+// (render/weaponView.ts, P32) for a model of every enumerated WEAPONS entry, which a tool can only get from its entity.
+// TODO(P32-fix): once buildWeapon models the tool ids, drop this loop.
+for (const id of TOOL_WEAPON_IDS) Object.defineProperty(WEAPONS, id, { enumerable: false });
+
 /**
  * What a weapon can actually do to a body beyond hurting it, weapon by weapon — not
  * derived from its numbers, because "heavy" and "sharp" aren't enough on their own: a
