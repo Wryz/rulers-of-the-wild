@@ -27,13 +27,17 @@
 //   solid in RULER_SOLID, the body dynamic with the momentum fit of the zones' previous-tick velocities, damping, extra
 //   solver iterations and CCD; the fighter 'tripped' for getupAfterS; a `trip` event; the history reset (RF-1).
 // - Phase 13b: the tripped rig from the body (rig = body ∘ frozen local, f.pos the terrain under the pelvis, the pose's
-//   root and pelvis re-expressed so CombatSim's forward kinematics reproduces it); in-pit (D: both planted feet, or the
-//   lying pelvis, more than pitDownDepthFrac × knee height below the original ground, RR-1) with a `pit` event; pinned
-//   (D-38: the dynamic mass resting on it, transitively, by contact manifolds, with hysteresis) with a `pinned` event;
-//   the get-up at getupAfterS when not pinned (light loads shoved off first, sensors again, the yaw that makes kneeling
-//   shortest, a getupFrames rise through `kneel`, a `rise` event, the history reset and a contact grace, RF-1); and, for a
+//   root and pelvis re-expressed so CombatSim's forward kinematics reproduces it); in-pit (the ground the root stands on,
+//   or the lying pelvis, more than pitDownDepthFrac × knee height below the original ground, RR-1; §4.7 says "both
+//   planted feet", see updatePit) with a `pit` event; pinned (D-38: the dynamic mass resting on it, transitively, by
+//   contact manifolds, with hysteresis) with a `pinned` event; the get-up at getupAfterS when not pinned (light loads
+//   shoved off first, sensors again, the yaw that makes kneeling shortest, a getupFrames rise through `kneel` that ends
+//   in a riseBlendFrames blend into the stance, a `rise` event, the history reset and a contact grace, RF-1); and, for a
 //   standing ruler, cover failure: a support that vanished under it (a load break, §4.11) is remembered as the cause of
 //   a 'cover' trip, which it requests at once when the drop under its feet is beyond the ledge threshold (step 8).
+// - The save (RR-19, §8.3 bodies[].ruler): the body's pose and velocity (0 standing: Rapier derives a kinematic body's
+//   from the next pose), the frozen local pose, the pose history, sleep, and the mover's memory (climb floor, deflection,
+//   supports, cover break); restoreRecord puts it back kinematic or dynamic.
 // - A ruler knocked out standing collapses: the same switch, no `trip` event; its corpse stays (world/deaths.ts).
 // - Footfalls: a standing ruler's feet set down this tick (footwork.landed, emptied by the mover before the footwork runs)
 //   are `land` events at the foot (mass the leg's, energy ½ m v² at its walking speed): the camera shake and thud of a
@@ -183,6 +187,7 @@ interface Shove {
 
 const DEG = Math.PI / 180;
 const DOWN: Readonly<V3> = Object.freeze({ x: 0, y: -1, z: 0 });
+const ZERO3: Readonly<V3> = Object.freeze({ x: 0, y: 0, z: 0 });
 const IDENTITY: Readonly<Quat> = Object.freeze({ x: 0, y: 0, z: 0, w: 1 });
 const Y_AXIS = new Vector3(0, 1, 0);
 const SIDES = ['L', 'R'] as const;
@@ -442,8 +447,10 @@ export class RulerBodies {
       .map((rb) => {
         const p = rb.body.translation();
         const q = rb.body.rotation();
-        const v = rb.body.linvel();
-        const a = rb.body.angvel();
+        // A standing (kinematic) body's velocity is Rapier's from the last posing, derived again by the next step from
+        // the next pose before anything reads it (the zones' motion is the pose history): saved as 0, as a load leaves it.
+        const v = rb.dynamic ? rb.body.linvel() : ZERO3;
+        const a = rb.dynamic ? rb.body.angvel() : ZERO3;
         const ruler: RulerBodyRecV1 = {
           dynamic: rb.dynamic,
           pose: { p: { x: p.x, y: p.y, z: p.z }, q: { x: q.x, y: q.y, z: q.z, w: q.w } },
