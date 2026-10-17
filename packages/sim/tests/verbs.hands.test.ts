@@ -692,6 +692,53 @@ describe('the radial (§5.13) and validation (§5.0)', () => {
   });
 });
 
+describe('determinism (§8.1)', () => {
+  it('two worlds given the same commands carry, drop, drag and stow bit-identically', async () => {
+    const runOnce = async (): Promise<string> => {
+      const w = await make(41);
+      const p = w.player!;
+      const a = log(w, 30, 2.2, 0, 1.2);
+      const b = log(w, 90, 3, 2.5, 0);
+      const s = stick(w, 0.5, 0.02, -0.6, 0.9);
+      w.step();
+      const out: unknown[] = [];
+      const snap = () => out.push([w.tick, p.pos.toArray(), p.yaw, ...[a, b, s].map((id) => [ent(w, id).state, ent(w, id).pose, ent(w, id).vel])]);
+      verb(w, { verb: 'take', target: a });
+      untilFree(w);
+      expect(p.inventory!.hands?.mode).toBe('carry');
+      run(w, 60, () => w.commands.push(moveCommand(w.tick + 1, 1, 0.3, -1)));
+      snap();
+      verb(w, { verb: 'drop', target: 0 });
+      run(w, 40);
+      snap();
+      w.teleport(p, 1.2, 0, Math.PI / 2);
+      w.step();
+      verb(w, { verb: 'take', target: b });
+      untilFree(w);
+      expect(p.inventory!.hands?.mode).toBe('drag');
+      run(w, 90, () => w.commands.push(moveCommand(w.tick + 1, 1, -1, -0.2)));
+      snap();
+      verb(w, { verb: 'drop', target: 0 });
+      untilFree(w);
+      expect(p.inventory!.hands).toBeNull();
+      w.teleport(p, -0.6, 0.2, Math.PI);
+      w.step();
+      verb(w, { verb: 'take', target: s });
+      untilFree(w);
+      expect(p.inventory!.hands?.entity).toBe(s);
+      verb(w, { verb: 'stow', target: 0, slot: 0 });
+      untilFree(w);
+      expect(p.inventory!.belt[0]).toBe(s);
+      snap();
+      out.push(w.verbs.toRecord(), p.inventory);
+      return JSON.stringify(out);
+    };
+    const one = await runOnce();
+    const two = await runOnce();
+    expect(two).toBe(one);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Continuous verbs (§5.0, §5.4, §5.12): the machinery P15 and P16 plug into, on stand-in handlers
 // ---------------------------------------------------------------------------
