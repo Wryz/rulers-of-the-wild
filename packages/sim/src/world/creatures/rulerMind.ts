@@ -45,6 +45,8 @@ const flatDist = (a: { x: number; z: number }, b: { x: number; z: number }): num
 const bearingTo = (a: { x: number; z: number }, b: { x: number; z: number }): number => Math.atan2(b.x - a.x, b.z - a.z);
 const copy3 = (p: V3): V3 => ({ x: p.x, y: p.y, z: p.z });
 const IDENTITY = { x: 0, y: 0, z: 0, w: 1 };
+/** A speed or a length below this is none (a numerical device of the arithmetic, not a starting value). */
+const TINY = 1e-9;
 
 /** A charge script's phases (MindScript 'charge', §6.6), kept in `routeIdx`. */
 const SCRIPT_TELEGRAPH = 0;
@@ -441,7 +443,7 @@ export class RulerMind extends CreatureMind {
       case 'recover': {
         // Brakes at `brake` from the speed it has, then stands recoverS.
         const v = Math.hypot(self.walkVel.x, self.walkVel.z);
-        this.restUntil = tick + Math.ceil(v / Math.max(G.brake, 1e-9) / DT) + Math.round(G.recoverS / DT);
+        this.restUntil = tick + Math.ceil(v / Math.max(G.brake, TINY) / DT) + Math.round(G.recoverS / DT);
         return;
       }
       case 'flee':
@@ -538,6 +540,7 @@ export class RulerMind extends CreatureMind {
         const lkp = this.senses.lkp;
         const centre = (lkp ? bearingTo(self.pos, lkp) : this.heading) + off;
         const period = Math.max(G.sniffS, DT);
+        // (A unit triangle wave of phase u: 0 → 1 → −1 → 0.)
         const u = (((tick - this.mark) * DT) / period) % 1;
         const tri = u < 0.25 ? 4 * u : u < 0.75 ? 2 - 4 * u : 4 * u - 4;
         const rate = (4 * G.sniffDeg) / period;
@@ -672,8 +675,8 @@ export class RulerMind extends CreatureMind {
 
   /** Walks along (dx, dz) at `gait` × its walk speed (gaitFor's inverse), turning at once, at the chase accel. */
   protected walk(self: Fighter, dx: number, dz: number, gait: number, _crouch = false): void {
-    const k = self.stats.walkSpeed * Math.max(self.motion.speed, 1e-9);
-    if (!(Math.hypot(dx, dz) > 1e-9)) {
+    const k = self.stats.walkSpeed * Math.max(self.motion.speed, TINY);
+    if (!(Math.hypot(dx, dz) > TINY)) {
       this.stand(self);
       return;
     }
@@ -684,13 +687,13 @@ export class RulerMind extends CreatureMind {
   /** Follows the path at `gait` × its walk speed (a navigated route script), at the chase turn and accel. */
   protected steer(self: Fighter, gait: number, _crouch = false): boolean {
     const G = CREATURE_TUNING.giant;
-    const k = self.stats.walkSpeed * Math.max(self.motion.speed, 1e-9);
+    const k = self.stats.walkSpeed * Math.max(self.motion.speed, TINY);
     return this.follow(self, Math.max(0, gait) * k, G.turn.chase, G.accel.chase);
   }
 
   /** The gait that walks at `speed` (unclamped: the drive takes any speed). */
   protected gaitFor(self: Fighter, speed: number, _crouch: boolean): number {
-    return Math.max(0, speed) / (self.stats.walkSpeed * Math.max(self.motion.speed, 1e-9));
+    return Math.max(0, speed) / (self.stats.walkSpeed * Math.max(self.motion.speed, TINY));
   }
 
   // -------------------------------------------------------------------------
