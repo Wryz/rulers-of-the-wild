@@ -541,6 +541,60 @@ describe('rope coils', () => {
   });
 });
 
+describe('stones, grass and coils tilted to the ground (q)', () => {
+  it('take a rotation, and set down tilted flush on a 15 % slope they rest where they were put; unrotated, they tip', async () => {
+    const w = await make({ size: 50 });
+    w.terrain.generate((x) => 0.15 * x);
+    // The slope's normal (−0.15, 1, 0)/|…| as a rotation of +y onto it (about z).
+    const a = Math.atan(0.15);
+    const tilt: Quat = { x: 0, y: 0, z: Math.sin(a / 2), w: Math.cos(a / 2) };
+    const rotate = (q: Quat, v: V3): V3 => {
+      const tx = 2 * (q.y * v.z - q.z * v.y);
+      const ty = 2 * (q.z * v.x - q.x * v.z);
+      const tz = 2 * (q.x * v.y - q.y * v.x);
+      return { x: v.x + q.w * tx + (q.y * tz - q.z * ty), y: v.y + q.w * ty + (q.z * tx - q.x * tz), z: v.z + q.w * tz + (q.x * ty - q.y * tx) };
+    };
+    const place = (z: number, q: Quat | undefined) => {
+      const at = (x: number) => ({ x, y: 0, z });
+      const stoneShape = stoneHull(12, 1, 'stone');
+      const sp = at(-6);
+      sp.y = groundRestY(w, sp.x, sp.z, stoneShape, q);
+      const stone = spawnStone(w, { p: sp, q, mass: 12, proto: 1, generated: true });
+      const gp = at(0);
+      gp.y = groundRestY(w, gp.x, gp.z, grassBox(2, FACTORY_TUNING.materials.grass), q);
+      const grass = spawnGrass(w, { p: gp, q, mass: 2, generated: true });
+      const coilShape = ropeCoilShape(16);
+      const c = at(6);
+      c.y = groundRestY(w, c.x, c.z, coilShape, q);
+      const up = rotate(q ?? { x: 0, y: 0, z: 0, w: 1 }, { x: 0, y: coilShape.halfHeight, z: 0 });
+      const coil = spawnRopeCoil(w, { at: { x: c.x - up.x, y: c.y - up.y, z: c.z - up.z }, q, material: 'vine', lengthM: 16, generated: true });
+      // The coil's centre is where it was asked to rest, and every one carries the rotation.
+      expect(ent(w, coil).pose.p.y).toBeCloseTo(c.y, 5);
+      for (const id of [stone, grass, coil]) {
+        const e = ent(w, id);
+        const want = q ?? { x: 0, y: 0, z: 0, w: 1 };
+        expect(Math.abs(e.pose.q.x * want.x + e.pose.q.y * want.y + e.pose.q.z * want.z + e.pose.q.w * want.w)).toBeCloseTo(1, 6);
+      }
+      return [stone, grass, coil];
+    };
+    const tilted = place(-5, tilt);
+    const flat = place(5, undefined);
+    const start = new Map([...tilted, ...flat].map((id) => [id, { ...ent(w, id).pose.p }]));
+    for (let t = 0; t < 120; t++) w.step();
+    const moved = (id: number): number => {
+      const p = ent(w, id).pose.p;
+      const s = start.get(id)!;
+      return Math.hypot(p.x - s.x, p.y - s.y, p.z - s.z);
+    };
+    for (const id of tilted) {
+      expect(moved(id), ent(w, id).look).toBeLessThan(0.01);
+      expect(ent(w, id).touched, ent(w, id).look).toBe(false);
+    }
+    // The control: set down unrotated on the slope, they settle (tip flush) and are touched (saved).
+    expect(flat.filter((id) => ent(w, id).touched).length).toBeGreaterThan(0);
+  });
+});
+
 describe('sticks', () => {
   it('an 8-gon prism of dry wood lying along x with a flat face down', async () => {
     const w = await make();
