@@ -11,8 +11,10 @@
 //   f.pos, and moves it toward this tick's proposal (f.pos after locomote and separate()'s push). f.pos then holds the
 //   f32 position Rapier will hold (MAP gap-1 R4): f.pos.x/z are the capsule centre's, f.pos.y its centre less the foot
 //   offset (half-height + radius + the controller's offset).
-// - Grounded, the sweep's dy is 0 and snap-to-ground takes the fighter down slopes (autostep only works without a
-//   downward component, MAP rapier finding 5); airborne, gravity integrates vy.
+// - Grounded, the sweep's dy is 0 (autostep only works without a downward component, MAP rapier finding 5) and the
+//   controller snaps itself down slopes (Rapier's own snap acts only on a sweep that already moves down); airborne,
+//   gravity integrates vy. Climbing (autostep, D-28) steps over static bodies and over dynamic ones the push can't
+//   shove; a light log is pushed instead (see resolve).
 // - Built-in pushing is off (SPEC:374, MAP rapier finding 1). A computed collision with a dynamic, non-anchored entity
 //   queues pushN × DT along the horizontal −normal1, once per entity per controller per tick, applied in phase 4d
 //   through the entity store's impulse queue in entity id order; friction decides (a 40 kg log slides, an 800 kg hull
@@ -32,6 +34,7 @@ import { boneMass, DAMAGE_TUNING, impactEnergy, MOVE_TUNING, zoneToughness } fro
 import { SPECIES_BODY } from '../sim/species';
 import { defineTuning } from '../tuning/registry';
 import { collisionGroups, kccQueryGroups, solverGroups } from './groups';
+import { MATERIALS } from './materials';
 import type { FighterMover, Impact, ImpactCause, PostureId, V3 } from './types';
 import type { World } from './world';
 import { WORLD_TUNING } from './worldTuning';
@@ -239,13 +242,16 @@ export class CharacterControllers implements FighterMover {
       c.vy += WORLD_TUNING.gravityY * DT;
       dy = c.vy * DT;
     }
-    c.cc.computeColliderMovement(
-      c.col,
-      { x: f.pos.x - t.x, y: dy, z: f.pos.z - t.z },
-      RAPIER.QueryFilterFlags.EXCLUDE_SENSORS,
-      kccQueryGroups(),
-      this.heldFilter(f),
-    );
+    const desired = { x: f.pos.x - t.x, y: dy, z: f.pos.z - t.z };
+    const filter = this.heldFilter(f);
+    // Climbing (D-28) steps over static bodies, and over a dynamic one only when the push can't shove it (a felled
+    // trunk, a staked log): a log the push moves is pushed, not climbed (AC-6 part 1). DEVIATION (§9 autostepDynamic):
+    // Rapier's autostep takes dynamic bodies all or none; with all, the controller climbs onto a 40 kg log instead of
+    // pushing it (measured: it moved 0.32 m walking, 0.06 m running, against AC-6's > 1 m; the C lab's 2.26 m was
+    // measured with dynamic bodies left out). So the sweep leaves them out, and is run again with them in only when it
+    // met a dynamic body that doesn't yield to the push.
+    this.sweep(c, desired, filter, false);
+    if (c.params.stepDyn && this.metUnyielding(c)) this.sweep(c, desired, filter, true);
     const m = c.cc.computedMovement();
     // Standing still (no horizontal proposal), the controller moves the fighter only up or down (snap, fall, out of the
     // ground): it never shoves a fighter sideways that isn't going anywhere (a log rolled against it, a teleport next to
@@ -257,7 +263,18 @@ export class CharacterControllers implements FighterMover {
     let y = Math.fround(t.y + m.y);
     const z = still ? t.z : Math.fround(t.z + m.z);
     const wasAir = !c.grounded;
-    c.grounded = c.cc.computedGrounded();
+    let grounded = c.cc.computedGrounded();
+    if (!grounded && !wasAir && dy === 0) {
+      // Snap to ground (MAP rapier §3): Rapier 0.21 snaps only a sweep that already moves down, and a grounded sweep
+      // must not (autostep fails with any downward component, MAP rapier finding 5), so going downhill the controller
+      // snaps itself: the capsule cast down at most snapToGround × scale onto a surface it could stand on.
+      const snap = this.snapDown(c, { x, y, z }, filter);
+      if (snap !== null) {
+        y = Math.fround(y - snap);
+        grounded = true;
+      }
+    }
+    c.grounded = grounded;
     // Rising and stopped short (a ceiling): the jump is spent.
     if (dy > 0 && m.y < dy * 0.5) c.vy = Math.min(c.vy, 0);
     this.queuePushes(c, still);
@@ -473,6 +490,59 @@ export class CharacterControllers implements FighterMover {
     return hit === null;
   }
 
+  /** One KCC sweep from the capsule's last-step pose, autostep over dynamic bodies or not. */
+  private sweep(c: Controller, desired: V3, filter: ((col: RAPIER.Collider) => boolean) | undefined, stepDynamic: boolean): void {
+    const p = c.params;
+    if (stepDynamic) c.cc.enableAutostep(p.stepH, p.stepW, true);
+    c.cc.computeColliderMovement(c.col, desired, RAPIER.QueryFilterFlags.EXCLUDE_SENSORS, kccQueryGroups(), filter);
+    if (stepDynamic) c.cc.enableAutostep(p.stepH, p.stepW, false);
+  }
+
+  /**
+   * Whether the last sweep met a dynamic entity the push can't shove: anchored (lashed to a stake), or heavy enough that
+   * its friction (its material's coefficient × its weight) is at least pushN.
+   */
+  private metUnyielding(c: Controller): boolean {
+    const physics = this.world.physics;
+    const entities = this.world.entities;
+    const n = c.cc.numComputedCollisions();
+    for (let i = 0; i < n; i++) {
+      const col = c.cc.computedCollision(i)?.collider;
+      if (!col) continue;
+      const o = physics.ownerOf(col.handle);
+      if (!o || o.kind !== 'entity') continue;
+      const e = entities.get(o.id);
+      const b = e?.body;
+      if (!e || !b || !b.isEnabled() || !b.isDynamic()) continue;
+      if (entities.isAnchored(e)) return true;
+      if (MATERIALS[e.material].friction * e.mass * Math.abs(WORLD_TUNING.gravityY) >= CHARACTER_TUNING.pushN) return true;
+    }
+    return false;
+  }
+
+  /**
+   * How far down (m) the capsule at `centre` snaps onto ground it could stand on (a normal within maxSlopeClimbDeg of
+   * up), ending the controller's offset above it; null when nothing is within snapToGround × scale.
+   */
+  private snapDown(c: Controller, centre: V3, filter: ((col: RAPIER.Collider) => boolean) | undefined): number | null {
+    const hit = this.world.physics.rapier.castShape(
+      centre,
+      IDENTITY,
+      DOWN,
+      new RAPIER.Capsule(c.halfNow, c.r),
+      c.params.offset,
+      c.params.snap,
+      false,
+      RAPIER.QueryFilterFlags.EXCLUDE_SENSORS,
+      kccQueryGroups(),
+      c.col,
+      c.body,
+      filter,
+    );
+    if (!hit || hit.normal1.y < Math.cos(c.params.climb)) return null;
+    return hit.time_of_impact;
+  }
+
   /** A predicate that leaves the entity in the fighter's hands out of its sweeps (a carried or dragged load). */
   private heldFilter(f: Fighter): ((col: RAPIER.Collider) => boolean) | undefined {
     const held = f.inventory?.hands?.entity;
@@ -614,10 +684,11 @@ function sameParams(a: Params, b: Params): boolean {
   );
 }
 
+/** The KCC's settings; autostep leaves dynamic bodies out (a sweep that needs them sets them for itself, see resolve). */
 function configure(cc: RAPIER.KinematicCharacterController, p: Params): void {
   cc.setOffset(p.offset);
   cc.enableSnapToGround(p.snap);
-  cc.enableAutostep(p.stepH, p.stepW, p.stepDyn);
+  cc.enableAutostep(p.stepH, p.stepW, false);
   cc.setMaxSlopeClimbAngle(p.climb);
   cc.setMinSlopeSlideAngle(p.slide);
 }
