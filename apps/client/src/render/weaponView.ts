@@ -161,6 +161,16 @@ export function buildWeapon(def: WeaponDef): Group {
       for (const s of [1, -1]) part(box(0.022, 0.4, 0.022), 'grey', s * 0.17, L * 0.45 - 0.2, 0.32, -0.5, 0, 0);
       break;
     }
+    default: {
+      // A weapon with no model of its own (M1's primitive tools, P14: in play they are drawn from their entities, §5.2):
+      // a haft of its length and thickness with a head where it strikes, an edge or a point when it has one.
+      const r = Math.max(0.015, Math.min(0.05, def.radius));
+      const head = Math.max(0.06, L - def.strikeFrom);
+      part(box(r * 1.2, L, r * 1.2), 'wood', 0, L / 2 - 0.05, 0);
+      if (def.edge === 'blade') part(box(0.012, head, Math.max(0.04, r * 2.4)), 'darkSteel', 0, L - head / 2, r);
+      else part(box(r * 2.2, head, r * 2.2), 'darkWood', 0, L - head / 2, 0);
+      break;
+    }
   }
   return g;
 }
