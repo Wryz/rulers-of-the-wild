@@ -11,10 +11,12 @@ import { bonePoint, fistPoint, FIST_OFFSET, forwardKinematics, makeRig, type Rig
 import { moveCommand, type VerbCommand } from '../src/sim/commands';
 import type { Fighter } from '../src/sim/fighter';
 import { DT } from '../src/sim/math';
+import { SPECIES_BODY } from '../src/sim/species';
 import { resetTuning } from '../src/tuning/registry';
 import { CHARACTER_TUNING } from '../src/world/characters';
 import { groundRestY, logPrism, LYING_ALONG_X, prismRForMass, spawnBox, spawnLog, spawnStick } from '../src/world/factory';
 import { PHYSICS_TUNING, physicsReady } from '../src/world/physics';
+import { VERB_TUNING } from '../src/world/verbs/tuning';
 import type { Entity, V3, WorldEvent } from '../src/world/types';
 import { createWorld, type World } from '../src/world/world';
 
@@ -134,6 +136,13 @@ describe('a work action’s bend (core-fix: §5.0, §4.3 self-motion)', () => {
     expect(low).toBeLessThan(1.25);
     expect(fastest).toBeLessThanOrEqual(CHARACTER_TUNING.workHeadSpeedMps * 1.05);
   });
+
+  it("the bend's cap and the step-in together stay under a human's v_safe, with a margin: a work action never hits its own block", () => {
+    // The self-hit (6.2 m/s on the 2.6 m block) was the bend's 4.7 m/s plus the step-in's: the head meets what is in
+    // front at up to their sum. 3 + 0.045 / DT = 5.7 m/s against 6 m/s.
+    const head = CHARACTER_TUNING.workHeadSpeedMps + VERB_TUNING.workStepM / DT;
+    expect(head).toBeLessThanOrEqual(0.96 * SPECIES_BODY.human.vSafe);
+  });
 });
 
 describe('the posture over the animation (core-fix: §1.5.3)', () => {
@@ -194,6 +203,27 @@ describe('the posture over the animation (core-fix: §1.5.3)', () => {
       // (Not hanging at the hips under it: the log sits 1.55 m up.)
       expect(fist.y - p.pos.y).toBeGreaterThan(1.3);
     }
+    for (let t = 0; t < 90; t++) {
+      w.commands.push(moveCommand(w.tick + 1, 1, 0, 1));
+      w.step();
+      if (t % 15 !== 14) continue;
+      for (const fist of fists()) expect(fromLogSurface(w.entities.get(id)!, fist), `walking, tick ${t}`).toBeLessThanOrEqual(0.15);
+    }
+  });
+
+  it('carrying a short 25 kg log in front, standing or walking, both hands are on the log (within 0.15 m of it)', async () => {
+    const w = await make();
+    const p = w.player!;
+    const id = log(w, 25, 1.2, 0, 1.0);
+    w.step();
+    verb(w, { verb: 'take', target: id });
+    untilFree(w);
+    expect(p.inventory!.hands?.mode).toBe('carry');
+    expect(p.inventory!.hands?.twoHanded).toBe(true);
+    expect(p.posture?.id).toBe('carryFront');
+    const fists = () => [fistPoint(p.rig, 'L', new Vector3()), fistPoint(p.rig, 'R', new Vector3())];
+    for (let t = 0; t < CHARACTER_TUNING.postureRampFrames + 10; t++) w.step();
+    for (const fist of fists()) expect(fromLogSurface(w.entities.get(id)!, fist)).toBeLessThanOrEqual(0.15);
     for (let t = 0; t < 90; t++) {
       w.commands.push(moveCommand(w.tick + 1, 1, 0, 1));
       w.step();

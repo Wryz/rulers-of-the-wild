@@ -340,7 +340,13 @@ export class PhysicsWorld {
     return found;
   }
 
-  /** Phase 7: one Rapier step (gravity re-read from WORLD_TUNING, so it is live), with the pair filters. */
+  /**
+   * Phase 7: one Rapier step (gravity re-read from WORLD_TUNING, so it is live), with the pair filters. DEVIATION (§3
+   * phase 7 is "physics.step() = rapier.step(eventQueue)"; core-fix): the step also takes the physics hooks, so a pair
+   * filter (addPairFilter: a downed slab and a dynamic body it was enabled inside) can leave a pair out. Only colliders
+   * with ActiveHooks.FILTER_CONTACT_PAIRS reach the hooks; every other pair is stepped as before. Rapier 0.21 raises the
+   * stopped and started events of a pair whose filtering toggles as for any other pair (checked in review).
+   */
   step(): void {
     this.assertLive();
     if (WORLD_TUNING.gravityY !== this.gravityY) {
@@ -354,6 +360,7 @@ export class PhysicsWorld {
    * A filter of the pairs the step leaves out: called (inside the step, so it must only read) with the two bodies'
    * handles of a contact pair one of whose colliders has ActiveHooks.FILTER_CONTACT_PAIRS set; true leaves the pair out
    * (no contact, no impulse, no collision event). Registered once by the system that owns the flagged colliders.
+   * DEVIATION (§1.5.6's PhysicsWorld has no such method; core-fix): DownedBodies' clear-of list needs it (world/downed.ts).
    */
   addPairFilter(f: (body1: number, body2: number) => boolean): void {
     this.pairFilters.push(f);

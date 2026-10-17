@@ -372,11 +372,11 @@ export class ContactSystem {
    * pairs to restoredStarts: its starts are the re-raised ones, and the first step raises them no more (without them the
    * counts of contacts that go on would drop to 0 at the first process()).
    * It replaces every runtime map (core-fix; DEVIATION: §1.5.8 has `restoreRecord(r)`, the graces restored apart): the
-   * groups, the contact graces (`grace`, §8.3 `contactGrace`; none when not given: a grace the world's construction or
-   * the loader's own making of fighters opened goes), the resync and the load's starts. A grace the load itself opens
-   * (§4.3: every history reset, a load's included) is opened after it.
+   * groups, the contact graces (`grace`, §8.3 `contactGrace`, exactly: a grace the world's construction or the loader's
+   * own making of fighters opened goes), the resync and the load's starts. A grace the load itself opens (§4.3: every
+   * history reset, a load's included) is opened after it.
    */
-  restoreRecord(r: ContactRecV1[], grace: readonly (readonly [number, number])[] = []): void {
+  restoreRecord(r: ContactRecV1[], grace: readonly (readonly [number, number])[]): void {
     this.episodes.clear();
     this.graceUntil.clear();
     for (const [f, t] of grace) this.graceUntil.set(f, t);
@@ -408,6 +408,7 @@ export class ContactSystem {
     return [...this.graceUntil].map(([f, t]): [number, number] => [f, t]).sort((x, y) => x[0] - y[0]);
   }
 
+  /** TODO(core-fix): restoreRecord's `grace` does this too (the loader uses that); fold it there once nothing calls it. */
   restoreGrace(r: [number, number][]): void {
     this.graceUntil.clear();
     for (const [f, t] of r) this.graceUntil.set(f, t);

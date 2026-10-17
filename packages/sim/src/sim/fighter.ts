@@ -1121,7 +1121,10 @@ export class Fighter {
    * first half (9 frames for a stick), swung the head 0.53 m at up to 4.7 m/s, plus the step-in's 2.7 m/s: a 6.2 m/s
    * self-motion hit on a block in front, past a human's 6 m/s v_safe, whose hitstun cancelled the take. The pose catches
    * up within the track's hold. DEVIATION (§5.0 plays a work action's pose track as the verb gives it): the verb's
-   * timing (its actAt) is unchanged; only the pose may trail its keys.
+   * timing (its actAt) is unchanged, but the pose now trails the take's track, so the object reaches the hands a few
+   * frames before they reach it (a stick taken from the ground is in the hands at actAt while they are still on the way
+   * down). The cap holds only while workHeadSpeedMps + VERB_TUNING.workStepM / DT stays under a human's v_safe (tested
+   * in tests/posture.test.ts).
    */
   private limitWorkBend(target: Pose): void {
     const max = (characterTuning('workHeadSpeedMps') * DT) / this.scale;

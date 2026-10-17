@@ -106,10 +106,10 @@ export const CHARACTER_TUNING = defineTuning(
     landingKnockdownSpeed: { unit: 'm/s', source: 'NEW' },
     crouchHeightFrac: { unit: '× capsule height', source: 'NEW: a crouched ape is 1.39 m, so it fits under a deadfall log (RT-4)' },
     postureRampFrames: { unit: 'frames for a full posture', source: 'NEW: core-fix (a posture never jumps the pose; head ≤ ~1.5 m/s)', min: 1 },
-    workHeadSpeedMps: { unit: 'm/s × scale (head, relative to the feet)', source: 'NEW: core-fix (a bend at ≤ 2-3 m/s, under v_safe with the step-in)', min: 0 },
+    workHeadSpeedMps: { unit: 'm/s (world; the head, relative to the feet)', source: 'NEW: core-fix (a bend at ≤ 2-3 m/s, under v_safe with the step-in)', min: 0 },
     workRiseMargin: { unit: "× the head's way to the guard", source: 'NEW: core-fix (the rise after a work action at ≤ workHeadSpeedMps)', min: 1 },
     maxHipDropM: { unit: 'm × scale', source: 'NEW: core-fix (rule 3 on slopes: a planted ankle on its plant)', min: 0 },
-    hipDropSpeedMps: { unit: 'm/s × scale', source: 'NEW: core-fix (the hips never jump: the zones ride on them)', min: 0 },
+    hipDropSpeedMps: { unit: 'm/s (world)', source: 'NEW: core-fix (the hips never jump: the zones ride on them)', min: 0 },
     zoneShapes: {
       headR: { unit: 'm × scale', source: 'DS (ragdoll.ts head ball)' },
       headUp: { unit: 'm × scale along the bone', source: 'DS (ragdoll.ts head ball)' },

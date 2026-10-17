@@ -1,4 +1,5 @@
 import { Vector3 } from 'three';
+import { DT } from '../sim/math';
 import { MOVE_TUNING } from '../sim/rules';
 import { getTuningValue } from '../tuning/registry';
 import type { GroundQuery, V3 } from '../world/types';
@@ -450,13 +451,13 @@ export class Footwork {
 
   /**
    * The hips' drop one tick on (world ground; core-fix: rule 3, a planted foot neither floats nor sinks on a slope):
-   * toward hipDropTarget at no more than CHARACTER_TUNING.hipDropSpeedMps (× scale), so the hips never jump (the zones
+   * toward hipDropTarget at no more than CHARACTER_TUNING.hipDropSpeedMps (world m/s), so the hips never jump (the zones
    * ride on them). The poses lower their root by `hipDrop` (sim/fighter.ts). Read once a tick, after `update`.
    */
   updateHipDrop(body: Body): void {
     const target = this.hipDropTarget(body);
     if (target === 0 && this.hipDrop === 0) return;
-    const step = (hipTuning('hipDropSpeedMps') * (1 / 60)) / (body.scale ?? 1);
+    const step = (hipTuning('hipDropSpeedMps') * DT) / (body.scale ?? 1);
     this.hipDrop = target > this.hipDrop ? Math.min(target, this.hipDrop + step) : Math.max(target, this.hipDrop - step);
   }
 
