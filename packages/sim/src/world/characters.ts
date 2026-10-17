@@ -26,6 +26,7 @@
 import RAPIER from '@dimforge/rapier3d-compat';
 import { BONE_ZONE } from '../body/mass';
 import type { KccRecV1 } from '../save/schema';
+import type { CombatSim } from '../sim/combat';
 import { MOVE_CROUCH } from '../sim/commands';
 import type { Fighter } from '../sim/fighter';
 import { applyImpact } from '../sim/impact';
@@ -655,7 +656,7 @@ export class CharacterControllers implements FighterMover {
     const impactorMass = !e || e.state === 'fixed' || e.state === 'anchored' || w.entities.isAnchored(e) ? Infinity : e.mass;
     const impact = landingImpact(f, v, cause, point, impactorMass);
     w.events.push({ type: 'land', entity: e ? e.id : null, f, point, energy: impact?.energy ?? 0, mass: f.mass });
-    if (impact) applyImpact(w.combat, impact);
+    if (impact) applyWorldImpact(w.combat, impact);
     if (v > CHARACTER_TUNING.landingKnockdownSpeed && f.alive && f.state !== 'knockdown') f.enterKnockdown();
   }
 }
@@ -694,6 +695,20 @@ export function landingImpact(f: Fighter, v: number, cause: ImpactCause, point: 
 /** m/s: the species' v_safe (SPEC_BODY, 6·√scale, D-4); a fighter of no species lands as a human of its scale. */
 export function safeLandingSpeed(f: Fighter): number {
   return f.species ? SPECIES_BODY[f.species].vSafe : SPECIES_BODY.human.vSafe * Math.sqrt(f.scale);
+}
+
+/**
+ * applyImpact, or nothing while sim/impact.ts is still P01's placeholder (it throws): a landing before P09 must not
+ * throw from inside step(), as World.onKO's classification doesn't (world.ts classifyKO).
+ * TODO(P09): once applyImpact is filled the placeholder's error never occurs; fold this back into a plain call.
+ */
+function applyWorldImpact(sim: CombatSim, i: Impact): void {
+  try {
+    applyImpact(sim, i);
+  } catch (e) {
+    if (e instanceof Error && e.message.startsWith('sim/impact.ts: applyImpact is not implemented yet')) return;
+    throw e;
+  }
 }
 
 function paramsFor(scale: number): Params {
