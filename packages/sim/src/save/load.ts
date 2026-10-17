@@ -51,6 +51,7 @@ import { WEAPONS } from '../sim/weapons';
 import { resetTuning, restoreTuning, setTuningValue, TUNING, tuningSnapshot } from '../tuning/registry';
 import { MATERIALS } from '../world/materials';
 import { physicsReady } from '../world/physics';
+import type { MindScript, MindState } from '../world/creatures/mind';
 import type { VerbStateRecord } from '../world/verbs/index';
 import type {
   CauseFeature,
@@ -61,6 +62,7 @@ import type {
   Owner,
   PlantState,
   Pose3,
+  PostureId,
   Quat,
   RulerState,
   RulerZoneId,
@@ -999,13 +1001,17 @@ const MIND_KEYS: readonly (keyof MindRecV1)[] = [
   'kind',
   'state',
   'stateTick',
+  'resume',
+  'mark',
   'paused',
   'script',
   'awareness',
   'lkp',
   'lkpTick',
   'lastSeenTick',
+  'stimulus',
   'hurt',
+  'home',
   'homeIdx',
   'routeIdx',
   'restUntil',
@@ -1019,25 +1025,130 @@ const MIND_KEYS: readonly (keyof MindRecV1)[] = [
   'inner',
 ];
 
-/** A mind record: its keys and kinds (§6.8); P19's restoreRecord reads its fields. */
+/** Every MindState (world/creatures/mind.ts). */
+const MIND_STATE_DOMAIN: Readonly<Record<MindState, true>> = {
+  idle: true,
+  patrol: true,
+  investigate: true,
+  chase: true,
+  fight: true,
+  flee: true,
+  return: true,
+  rest: true,
+  telegraph: true,
+  charge: true,
+  recover: true,
+  down: true,
+  dead: true,
+};
+
+/** Every PostureId (world/types.ts), for a `hold` script. */
+const SCRIPT_POSTURES: Readonly<Record<PostureId, true>> = {
+  crouch: true,
+  carryFront: true,
+  carryShoulder: true,
+  dragBack: true,
+  haulRope: true,
+  workLow: true,
+  workKnap: true,
+  digScoop: true,
+  aimThrow: true,
+  headLow: true,
+  sniff: true,
+  climbOut: true,
+};
+
+/**
+ * A mind record (§6.8; CreatureMind.toRecord), every field checked: its keys, the states, the script by kind, the
+ * senses (`stimulus` may be Infinity: the window after a hurt), the memory, the timers, a charge, the path (one version
+ * per tile, the corner within the points) and the stuck window. The inner BrawlerAI's fields are read by
+ * BrawlerAI.restoreRecord itself (P04's readers).
+ */
 function mind(v: unknown, p: string): MindRecV1 {
   const o = exactKeys(obj(v, p), MIND_KEYS, p);
   nat(o.fighter, `${p}.fighter`);
   oneOf(o.kind, { ape: true, giantApe: true }, `${p}.kind`);
-  str(o.state, `${p}.state`);
+  oneOf(o.state, MIND_STATE_DOMAIN, `${p}.state`);
+  nullable(o.resume, `${p}.resume`, (x, q) => oneOf(x, MIND_STATE_DOMAIN, q));
   bool(o.paused, `${p}.paused`);
   u32(o.rng, `${p}.rng`);
-  for (const k of ['stateTick', 'lkpTick', 'lastSeenTick', 'homeIdx', 'routeIdx', 'restUntil', 'cooldownUntil', 'fleeUntil'] as const) int(o[k], `${p}.${k}`);
-  num(o.heading, `${p}.heading`);
+  for (const k of ['stateTick', 'mark', 'lkpTick', 'lastSeenTick', 'homeIdx', 'routeIdx', 'restUntil', 'cooldownUntil', 'fleeUntil'] as const) int(o[k], `${p}.${k}`);
+  fin(o.heading, `${p}.heading`);
+  num(o.stimulus, `${p}.stimulus`);
   arr(o.awareness, `${p}.awareness`).forEach((x, i) => pair(x, `${p}.awareness[${i}]`, nat, fin));
   nullable(o.lkp, `${p}.lkp`, v3);
-  nullable(o.script, `${p}.script`, obj);
-  nullable(o.hurt, `${p}.hurt`, obj);
-  nullable(o.charge, `${p}.charge`, obj);
-  nullable(o.path, `${p}.path`, obj);
-  obj(o.stuck, `${p}.stuck`);
+  nullable(o.script, `${p}.script`, mindScript);
+  nullable(o.hurt, `${p}.hurt`, (x, q) => {
+    const h = exactKeys(obj(x, q), ['tick', 'point'], q);
+    int(h.tick, `${q}.tick`);
+    return v3(h.point, `${q}.point`);
+  });
+  const home = exactKeys(obj(o.home, `${p}.home`), ['x', 'z'], `${p}.home`);
+  fin(home.x, `${p}.home.x`);
+  fin(home.z, `${p}.home.z`);
+  nullable(o.charge, `${p}.charge`, (x, q) => {
+    const c = exactKeys(obj(x, q), ['heading', 'start', 'travelled', 'close'], q);
+    fin(c.heading, `${q}.heading`);
+    v3(c.start, `${q}.start`);
+    fin(c.travelled, `${q}.travelled`);
+    return bool(c.close, `${q}.close`);
+  });
+  nullable(o.path, `${p}.path`, (x, q) => {
+    const pa = exactKeys(obj(x, q), ['points', 'i', 'goal', 'complete', 'tiles', 'versions', 'requestTick', 'pending'], q);
+    const points = arr(pa.points, `${q}.points`).map((pt, k) => v3(pt, `${q}.points[${k}]`));
+    const i = nat(pa.i, `${q}.i`);
+    if (i > points.length) fail(`${q}.i`, i, `a corner of its ${points.length} points (or their end)`);
+    v3(pa.goal, `${q}.goal`);
+    bool(pa.complete, `${q}.complete`);
+    const tiles = arr(pa.tiles, `${q}.tiles`).map((t, k) => nat(t, `${q}.tiles[${k}]`));
+    const versions = arr(pa.versions, `${q}.versions`).map((t, k) => u32(t, `${q}.versions[${k}]`));
+    if (tiles.length !== versions.length) fail(`${q}.versions`, versions, `one version per tile (${tiles.length})`);
+    int(pa.requestTick, `${q}.requestTick`);
+    return bool(pa.pending, `${q}.pending`);
+  });
+  const st = exactKeys(obj(o.stuck, `${p}.stuck`), ['pos', 'tick', 'count'], `${p}.stuck`);
+  v3(st.pos, `${p}.stuck.pos`);
+  int(st.tick, `${p}.stuck.tick`);
+  nat(st.count, `${p}.stuck.count`);
   nullable(o.inner, `${p}.inner`, obj);
   return o as unknown as MindRecV1;
+}
+
+/** A mind's script (§6.6), by kind, with its optional fields. */
+function mindScript(v: unknown, p: string): MindScript {
+  const o = obj(v, p);
+  switch (oneOf(o.kind, { route: true, charge: true, tug: true, hold: true }, `${p}.kind`)) {
+    case 'route':
+      exactKeys(o, ['kind', 'points'], p, ['speed', 'gait', 'useNav', 'crouch']);
+      arr(o.points, `${p}.points`).forEach((x, i) => {
+        const q = `${p}.points[${i}]`;
+        const pt = exactKeys(obj(x, q), ['x', 'z'], q);
+        fin(pt.x, `${q}.x`);
+        fin(pt.z, `${q}.z`);
+      });
+      if (o.speed !== undefined) fin(o.speed, `${p}.speed`);
+      if (o.gait !== undefined) fin(o.gait, `${p}.gait`);
+      if (o.useNav !== undefined) bool(o.useNav, `${p}.useNav`);
+      if (o.crouch !== undefined) bool(o.crouch, `${p}.crouch`);
+      break;
+    case 'charge':
+      exactKeys(o, ['kind', 'heading', 'speed'], p, ['telegraph']);
+      fin(o.heading, `${p}.heading`);
+      fin(o.speed, `${p}.speed`);
+      if (o.telegraph !== undefined) bool(o.telegraph, `${p}.telegraph`);
+      break;
+    case 'tug':
+      exactKeys(o, ['kind', 'entity', 'dirYaw', 'ticks'], p);
+      nat(o.entity, `${p}.entity`);
+      fin(o.dirYaw, `${p}.dirYaw`);
+      nat(o.ticks, `${p}.ticks`);
+      break;
+    case 'hold':
+      exactKeys(o, ['kind'], p, ['posture']);
+      if (o.posture !== undefined) oneOf(o.posture, SCRIPT_POSTURES, `${p}.posture`);
+      break;
+  }
+  return o as unknown as MindScript;
 }
 
 /**
