@@ -1425,12 +1425,21 @@ export class CombatSim {
   /**
    * The only way into 'ko' (docs/M1-DESIGN.md §4.4): once per fighter (a second call does nothing), it knocks them
    * out, lets the world classify the kill and run parts and death (legacy: not environmental, nobody's credit), and
-   * reports it as a `ko` event.
+   * reports it as a `ko` event. The world and the event each get their own copy of `finish.point` (callers may pass a
+   * live vector, such as the pelvis).
+   *
+   * Order, for the world (P09) and the event readers (P18, P36): it runs at the KO site. Inside hit() that is before
+   * the blow's own `hit` event and before the blow's fatal head wound, sever, tear and weapon drop are applied, so
+   * `onKO` sees a partly updated fighter and must defer anything that depends on gore or limbs to the end of the tick;
+   * the first KO site of a blow decides `by` (a crown split on a fighter already at 0 HP reports 'strike'). On a
+   * bleed-out it comes before the `drop` and `bleedout` events.
    */
   koFighter(d: Fighter, finish: Finish) {
     if (d.state === 'ko') return;
     d.enterKO();
-    const r = this.world ? this.world.onKO(d, finish) : NO_WORLD_KO;
+    // (Taken before the world runs, which may move the body the point came from.)
+    const at = new Vector3(finish.point.x, finish.point.y, finish.point.z);
+    const r = this.world ? this.world.onKO(d, { ...finish, point: at.clone() }) : NO_WORLD_KO;
     this.events.push({
       type: 'ko',
       victim: d,
@@ -1439,7 +1448,7 @@ export class CombatSim {
       cause: finish.cause,
       environmental: r.environmental,
       credit: [...r.credit],
-      point: new Vector3(finish.point.x, finish.point.y, finish.point.z),
+      point: at,
     });
   }
 

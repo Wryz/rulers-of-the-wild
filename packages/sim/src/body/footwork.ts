@@ -195,6 +195,10 @@ export class Footwork {
       }
     }
 
+    // A planted foot stays on whatever is under it now: ground a world set after the feet were placed, a log that
+    // rolled away, a dug hole (a flat floor: nothing to do, as in DungeonStyle).
+    for (const f of [this.L, this.R]) if (!f.stepping) plant(f.pos, body);
+
     // Progress active steps, re-aiming at the moving home (the body keeps turning/moving).
     for (const f of [this.L, this.R]) {
       if (!f.stepping) continue;
@@ -400,7 +404,7 @@ export class Footwork {
     if (!limp || !(limp.amount > 0)) return;
     const a = Math.min(1, limp.amount);
     if (f.side === limp.side) f.height *= 1 - (1 - MOVE_TUNING.limpStepHeightMul) * a;
-    else f.dur = Math.max(4, Math.round(f.dur * (1 - MOVE_TUNING.limpStanceMul * a)));
+    else f.dur = Math.max(MOVE_TUNING.limpMinStepFrames, Math.round(f.dur * (1 - MOVE_TUNING.limpStanceMul * a)));
   }
 
   /** Are the feet on the wrong sides of each other (relative to where the body faces)? */
@@ -413,6 +417,13 @@ export class Footwork {
   /**
    * Ankle IK target in fighter-local space, including step lift and an extra raise (toes), and the height of the
    * ground under the foot above the body's own feet (0 on a flat floor).
+   *
+   * TODO(P08 character controller / P32 rendering, or the AC-9 playtest): on a slope the pelvis stays at the body's
+   * own ground height, so a foot planted further downhill than the leg can reach doesn't get there (rule 3: it
+   * floats or sinks). The target is right (on a 0.05 grade the rig's ankles sit exactly as on flat ground), but
+   * walking a 0.15 grade an ankle misses its planted height by up to 0.063 m and on 0.3 by 0.108 m (0.019 m on flat
+   * ground, the stepping arc), and standing on a 0.3 grade by up to 0.054 m more than on flat ground. Lower the
+   * pelvis for the downhill leg, or clamp the plant to the leg's reach.
    */
   localTarget(side: Side, body: Body, raise: number): [number, number, number] {
     const f = this.foot(side);

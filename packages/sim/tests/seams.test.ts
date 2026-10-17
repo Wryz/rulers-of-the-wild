@@ -5,14 +5,15 @@ import { Vector3 } from 'three';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { TrackKey } from '../src/body/animator';
 import { getPose } from '../src/body/poses';
-import { BONES, forwardKinematics, makeRig } from '../src/body/skeleton';
+import { ANKLE_HEIGHT, BONES, bonePoint, forwardKinematics, makeRig, SKELETON } from '../src/body/skeleton';
 import { BrawlerAI, type Brain } from '../src/sim/ai';
 import { blowDamage, type CombatEvent, CombatSim, FLAT_GROUND, type HurtZone } from '../src/sim/combat';
 import { type Command, MOVE_CROUCH, MOVE_SPRINT, moveCommand } from '../src/sim/commands';
 import { createEnemy } from '../src/sim/enemies';
 import { Fighter, GETUP_FRAMES, IdCounter, LEGACY_IDS } from '../src/sim/fighter';
 import { DT, Rng, seedFor } from '../src/sim/math';
-import { PLAYER_MOVES, type MoveDef } from '../src/sim/moves';
+import { ENEMY_MOVES, PLAYER_MOVES, type MoveDef } from '../src/sim/moves';
+import type { Projectile } from '../src/sim/projectiles';
 import { createBrawler, createPlayer } from '../src/sim/roster';
 import {
   DAMAGE_TUNING,
@@ -24,7 +25,7 @@ import {
   zoneToughness,
 } from '../src/sim/rules';
 import { WEAPON_MOVES, WEAPONS } from '../src/sim/weapons';
-import { resetTuning, TUNING, tuningLeaves } from '../src/tuning/registry';
+import { resetTuning, setTuningValue, TUNING, tuningLeaves } from '../src/tuning/registry';
 import type { BoneName } from '../src/body/skeleton';
 import type { Finish, FighterMover, GroundQuery, Work, WorldPort } from '../src/world/types';
 
@@ -236,6 +237,29 @@ describe('the seams', () => {
     expect(brain!.ownsTarget).toBe(false);
   });
 
+  it('leaves a brain that owns its target alone (no retargeting); DS brains are locked onto the nearest', () => {
+    const run = (ownsTarget: boolean) => {
+      const sim = new CombatSim(3);
+      const ids = new IdCounter();
+      const near = createPlayer({ ids });
+      const far = createPlayer({ ids });
+      const { fighter: e, ai } = createBrawler(sim.rng, { passive: true }, { ids });
+      const brain: Brain = { cfg: ai.cfg, director: null, drops: [], ownsTarget, think: () => {} };
+      near.pos.set(1, 0, 0);
+      far.pos.set(-5, 0, 0);
+      sim.add(near);
+      sim.add(far);
+      sim.add(e, brain);
+      e.target = far;
+      for (let i = 0; i < 30; i++) sim.step();
+      return { e, near, far };
+    };
+    const own = run(true);
+    expect(own.e.target).toBe(own.far);
+    const ds = run(false);
+    expect(ds.e.target).toBe(ds.near);
+  });
+
   it('lets the mover resolve each standing fighter once per tick, in order, y included; downed bodies are left alone', () => {
     const { sim, player, enemy } = duel();
     const calls: [number, number, number][] = [];
@@ -269,13 +293,19 @@ describe('the seams', () => {
     expect(player.ground).toBe(ground);
     expect(enemy.ground).toBe(ground);
     sim.commands.push(moveCommand(sim.frame + 1, player.id, 0, 1));
-    for (let i = 0; i < 40; i++) sim.step();
-    for (const f of [player, enemy]) {
-      expect(f.pos.y).toBeCloseTo(ground.heightAt(f.pos.x, f.pos.z), 12);
-      for (const foot of [f.footwork.L, f.footwork.R]) {
-        if (!foot.stepping) expect(foot.pos.y).toBeCloseTo(ground.heightAt(foot.pos.x, foot.pos.z), 12);
+    let planted = 0;
+    for (let i = 0; i < 40; i++) {
+      sim.step();
+      for (const f of [player, enemy]) {
+        expect(f.pos.y).toBeCloseTo(ground.heightAt(f.pos.x, f.pos.z), 12);
+        for (const foot of [f.footwork.L, f.footwork.R]) {
+          if (foot.stepping) continue;
+          expect(foot.pos.y).toBeCloseTo(ground.heightAt(foot.pos.x, foot.pos.z), 12);
+          planted++;
+        }
       }
     }
+    expect(planted).toBeGreaterThan(40);
     const drop = sim.addDrop(WEAPONS.machete, 3, 1);
     expect(drop.pos.y).toBeCloseTo(0.35, 12);
     // A fighter added later gets it too; flat ground again clears it.
@@ -292,9 +322,74 @@ describe('the seams', () => {
     const { sim, player } = duel(2);
     sim.ground = { heightAt: () => 0, supportAt: (x) => (x < 0.05 ? 0.3 : 0) };
     sim.commands.push(moveCommand(sim.frame + 1, player.id, 0, 1));
-    for (let i = 0; i < 30; i++) sim.step();
-    for (const foot of [player.footwork.L, player.footwork.R]) {
-      if (!foot.stepping) expect(foot.pos.y).toBe(foot.pos.x < 0.05 ? 0.3 : 0);
+    const seen = { onSupport: 0, onTerrain: 0 };
+    for (let i = 0; i < 30; i++) {
+      sim.step();
+      for (const foot of [player.footwork.L, player.footwork.R]) {
+        if (foot.stepping) continue;
+        expect(foot.pos.y).toBe(foot.pos.x < 0.05 ? 0.3 : 0);
+        seen[foot.pos.x < 0.05 ? 'onSupport' : 'onTerrain']++;
+      }
+    }
+    expect(seen.onSupport).toBeGreaterThan(0);
+    expect(seen.onTerrain).toBeGreaterThan(0);
+  });
+
+  it('lands every step on the ground where the foot comes down, walking up a grade (re-planted as it re-aims)', () => {
+    const sim = new CombatSim(1);
+    sim.walkable = { resolve: () => {}, isWalkable: () => true };
+    const ground: GroundQuery = { heightAt: (_x, z) => 0.1 * z };
+    sim.ground = ground;
+    const f = new Fighter('player', 'Walker', PLAYER_MOVES, { walkSpeed: 2.6 }, undefined, { ids: new IdCounter() });
+    sim.add(f);
+    let landings = 0;
+    const was = { L: false, R: false };
+    for (let i = 0; i < 240; i++) {
+      sim.commands.push(moveCommand(sim.frame + 1, f.id, 0, 1));
+      sim.step();
+      for (const foot of [f.footwork.L, f.footwork.R]) {
+        // A foot that has just come down (its stride re-aimed every tick as the body walks on).
+        if (was[foot.side] && !foot.stepping) {
+          expect(foot.pos.y, `tick ${i}`).toBeCloseTo(ground.heightAt(foot.pos.x, foot.pos.z), 12);
+          landings++;
+        }
+        was[foot.side] = foot.stepping;
+      }
+    }
+    expect(f.pos.z).toBeGreaterThan(3);
+    expect(landings).toBeGreaterThan(10);
+  });
+
+  it('reaches each planted foot with the leg on gentle slopes: the rig\'s ankles sit as they do on flat ground', () => {
+    /** Each tick, each foot of both fighters: the rig's ankle (the shin's end) above the foot's planted point. */
+    const ankles = (ground: GroundQuery | null) => {
+      const sim = new CombatSim(3);
+      if (ground) sim.ground = ground;
+      const { player, enemy } = duel(1.6, sim);
+      const out: number[] = [];
+      let still = 0;
+      const at = new Vector3();
+      for (let i = 0; i < 120; i++) {
+        sim.step();
+        for (const f of [player, enemy]) {
+          for (const foot of [f.footwork.L, f.footwork.R]) {
+            const shin = foot.side === 'L' ? 'shinL' : 'shinR';
+            out.push(bonePoint(f.rig, shin, SKELETON[shin].length, at).y - foot.pos.y);
+            if (!foot.stepping) still++;
+          }
+        }
+      }
+      return { out, still };
+    };
+    const flat = ankles(null);
+    expect(flat.still).toBeGreaterThan(100);
+    // (On flat ground a planted ankle is ANKLE_HEIGHT up, give or take the toes and the guard's bent knees.)
+    expect(Math.min(...flat.out)).toBeGreaterThan(ANKLE_HEIGHT - 0.05);
+    for (const ground of [{ heightAt: (x: number) => 0.05 * x }, { heightAt: (_x: number, z: number) => 0.2 - 0.05 * z }]) {
+      const slope = ankles(ground);
+      // The feet stand where they would on flat ground (only y differs), and each leg reaches its foot as it would.
+      expect(slope.out.length).toBe(flat.out.length);
+      for (let i = 0; i < flat.out.length; i++) expect(Math.abs(slope.out[i] - flat.out[i])).toBeLessThan(1e-9);
     }
   });
 });
@@ -375,6 +470,33 @@ describe('strikes on raised ground (§4.1; MAP tests §7.5 C2)', () => {
     expect(drops).toEqual([0.5]);
     expect(low).toBeGreaterThan(0.5);
   });
+
+  it('defends against a thrown weapon coming in low over the raised floor, not one that will be under it', () => {
+    /** Whether the player, on ground 0.5, reacts to an axe thrown at it that will be at height `y` when it arrives. */
+    const reacts = (y: number) => {
+      const sim = new CombatSim(4);
+      sim.ground = { heightAt: () => 0.5 };
+      const { player, enemy } = duel(3, sim);
+      sim.step();
+      expect(player.pos.y).toBe(0.5);
+      // (Sharp enough to read anything in time: the roll always comes up.)
+      player.readSkill = 10;
+      // 1.5 m out at 10 m/s: 0.15 s (9 frames) away, falling 4.9 × 0.15² m on the way.
+      const tc = 0.15;
+      const p: Projectile = {
+        id: 1, serial: -1001, weapon: WEAPONS.axe, owner: enemy, scale: 1, pos: new Vector3(1.5, y + 4.9 * tc * tc, 0),
+        vel: new Vector3(-10, 0, 0), axis: new Vector3(0, 0, 1), omega: 0, angle: 0, dir0: new Vector3(1, 0, 0), com: 0.4,
+        live: true, age: 3,
+      };
+      sim.projectiles.push(p);
+      (sim as unknown as { defendProjectiles(f: Fighter): void }).defendProjectiles(player);
+      return sim.events.some((e) => e.type === 'defend' && e.f === player);
+    };
+    // Low over the floor: legs out of the way.
+    expect(reacts(0.7)).toBe(true);
+    // Under the floor there: it lands before it gets to them.
+    expect(reacts(0.3)).toBe(false);
+  });
 });
 
 describe('knockouts: koFighter', () => {
@@ -394,6 +516,9 @@ describe('knockouts: koFighter', () => {
     expect(first[0]).toMatchObject({ victim: enemy, by: 'impact', killer: null, cause: null, environmental: true, credit: ['p1'] });
     expect(first[0].point.toArray()).toEqual([1, 2, 3]);
     expect(asked).toEqual([[enemy, finish]]);
+    // The world and the event each hold their own copy of the point (a caller may pass a live vector).
+    expect(asked[0][1].point).not.toBe(finish.point);
+    expect(asked[0][1].point).not.toBe(first[0].point);
     enemy.stateFrame = 30;
     sim.koFighter(enemy, { ...finish, by: 'strike' });
     expect(kos(sim.events)).toHaveLength(1);
@@ -418,12 +543,28 @@ describe('knockouts: koFighter', () => {
 
   it('reports a bleed-out as by bleed, before the weapon drops and the bleedout event', () => {
     const { sim, enemy } = duel();
+    const at: Vector3[] = [];
+    sim.world = port((_d, finish) => {
+      at.push(finish.point as Vector3);
+      return { environmental: false, credit: [] };
+    });
     enemy.weapon = WEAPONS.machete;
     enemy.hp = 0.001;
     enemy.wounds.push({ bone: 'chest', local: [0, 0.1, 0.1], angle: 0, length: 0.1, bleed: 1, floor: 0.5 });
     const ev = sim.step();
     expect(ev.map((e) => e.type).filter((t) => t === 'ko' || t === 'drop' || t === 'bleedout')).toEqual(['ko', 'drop', 'bleedout']);
-    expect(kos(ev)[0]).toMatchObject({ victim: enemy, by: 'bleed', killer: null, cause: null, environmental: false, credit: [] });
+    const ko = kos(ev)[0];
+    expect(ko).toMatchObject({ victim: enemy, by: 'bleed', killer: null, cause: null, environmental: false, credit: [] });
+    // At the pelvis, as copies: the body keeps moving after it, the recorded points don't.
+    expect(at).toHaveLength(1);
+    expect(at[0].toArray()).toEqual(enemy.rig.pelvis.pos.toArray());
+    expect(at[0]).not.toBe(enemy.rig.pelvis.pos);
+    expect(ko.point).not.toBe(enemy.rig.pelvis.pos);
+    const kept = ko.point.toArray();
+    for (let i = 0; i < 30; i++) sim.step();
+    expect(enemy.rig.pelvis.pos.toArray()).not.toEqual(kept);
+    expect(ko.point.toArray()).toEqual(kept);
+    expect(at[0].toArray()).toEqual(kept);
   });
 
   it('reports a thrown weapon\'s KO as thrown', () => {
@@ -442,27 +583,38 @@ describe('knockouts: koFighter', () => {
 
 describe('melee through the rule: blowDamage and the toughness line (§4.4)', () => {
   it('blowDamage is hit()\'s damage, bit for bit, and with T = 0 hit() deals exactly it', () => {
+    // Blows whose damage doesn't survive the rule's round trip through joules: (x · 18) / 18 !== x. With T = 0 the
+    // toughness line must be skipped, not applied, or these come out different.
+    let roundTripChanges = 0;
     for (const [zone, bone] of [
       ['head', 'head'],
       ['chest', 'chest'],
       ['legs', 'thighL'],
     ] as const) {
       for (const m of [PLAYER_MOVES.jab, PLAYER_MOVES.cross, WEAPON_MOVES.overhead]) {
-        const { sim, player, enemy } = duel();
-        if (m.weapon) player.weapon = WEAPONS.axe;
-        player.swingStamina = 0.7;
-        player.isCounterAttack = m === PLAYER_MOVES.cross;
-        enemy.stats.defense = 0.2;
-        enemy.hp = enemy.minHp = 50;
-        expect(zoneToughness(enemy, zone)).toBe(0);
-        const want = blowDamage(player, enemy, m, 1, false, null);
-        hit(sim, player, enemy, m, zone, bone);
-        const ev = hitsOn(sim.events, enemy)[0];
-        expect(Object.is(ev.damage, want), `${m.id} on ${bone}`).toBe(true);
-        expect(ev.energy).toBeUndefined();
-        expect(ev.toughness).toBeUndefined();
+        for (const [swing, counter] of [
+          [0.7, m === PLAYER_MOVES.cross],
+          [0.9, true],
+          [0.9, false],
+        ] as const) {
+          const { sim, player, enemy } = duel();
+          if (m.weapon) player.weapon = WEAPONS.axe;
+          player.swingStamina = swing;
+          player.isCounterAttack = counter;
+          enemy.stats.defense = 0.2;
+          enemy.hp = enemy.minHp = 50;
+          expect(zoneToughness(enemy, zone)).toBe(0);
+          const want = blowDamage(player, enemy, m, 1, false, null);
+          if (!Object.is(hpFromEnergy(want * DAMAGE_TUNING.meleeJPerDmg, 0), want)) roundTripChanges++;
+          hit(sim, player, enemy, m, zone, bone);
+          const ev = hitsOn(sim.events, enemy)[0];
+          expect(Object.is(ev.damage, want), `${m.id} on ${bone}`).toBe(true);
+          expect(ev.energy).toBeUndefined();
+          expect(ev.toughness).toBeUndefined();
+        }
       }
     }
+    expect(roundTripChanges).toBeGreaterThan(0);
   });
 
   it('blowDamage without a defender takes no defence off', () => {
@@ -529,6 +681,31 @@ describe('lastKnock at the DS knockback sites (§4.4)', () => {
     s2.enemy.startDefense('block', 1);
     (s2.sim as unknown as { block(...args: unknown[]): void }).block(s2.player, s2.enemy, PLAYER_MOVES.jab, new Vector3(0.5, 1.4, 0), new Vector3(1, 0, 0));
     expect(s2.player.lastKnock?.by).toBe(s2.enemy.id);
+  });
+
+  it('a teep jammed in close still shoves them, and records it', () => {
+    // Thrown from too close, the shin or knee arrives before the foot (resolveJams): a narrow band of distances.
+    let jammed = 0;
+    for (let cm = 40; cm <= 70; cm++) {
+      const { sim, player, enemy } = duel(cm / 100);
+      player.autoDefense = false;
+      sim.step();
+      player.startMove(ENEMY_MOVES.teep);
+      for (let i = 0; i < 40; i++) {
+        const ev = sim.step();
+        if (hitsOn(ev, enemy).length) break;
+        if (!ev.some((e) => e.type === 'bump' && e.attacker === player)) continue;
+        jammed++;
+        expect(enemy.lastKnock, `${cm} cm`).toEqual({
+          tick: sim.frame,
+          by: player.id,
+          cause: { kind: 'creature', entityId: null, fighterId: player.id, credit: [], held: false, feature: 'creature' },
+        });
+        expect(player.lastKnock).toBeNull();
+        break;
+      }
+    }
+    expect(jammed).toBeGreaterThan(0);
   });
 
   it('a weapon swung with too little behind it bumps them, and that counts too', () => {
@@ -627,8 +804,25 @@ describe('the fighter\'s M1 fields', () => {
       expect(enemy.rig[b].pos.toArray()).toEqual(want[b].pos.toArray());
       expect(enemy.rig[b].rot.toArray()).toEqual(want[b].rot.toArray());
     }
-    // Melee still finds the lying body (no skip list names 'tripped').
     expect(enemy.alive).toBe(true);
+  });
+
+  it("'tripped': melee still finds the body (no skip list names it), as it doesn't a knocked-down one", () => {
+    /** Whether a cross thrown at the enemy, frozen in `state`, lands. */
+    const lands = (state: 'tripped' | 'knockdown') => {
+      const { sim, player, enemy } = duel(0.9);
+      player.autoDefense = false;
+      for (let i = 0; i < 5; i++) sim.step();
+      sim.physicsOwnsDowned = true;
+      enemy.setState(state);
+      enemy.stunFrames = 1000;
+      player.startMove(PLAYER_MOVES.cross);
+      const all: CombatEvent[] = [];
+      for (let i = 0; i < 40; i++) all.push(...sim.step());
+      return hitsOn(all, enemy).length;
+    };
+    expect(lands('tripped')).toBe(1);
+    expect(lands('knockdown')).toBe(0);
   });
 
   it('idlePaused freezes idle life (no weight shift, look-around, feint or breathing); unpaused it moves', () => {
@@ -679,6 +873,11 @@ describe('the fighter\'s M1 fields', () => {
     // The good leg isn't dragged; the bad leg's own swing isn't hurried.
     expect(mean(lame.L.height)).toBeCloseTo(mean(sound.L.height), 2);
     expect(mean(lame.R.dur)).toBeCloseTo(mean(sound.R.dur), 0);
+    // However hurried, the good leg's swing takes at least limpMinStepFrames.
+    const floor = Math.ceil(mean(lame.L.dur)) + 2;
+    expect(Math.min(...sound.L.dur)).toBeGreaterThanOrEqual(floor);
+    setTuningValue('MOVE_TUNING', 'limpMinStepFrames', floor);
+    expect(Math.min(...steps(true).L.dur)).toBe(floor);
   });
 });
 
@@ -692,6 +891,8 @@ describe('sim/rules.ts', () => {
       sprintMul: 1.4, sprintStaminaPerS: 0.15, sprintMinStamina: 0.1, crouchSpeedMul: 0.5, jumpStamina: 0.05,
       jumpBufferFrames: 6, carrySpeedPerKg: 0.01, carrySpeedMin: 0.6, carryRegenPerKg: 0.015, carryRegenMin: 0.4,
       carryNoSprintKg: 20, dragSpeedMul: 0.75, pullWalkMul: 0.2,
+      // (Not in §9: the limp gait's, §6.4.)
+      limpStanceMul: 0.4, limpStepHeightMul: 0.5, limpMinStepFrames: 4,
     });
     for (const [name, folder] of [
       ['DAMAGE_TUNING', 'Damage rule'],
