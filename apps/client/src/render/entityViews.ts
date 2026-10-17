@@ -658,13 +658,16 @@ export class EntityViews {
     this.cracks.end();
     for (const id of [...this.own.keys()]) if (!seen.has(id)) this.dropOwn(id);
     for (const id of this.drawn.keys()) if (!seen.has(id)) this.drawn.delete(id);
-    // An instancer nothing has used for a minute goes (a fractured piece's one-off hull).
-    for (const [k, i] of this.instancers) {
+    // An instancer nothing has used for a minute goes (a fractured piece's one-off hull), and its geometry with the
+    // last instancer that shares it (one per material).
+    for (const [k, i] of [...this.instancers]) {
       if (i.idle < 3600) continue;
       i.dispose(false);
-      this.geometries.get(k.split('|')[0])?.dispose();
-      this.geometries.delete(k.split('|')[0]);
       this.instancers.delete(k);
+      const proto = k.slice(0, k.lastIndexOf('|'));
+      if ([...this.instancers.keys()].some((o) => o.slice(0, o.lastIndexOf('|')) === proto)) continue;
+      this.geometries.get(proto)?.dispose();
+      this.geometries.delete(proto);
     }
   }
 
@@ -830,7 +833,8 @@ export function sharpCone(shape: Shape, sp: { local: V3; dir: V3; sharpness: num
   const k = out / d;
   return {
     tip: { x: sp.local.x + sp.dir.x * k, y: sp.local.y + sp.dir.y * k, z: sp.local.z + sp.dir.z * k },
-    length: out + Math.min(reach, E.sharpConeLenM),
+    // (Its base just under the surface, so the stub is thick where it leaves the wood, a broken branch's knob.)
+    length: out + E.snagStubRadiusM,
     radius: E.snagStubRadiusM * (0.6 + 0.4 * s),
   };
 }

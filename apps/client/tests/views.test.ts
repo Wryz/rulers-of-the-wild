@@ -606,6 +606,30 @@ describe('entities', () => {
     views.dispose();
   });
 
+  it('drops an instancer idle for a minute, keeping a geometry another material still draws', async () => {
+    const w = await make();
+    const dry = spawnStick(w, { p: { x: 0, y: 0.1, z: 0 }, length: 1, r: 0.03 });
+    const green = spawnStick(w, { p: { x: 0, y: 0.1, z: 1 }, length: 1, r: 0.03, material: 'greenWood' });
+    const scene = new Scene();
+    const views = new EntityViews(scene);
+    syncEntities(views, w);
+    const shared = views.slotOf(dry)!.inst.geometry;
+    expect(views.slotOf(green)!.inst.geometry).toBe(shared);
+    let disposed = false;
+    shared.addEventListener('dispose', () => {
+      disposed = true;
+    });
+    w.removeEntity(dry);
+    for (let i = 0; i <= 3600; i++) syncEntities(views, w);
+    expect(views.instancerList().length).toBe(1);
+    expect(disposed).toBe(false);
+    w.removeEntity(green);
+    for (let i = 0; i <= 3600; i++) syncEntities(views, w);
+    expect(views.instancerList().length).toBe(0);
+    expect(disposed).toBe(true);
+    views.dispose();
+  });
+
   it('interpolates a moving entity between its last two ticks by alpha', async () => {
     const w = await make();
     const id = spawnStick(w, { p: { x: 0, y: 2, z: 0 }, length: 1, r: 0.03 });
