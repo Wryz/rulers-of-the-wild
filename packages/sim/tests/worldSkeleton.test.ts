@@ -1,6 +1,8 @@
 // The world skeleton (docs/M1-DESIGN.md §1.5.1, §3, §8.1; package P05): createWorld and its memoised init, the seams it
 // sets, the player, world-owned ids and streams, the full phase list of §3 in order, live tuning as a command, 600-tick
-// determinism of two empty worlds, supportAt, teleport and dispose.
+// determinism of two empty worlds, supportAt, teleport (with its pose-history reset and contact grace), the KO seam and
+// dispose.
+import RAPIER from '@dimforge/rapier3d-compat';
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { BONES } from '../src/body/skeleton';
 import type { CombatEvent } from '../src/sim/combat';
@@ -10,8 +12,10 @@ import { Rng, seedFor } from '../src/sim/math';
 import { createPlayer } from '../src/sim/roster';
 import { getTuningValue, resetTuning } from '../src/tuning/registry';
 import { NavSystem, NavWalkable } from '../src/world/nav';
-import { physicsInitCount, physicsReady } from '../src/world/physics';
-import type { WorldEvent } from '../src/world/types';
+import { collisionGroups } from '../src/world/groups';
+import { ownerKey, PHYSICS_TUNING, physicsInitCount, physicsReady } from '../src/world/physics';
+import { DAMAGE_TUNING } from '../src/sim/rules';
+import type { Entity, EntityState, RulerState, WorldEvent } from '../src/world/types';
 import { createWorld, playerIdOf, type World, type WorldOptions } from '../src/world/world';
 import { WORLD_TUNING } from '../src/world/worldTuning';
 
@@ -309,6 +313,152 @@ describe('support, teleport and dispose', () => {
     expect([p.walkVel.x, p.walkVel.z, p.vel.x, p.vel.y, p.vel.z]).toEqual([0, 0, 0, 0, 0]);
     w.step();
     expect(Number.isFinite(p.pos.x)).toBe(true);
+  });
+
+  /**
+   * A box entity of the given state standing on the (flat) terrain, its top at `top` (bottom at `bottom`), with a
+   * stand-in record (the EntityStore is P06's: its stub knows no entity). Queries see it after the next step.
+   */
+  function box(w: World, records: Map<number, Entity>, id: number, x: number, z: number, half: number, bottom: number, top: number, state: EntityState): void {
+    const desc = state === 'free' ? RAPIER.RigidBodyDesc.dynamic().setGravityScale(0) : RAPIER.RigidBodyDesc.fixed();
+    const body = w.physics.rapier.createRigidBody(desc.setTranslation(x, (bottom + top) / 2, z));
+    const c = w.physics.rapier.createCollider(RAPIER.ColliderDesc.cuboid(half, (top - bottom) / 2, half).setCollisionGroups(collisionGroups('ENTITY')), body);
+    w.physics.register(c, { kind: 'entity', id });
+    records.set(id, { id, state, restTicks: 0, body, collider: c } as unknown as Entity);
+  }
+
+  function withEntities(w: World): Map<number, Entity> {
+    const records = new Map<number, Entity>();
+    (w.entities as { get: (id: number) => Entity | undefined }).get = (id) => records.get(id);
+    return records;
+  }
+
+  it('supportAt stands on fixed, anchored and resting entities below the reach, never on one the ray starts inside', async () => {
+    const w = await make({ seed: 12, scene: 'empty', nav: 'off', player: false });
+    const e = withEntities(w);
+    box(w, e, 1, 10, 10, 1, 0, 0.3, 'fixed'); // a low slab
+    box(w, e, 2, 5, 5, 0.25, 0, 10, 'fixed'); // a trunk
+    box(w, e, 3, -10, -10, 0.5, 0, 0.4, 'free'); // a free box, not yet at rest
+    box(w, e, 4, -5, 5, 0.05, 0, 0.6, 'anchored'); // a stake
+    box(w, e, 5, 20, 20, 1, 0, 0.3, 'fixed'); // two stacked slabs: 0.3 m and 0.6 m
+    box(w, e, 6, 20, 20, 1, 0.3, 0.6, 'fixed');
+    w.step();
+    const near = (v: number, want: number) => expect(v).toBeCloseTo(want, 6);
+    near(w.supportAt(10, 10, 0), 0.3);
+    near(w.ground.supportAt!(10, 10, 0), 0.3); // CombatSim's and footwork's GroundQuery
+    // A top not below fromY + supportReachM is no support: the ray starts inside the slab, and inside the trunk (a foot
+    // target in a trunk stays on the ground, and never rises by the reach).
+    expect(WORLD_TUNING.supportReachM).toBe(0.5);
+    expect(w.supportAt(10, 10, -0.3)).toBe(0);
+    expect(w.supportAt(5.1, 5, 0)).toBe(0);
+    expect(w.ground.supportAt!(5.1, 5, 0)).toBe(0);
+    near(w.supportAt(5.1, 5, 9.6), 10); // standing on the trunk's top
+    near(w.supportAt(-5, 5, 0.2), 0.6); // an anchored stake
+    // A free entity is support only once it rests.
+    expect(w.supportAt(-10, -10, 0)).toBe(0);
+    (e.get(3) as { restTicks: number }).restTicks = PHYSICS_TUNING.restTicks;
+    near(w.supportAt(-10, -10, 0), 0.4);
+    // maxAboveTerrainM: taller tops are obstacles and the ray goes on to the one below; excludeEntities likewise.
+    near(w.supportAt(20, 20, 0.3), 0.6);
+    near(w.supportAt(20, 20, 0.3, { maxAboveTerrainM: 0.39 }), 0.3);
+    near(w.supportAt(20, 20, 0.3, { excludeEntities: [6] }), 0.3);
+    expect(w.supportAt(20, 20, 0.3, { excludeEntities: [6, 5] })).toBe(0);
+    expect(w.supportAt(20, 20, 0.3, { maxAboveTerrainM: 0.2 })).toBe(0);
+  });
+
+  it('teleport stands a player on the highest support (a scaffold) and a ruler only on low ones', async () => {
+    const w = await make({ seed: 13, scene: 'empty', nav: 'off' });
+    const e = withEntities(w);
+    box(w, e, 1, -20, 0, 0.5, 0, 2.65, 'fixed'); // §11.2(c)'s scaffold top
+    box(w, e, 2, 10, 10, 1, 0, 0.3, 'fixed');
+    w.step();
+    const p = w.player!;
+    w.teleport(p, -20, 0);
+    expect(p.pos.y).toBeCloseTo(2.65, 4); // f32, from a ray 50 m long
+    // A ruler (only the flag is read here) never lands on top of an obstacle.
+    p.ruler = {} as RulerState;
+    try {
+      w.teleport(p, -20, 0);
+      expect(p.pos.y).toBe(0);
+      w.teleport(p, 10, 10);
+      expect(p.pos.y).toBeCloseTo(0.3, 6);
+    } finally {
+      p.ruler = null;
+    }
+  });
+
+  /**
+   * A stand-in for P08's zone body (one kinematic sensor 0.3 m above the player's feet, posed in phase 4b, history
+   * reset through the physics world) and P09's grace and pair intake, over a fixed stake (entity 50) at (20, 0).
+   */
+  function zoneRig(w: World): { graces: [number, number][]; starts: number[]; carry: number[] } {
+    const p = w.player!;
+    const kin = w.physics.rapier.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(p.pos.x, p.pos.y + 0.3, p.pos.z));
+    const zone = w.physics.rapier.createCollider(
+      RAPIER.ColliderDesc.ball(0.2)
+        .setSensor(true)
+        .setActiveCollisionTypes(RAPIER.ActiveCollisionTypes.ALL)
+        .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS)
+        .setCollisionGroups(collisionGroups('ZONE')),
+      kin,
+    );
+    const key = `fighter:${p.id}:zone:shinL`;
+    w.physics.register(zone, { kind: 'fighter', id: p.id, part: 'zone', bone: 'shinL' });
+    const sb = w.physics.rapier.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(20, 1, 0));
+    w.physics.register(w.physics.rapier.createCollider(RAPIER.ColliderDesc.cuboid(0.1, 1, 0.1).setCollisionGroups(collisionGroups('ENTITY')), sb), { kind: 'entity', id: 50 });
+    w.zones.pose = () => kin.setNextKinematicTranslation({ x: p.pos.x, y: p.pos.y + 0.3, z: p.pos.z });
+    w.zones.resetHistory = () => w.physics.resetHistory(key);
+    const out = { graces: [] as [number, number][], starts: [] as number[], carry: [] as number[] };
+    w.contacts.grace = (id, until) => void out.graces.push([id, until]);
+    w.contacts.process = (_w, pairs) => {
+      out.carry.push(w.physics.pre(key)!.carryV.x);
+      for (const q of pairs) if (q.started && ownerKey(q.a) === 'entity:50' && ownerKey(q.b) === key) out.starts.push(w.tick);
+    };
+    return out;
+  }
+
+  for (const when of ['between steps', 'phase 2', 'phase 15'] as const) {
+    it(`teleport ${when}: the zone never reads the jump as a speed and the pair it raises starts inside the grace (RF-1)`, async () => {
+      const w = await make({ seed: 14, scene: 'empty', nav: 'off' });
+      const p = w.player!;
+      const rig = zoneRig(w);
+      const jump = () => w.teleport(p, 20, 0);
+      if (when === 'phase 2') {
+        const sense = w.minds.sense.bind(w.minds);
+        w.minds.sense = (ww) => {
+          if (w.tick === 4) jump();
+          sense(ww);
+        };
+      } else if (when === 'phase 15') {
+        const update = w.deaths.update.bind(w.deaths);
+        w.deaths.update = (ww) => {
+          if (w.tick === 4) jump();
+          update(ww);
+        };
+      }
+      for (let t = 1; t <= 10; t++) {
+        if (when === 'between steps' && t === 4) jump();
+        w.step();
+      }
+      // The tick whose phase 4 poses the new place: 4, except after phase 4 of tick 4 (5).
+      const poseTick = when === 'phase 15' ? 5 : 4;
+      expect(rig.graces).toEqual([[p.id, poseTick + DAMAGE_TUNING.zoneGraceTicks]]);
+      expect(rig.starts).toEqual([poseTick + 1]);
+      expect(rig.starts[0]).toBeLessThan(rig.graces[0][1]);
+      expect(rig.carry).toHaveLength(10);
+      for (const c of rig.carry) expect(c).toBe(0);
+    });
+  }
+
+  it("a KO in a world doesn't throw while sim/impact.ts is P01's placeholder (not environmental, no credit)", async () => {
+    const w = await make({ seed: 15, scene: 'empty', nav: 'off' });
+    const p = w.player!;
+    w.step();
+    w.combat.koFighter(p, { by: 'strike', killer: null, cause: null, point: { x: 0, y: 1, z: 0 } });
+    expect(p.state).toBe('ko');
+    const ko = w.combat.events.find((ev) => ev.type === 'ko');
+    expect(ko).toMatchObject({ environmental: false, credit: [] });
+    for (let t = 0; t < 5; t++) w.step();
   });
 
   it('dispose frees the Rapier world once; the world can’t step afterwards', async () => {

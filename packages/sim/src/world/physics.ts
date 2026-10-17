@@ -131,8 +131,13 @@ export function compareOwners(a: Owner, b: Owner): number {
  *   `prevQ` = the pose stored one tick earlier (or this pose if the body wasn't stored then); `carryV` = `v`.
  * - Kinematic and parentless colliders (zones, ruler zones, rope sensors): the collider's start-of-step world pose
  *   (the pose set one tick earlier: Rapier's narrow phase tests start-of-step poses, §4.3); `prevP`, `prevQ` = the pose
- *   stored one tick earlier; `carryV` = `v` = (p − prevP)/DT, the previous tick's delta; `w` = 0. After
- *   `resetHistory(key)` the next store sets prevP := p (carryV 0), so a teleport or an enable is never read as a speed.
+ *   stored one tick earlier; `carryV` = `v` = (p − prevP)/DT, the previous tick's delta; `w` = 0.
+ * - After `resetHistory(key)` every store of the key sets prevP := p (carryV 0) up to and including the first one that
+ *   shows a pose other than the one the key had when the reset was asked, and at most two stores of the key.
+ *   A kinematic body's new pose (setNextKinematic*, phase 4b) shows only at the store after the step that applies it,
+ *   so a teleport or an enable reads 0 at both stores around the jump; a parentless collider's (setTranslation) shows
+ *   at once, so only that store is zeroed. Either way the jump is never read as a speed (§4.3 "N−1 and N−2 := the
+ *   current pose", RF-1).
  */
 export interface PreState {
   p: V3;
@@ -167,6 +172,8 @@ interface Removed {
 const v3 = (v: { x: number; y: number; z: number }): V3 => ({ x: v.x, y: v.y, z: v.z });
 const quat = (q: { x: number; y: number; z: number; w: number }): Quat => ({ x: q.x, y: q.y, z: q.z, w: q.w });
 const ZERO: Readonly<V3> = Object.freeze({ x: 0, y: 0, z: 0 });
+const sameV3 = (a: V3, b: V3): boolean => a.x === b.x && a.y === b.y && a.z === b.z;
+const sameQuat = (a: Quat, b: Quat): boolean => a.x === b.x && a.y === b.y && a.z === b.z && a.w === b.w;
 
 export class PhysicsWorld {
   /** Gravity (0, WORLD_TUNING.gravityY, 0), timestep DT. */
@@ -182,7 +189,11 @@ export class PhysicsWorld {
   private readonly removed = new Map<number, Removed>();
   private preStore = new Map<string, PreState>();
   private readonly postStore = new Map<string, { v: V3; w: V3 }>();
-  private readonly resets = new Set<string>();
+  /**
+   * Pending history resets by owner key: the pose the key showed when the reset was asked (null: no collider had the
+   * key then), and whether a store has already held the reset because that pose hadn't changed yet.
+   */
+  private readonly resets = new Map<string, { p: V3 | null; q: Quat | null; held: boolean }>();
   private gravityY: number;
   private freed = false;
 
@@ -234,6 +245,7 @@ export class PhysicsWorld {
       const key = this.keys.get(h)!;
       const b = c.parent();
       const old = this.resets.has(key) ? undefined : prev.get(key);
+      // A pending reset: prevP := p (a kinematic or parentless collider's carryV is 0).
       let s: PreState;
       if (b && b.isDynamic()) {
         if (!b.isEnabled() || b.isSleeping()) continue;
@@ -259,7 +271,7 @@ export class PhysicsWorld {
       }
       next.set(key, s);
     }
-    this.resets.clear();
+    this.settleResets(next);
     this.preStore = next;
   }
 
@@ -269,11 +281,46 @@ export class PhysicsWorld {
   }
 
   /**
-   * The next storePreStep treats `key`'s current pose as its previous one too (carryV 0): called on every enable,
-   * teleport, respawn, load and body-type switch (§4.3, RF-1).
+   * From the next storePreStep on, `key`'s stored pose is its previous one too (carryV 0), until the new pose shows (see
+   * PreState): called on every enable, teleport, respawn, load and body-type switch (§4.3, RF-1), at the time it
+   * happens. A key not stored at a store (disabled, asleep) keeps its reset for the store that next stores it.
    */
   resetHistory(key: string): void {
-    this.resets.add(key);
+    const now = this.storedPoseOf(key);
+    this.resets.set(key, { p: now?.p ?? null, q: now?.q ?? null, held: false });
+  }
+
+  /**
+   * End of a store: a reset whose key was stored ends once the store shows a pose other than the one at the reset (or
+   * on its second store); a reset whose key is no longer registered is dropped; any other reset stays pending.
+   */
+  private settleResets(stored: ReadonlyMap<string, PreState>): void {
+    if (this.resets.size === 0) return;
+    let live: Set<string> | null = null;
+    for (const [key, r] of [...this.resets]) {
+      const s = stored.get(key);
+      if (!s) {
+        live ??= new Set(this.keys.values());
+        if (!live.has(key)) this.resets.delete(key);
+        continue;
+      }
+      const unchanged = r.p !== null && r.q !== null && sameV3(s.p, r.p) && sameQuat(s.q, r.q);
+      if (unchanged && !r.held) r.held = true;
+      else this.resets.delete(key);
+    }
+  }
+
+  /** The pose a store would read for `key` now (the last registered collider with that key), or null. */
+  private storedPoseOf(key: string): { p: V3; q: Quat } | null {
+    let found: { p: V3; q: Quat } | null = null;
+    for (const [h, k] of this.keys) {
+      if (k !== key) continue;
+      const c = this.rapier.getCollider(h);
+      if (!c) continue;
+      const b = c.parent();
+      found = b && b.isDynamic() ? { p: v3(b.translation()), q: quat(b.rotation()) } : { p: v3(c.translation()), q: quat(c.rotation()) };
+    }
+    return found;
   }
 
   /** Phase 7: one Rapier step (gravity re-read from WORLD_TUNING, so it is live). */
@@ -368,6 +415,7 @@ export class PhysicsWorld {
     this.removed.clear();
     this.preStore.clear();
     this.postStore.clear();
+    this.resets.clear();
   }
 
   get isFreed(): boolean {

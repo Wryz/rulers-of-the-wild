@@ -39,6 +39,12 @@ export function queryShape(s: Shape): RAPIER.Shape {
 }
 
 const v3 = (v: { x: number; y: number; z: number }): V3 => ({ x: v.x, y: v.y, z: v.z });
+const DOWN: Readonly<V3> = Object.freeze({ x: 0, y: -1, z: 0 });
+/**
+ * s: how far `overlaps` casts a shape to learn whether it already penetrates the terrain (a numerical device of the
+ * query, not a starting value: any positive time works, and a cast that starts penetrating reports toi 0).
+ */
+const PENETRATION_PROBE_TOI = 1e-9;
 
 export class WorldQueries {
   constructor(
@@ -74,10 +80,11 @@ export class WorldQueries {
   /** Every owner whose colliders overlap the shape at `at`, once each, sorted in owner order. */
   overlaps(shape: Shape, at: Pose3, f: QueryFilter): Owner[] {
     const found = new Map<string, Owner>();
+    const rs = queryShape(shape);
     this.physics.rapier.intersectionsWithShape(
       v3(at.p),
       at.q,
-      queryShape(shape),
+      rs,
       (c) => {
         const o = this.physics.ownerOf(c.handle);
         if (o) found.set(ownerKey(o), o);
@@ -89,6 +96,12 @@ export class WorldQueries {
       undefined,
       this.predicate(f),
     );
+    // Rapier's intersection test never reports a heightfield against any shape but a ball (it returns no pair), so the
+    // terrain is tested with a cast that starts where the shape is: one that starts penetrating stops at toi 0.
+    if ((f.terrain ?? true) && !found.has('terrain') && shape.kind !== 'ball') {
+      const hit = this.physics.rapier.castShape(v3(at.p), at.q, DOWN, rs, 0, PENETRATION_PROBE_TOI, true, undefined, undefined, undefined, undefined, (c) => this.physics.ownerOf(c.handle)?.kind === 'terrain');
+      if (hit && hit.time_of_impact === 0) found.set('terrain', { kind: 'terrain' });
+    }
     return [...found.values()].sort(compareOwners);
   }
 

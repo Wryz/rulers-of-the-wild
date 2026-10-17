@@ -13,8 +13,11 @@ import {
   physicsInitCount,
   physicsReady,
 } from '../src/world/physics';
-import type { Owner } from '../src/world/types';
+import { WorldQueries } from '../src/world/queries';
+import { Terrain } from '../src/world/terrain';
+import type { Owner, Pose3, QueryFilter, Shape } from '../src/world/types';
 import { WORLD_TUNING } from '../src/world/worldTuning';
+import type { Fighter } from '../src/sim/fighter';
 
 const worlds: PhysicsWorld[] = [];
 function makeWorld(): PhysicsWorld {
@@ -194,6 +197,100 @@ describe('the pre-step store (phase 5)', () => {
     expect(p.pre(key)!.carryV).toEqual({ x: 0, y: 0, z: 0 });
   });
 
+  /** A kinematic body with one sensor zone (fighter 4's shin) at x = 0, and a fixed 2 m stake (entity 1) at x = 40. */
+  function zoneAndStake(p: PhysicsWorld): { kin: RAPIER.RigidBody; zone: RAPIER.Collider; key: string } {
+    const sb = p.rapier.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(40, 1, 0));
+    p.register(p.rapier.createCollider(RAPIER.ColliderDesc.cuboid(0.1, 1, 0.1).setCollisionGroups(collisionGroups('ENTITY')), sb), entity(1));
+    const kin = p.rapier.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(0, 1, 0));
+    const zone = p.rapier.createCollider(
+      RAPIER.ColliderDesc.ball(0.2)
+        .setSensor(true)
+        .setActiveCollisionTypes(RAPIER.ActiveCollisionTypes.ALL)
+        .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS)
+        .setCollisionGroups(collisionGroups('ZONE')),
+      kin,
+    );
+    p.register(zone, { kind: 'fighter', id: 4, part: 'zone', bone: 'shinL' });
+    return { kin, zone, key: 'fighter:4:zone:shinL' };
+  }
+
+  it('a reset asked when a kinematic zone jumps between steps reads 0 at both stores around the jump (RF-1)', () => {
+    const p = makeWorld();
+    const { kin, key } = zoneAndStake(p);
+    // Phase-4b targets: walking +0.02 m a tick, teleported onto the stake between ticks 3 and 4, walking on from there.
+    const targets = [0.02, 0.04, 0.06, 40, 40.02, 40.04, 40.06];
+    const carry: number[] = [];
+    const starts: number[] = [];
+    for (let t = 1; t <= targets.length; t++) {
+      if (t === 4) p.resetHistory(key); // at the teleport, before the tick that poses the new place
+      kin.setNextKinematicTranslation({ x: targets[t - 1], y: 1, z: 0 });
+      p.storePreStep();
+      carry.push(p.pre(key)!.carryV.x);
+      p.step();
+      for (const q of p.drain()) if (q.started && ownerKey(q.b) === key && ownerKey(q.a) === 'entity:1') starts.push(t);
+    }
+    // The store at tick t sees the pose set at t − 1: the 40 m jump shows at tick 5, and its pair starts there.
+    expect(starts).toEqual([5]);
+    expect(carry[0]).toBe(0);
+    expect(carry[1]).toBeCloseTo(0.02 / DT, 3);
+    expect(carry[2]).toBeCloseTo(0.02 / DT, 3);
+    expect(carry[3]).toBe(0); // still the old pose (held)
+    expect(carry[4]).toBe(0); // the new pose: never 2,400 m/s
+    expect(carry[5]).toBeCloseTo(0.02 / DT, 2); // the history goes on from the new pose
+    expect(carry[6]).toBeCloseTo(0.02 / DT, 2);
+  });
+
+  it('a reset on a parentless sensor zeroes only the store that shows the jump (setTranslation is immediate)', () => {
+    const p = makeWorld();
+    const rope = p.rapier.createCollider(RAPIER.ColliderDesc.capsule(0.5, 0.02).setSensor(true).setTranslation(0, 1, 0).setCollisionGroups(collisionGroups('ROPE')));
+    p.register(rope, { kind: 'rope', joint: 9 });
+    const targets = [0.02, 0.04, 0.06, 40, 40.02, 40.04];
+    const carry: number[] = [];
+    for (let t = 1; t <= targets.length; t++) {
+      if (t === 4) p.resetHistory('rope:9');
+      rope.setTranslation({ x: targets[t - 1], y: 1, z: 0 });
+      p.storePreStep();
+      carry.push(p.pre('rope:9')!.carryV.x);
+      p.step();
+      p.drain();
+    }
+    expect(carry[0]).toBe(0);
+    expect(carry[2]).toBeCloseTo(0.02 / DT, 3);
+    expect(carry[3]).toBe(0);
+    expect(carry[4]).toBeCloseTo(0.02 / DT, 2);
+    expect(carry[5]).toBeCloseTo(0.02 / DT, 2);
+  });
+
+  it('a reset whose pose never changes holds for two stores at most; a key not stored keeps it until it is', () => {
+    const p = makeWorld();
+    const { kin, zone, key } = zoneAndStake(p);
+    const carryAfter = (target: number): number => {
+      kin.setNextKinematicTranslation({ x: target, y: 1, z: 0 });
+      p.storePreStep();
+      const c = p.pre(key)?.carryV.x ?? NaN;
+      p.step();
+      p.drain();
+      return c;
+    };
+    carryAfter(0);
+    carryAfter(0);
+    p.resetHistory(key); // a teleport onto the spot it already stands on
+    expect(carryAfter(0)).toBe(0);
+    expect(carryAfter(0.02)).toBe(0);
+    expect(carryAfter(0.04)).toBeCloseTo(0.02 / DT, 3); // the walk is read again
+    // Disabled (a downed fighter's zones), the key is not stored while the body is carried 10 m; the reset asked at the
+    // disable waits for the stores after the enable, so the 10 m is never read as a speed.
+    zone.setEnabled(false);
+    p.resetHistory(key);
+    expect(Number.isNaN(carryAfter(10))).toBe(true);
+    expect(Number.isNaN(carryAfter(10.02))).toBe(true);
+    zone.setEnabled(true);
+    const after = [10.04, 10.06, 10.08, 10.1].map(carryAfter);
+    expect(after[0]).toBe(0);
+    for (const c of after) expect(Math.abs(c)).toBeLessThan(0.02 / DT + 0.01);
+    expect(after[3]).toBeCloseTo(0.02 / DT, 2);
+  });
+
   it('does not store a sleeping body', () => {
     const p = makeWorld();
     const { body } = groundAndBox(p, 0.5);
@@ -286,6 +383,125 @@ describe('the post-step snapshot and the drain (phase 8)', () => {
       forces += p.forceEventCount;
     }
     expect(forces).toBeGreaterThan(0);
+  });
+});
+
+describe('scene queries (WorldQueries, §1.5.6)', () => {
+  const ID: Pose3['q'] = { x: 0, y: 0, z: 0, w: 1 };
+  /**
+   * Flat terrain (50 m) and, created in reverse owner order so the sort is what orders them: a rope sensor (joint 9) at
+   * x 20; fighter 3's kinematic body at (15, 1, 0) with a zone ball (r 0.4) and a KCC capsule at z 3; a 5 kg dynamic box
+   * (entity 2, two colliders) at x 10; an 800 kg fixed box (entity 1) at x 5, 1 × 2 × 1 m, standing on the terrain.
+   */
+  function scene(): { p: PhysicsWorld; q: WorldQueries } {
+    const p = makeWorld();
+    new Terrain(p, 50);
+    p.primeQueries();
+    const colliders = new Map<number, RAPIER.Collider>();
+    const mass = new Map<number, number>([
+      [1, 800],
+      [2, 5],
+    ]);
+    const rope = p.rapier.createCollider(RAPIER.ColliderDesc.capsule(1, 0.02).setSensor(true).setTranslation(20, 1, 0).setCollisionGroups(collisionGroups('ROPE')));
+    p.register(rope, { kind: 'rope', joint: 9 });
+    const k = p.rapier.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(15, 1, 0));
+    p.register(p.rapier.createCollider(RAPIER.ColliderDesc.ball(0.4).setSensor(true).setCollisionGroups(collisionGroups('ZONE')), k), { kind: 'fighter', id: 3, part: 'zone', bone: 'chest' });
+    p.register(p.rapier.createCollider(RAPIER.ColliderDesc.capsule(0.6, 0.3).setTranslation(0, 0, 3).setCollisionGroups(collisionGroups('CHAR')), k), { kind: 'fighter', id: 3, part: 'kcc' });
+    const b2 = p.rapier.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(10, 1, 0).setGravityScale(0));
+    const c2 = p.rapier.createCollider(RAPIER.ColliderDesc.cuboid(0.5, 0.5, 0.5).setTranslation(0, 0.5, 0).setCollisionGroups(collisionGroups('ENTITY')), b2);
+    p.register(c2, entity(2));
+    p.register(p.rapier.createCollider(RAPIER.ColliderDesc.cuboid(0.5, 0.5, 0.5).setTranslation(0, -0.5, 0).setCollisionGroups(collisionGroups('ENTITY')), b2), entity(2));
+    colliders.set(2, c2);
+    const b1 = p.rapier.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(5, 1, 0));
+    const c1 = p.rapier.createCollider(RAPIER.ColliderDesc.cuboid(0.5, 1, 0.5).setCollisionGroups(collisionGroups('ENTITY')), b1);
+    p.register(c1, entity(1));
+    colliders.set(1, c1);
+    p.step(); // new colliders are found by queries after a step
+    p.drain();
+    return { p, q: new WorldQueries(p, { mass: (id) => mass.get(id) ?? 0, collider: (id) => colliders.get(id) ?? null }) };
+  }
+
+  const key = (o: Owner | undefined): string | undefined => (o ? ownerKey(o) : undefined);
+
+  it('castRay: toi, point and outward normal, and every filter', () => {
+    const { q } = scene();
+    const along = (f: QueryFilter, z = 0) => q.castRay({ x: 0, y: 1, z }, { x: 2, y: 0, z: 0 }, 30, f);
+    const hit = along({})!;
+    expect(hit.owner).toEqual(entity(1));
+    expect(hit.toi).toBeCloseTo(4.5, 5);
+    expect(hit.point.x).toBeCloseTo(4.5, 5);
+    expect(hit.normal).toEqual({ x: -1, y: 0, z: 0 });
+    expect(key(along({ entities: 'static' })?.owner)).toBe('entity:1');
+    expect(key(along({ exclude: { entities: [1] } })?.owner)).toBe('entity:2');
+    expect(along({ exclude: { entities: [1] }, entities: 'static' })).toBeNull(); // the dynamic box isn't static
+    expect(along({ exclude: { entities: [1] }, minEntityMassKg: 100 })).toBeNull(); // 5 kg < 100 kg
+    expect(key(along({ minEntityMassKg: 800 })?.owner)).toBe('entity:1');
+    expect(along({ entities: 'none' })).toBeNull(); // sensors and fighters are off by default
+    expect(key(along({ entities: 'none', fighters: 'zones' })?.owner)).toBe('fighter:3:zone:chest');
+    expect(along({ entities: 'none', fighters: 'zones', exclude: { fighters: [3] } })).toBeNull();
+    expect(key(along({ entities: 'none', ropes: true })?.owner)).toBe('rope:9');
+    expect(key(along({ entities: 'none', fighters: 'kcc' }, 3)?.owner)).toBe('fighter:3:kcc');
+    expect(along({ entities: 'none', fighters: 'zones' }, 3)).toBeNull(); // the capsule is not a zone
+    // Terrain: on unless the filter turns it off.
+    expect(key(q.castRay({ x: 2, y: 5, z: 2 }, { x: 0, y: -1, z: 0 }, 10, {})?.owner)).toBe('terrain');
+    expect(q.castRay({ x: 2, y: 5, z: 2 }, { x: 0, y: -1, z: 0 }, 10, { terrain: false })).toBeNull();
+    expect(q.castRay({ x: 2, y: 5, z: 2 }, { x: 0, y: 0, z: 0 }, 10, {})).toBeNull(); // no direction
+  });
+
+  it('castShape: time of impact in the units of vel, with the struck collider’s world point and outward normal', () => {
+    const { q } = scene();
+    const ball = { kind: 'ball', r: 0.25 } as const;
+    const from: Pose3 = { p: { x: 0, y: 1, z: 0 }, q: ID };
+    const hit = q.castShape(ball, from, { x: 10, y: 0, z: 0 }, 2, {})!;
+    expect(hit.owner).toEqual(entity(1));
+    expect(hit.toi).toBeCloseTo(0.425, 4); // (4.5 − 0.25) m at 10 m/s
+    expect(hit.point.x).toBeCloseTo(4.5, 4); // on the box's face, in world space
+    expect(hit.point.y).toBeCloseTo(1, 2);
+    expect(hit.point.z).toBeCloseTo(0, 2);
+    expect(hit.normal.x).toBeCloseTo(-1, 5);
+    const past = q.castShape(ball, from, { x: 10, y: 0, z: 0 }, 2, { exclude: { entities: [1] } })!;
+    expect(past.owner).toEqual(entity(2));
+    expect(past.toi).toBeCloseTo(0.925, 4);
+    expect(q.castShape(ball, from, { x: 10, y: 0, z: 0 }, 0.4, {})).toBeNull(); // out of time
+  });
+
+  it('overlaps: each owner once (entity 2 has two colliders), in owner order whatever the creation order', () => {
+    const { q } = scene();
+    const at = (x: number, z = 0, y = 1): Pose3 => ({ p: { x, y, z }, q: ID });
+    const wide = { kind: 'box', hx: 10, hy: 2, hz: 1 } as const;
+    expect(q.overlaps(wide, at(12), { fighters: 'zones', ropes: true }).map(ownerKey)).toEqual(['terrain', 'entity:1', 'entity:2', 'fighter:3:zone:chest', 'rope:9']);
+    expect(q.overlaps(wide, at(12), {}).map(ownerKey)).toEqual(['terrain', 'entity:1', 'entity:2']);
+    expect(q.overlaps(wide, at(12), { terrain: false }).map(ownerKey)).toEqual(['entity:1', 'entity:2']);
+    expect(q.overlaps(wide, at(12), { terrain: false, entities: 'static' }).map(ownerKey)).toEqual(['entity:1']);
+    expect(q.overlaps({ kind: 'box', hx: 4, hy: 1, hz: 1 }, at(15, 3), { terrain: false, fighters: 'kcc' }).map(ownerKey)).toEqual(['fighter:3:kcc']);
+    // The terrain, for every shape kind: straddling the ground it overlaps, 0.5 m clear of it it doesn't.
+    const shapes: Shape[] = [
+      { kind: 'ball', r: 0.3 },
+      { kind: 'box', hx: 0.3, hy: 0.3, hz: 0.3 },
+      { kind: 'capsule', halfHeight: 0.3, r: 0.3 },
+      { kind: 'cylinder', halfHeight: 0.3, r: 0.3, sides: 8 },
+      { kind: 'hull', points: [-0.3, -0.3, -0.3, 0.3, -0.3, -0.3, 0, -0.3, 0.3, 0, 0.3, 0] },
+    ];
+    for (const s of shapes) {
+      expect(q.overlaps(s, at(-12, 0, 0.1), {}).map(ownerKey), s.kind).toEqual(['terrain']);
+      expect(q.overlaps(s, at(-12, 0, 1.2), {}), s.kind).toEqual([]);
+      expect(q.overlaps(s, at(-12, 0, 0.1), { terrain: false }), s.kind).toEqual([]);
+    }
+  });
+
+  it('projectPoint and surfaceDistance (chest point = pos + chestHeightM × scale up)', () => {
+    const { q } = scene();
+    expect(q.projectPoint(1, { x: 3, y: 1, z: 0 })).toEqual({ point: { x: 4.5, y: 1, z: 0 }, dist: 1.5, inside: false });
+    const inside = q.projectPoint(1, { x: 5, y: 1, z: 0.3 });
+    expect(inside.inside).toBe(true);
+    expect(inside.dist).toBeCloseTo(0.2, 6);
+    expect(q.projectPoint(99, { x: 3, y: 1, z: 0 })).toEqual({ point: { x: 3, y: 1, z: 0 }, dist: Infinity, inside: false });
+    const at = (x: number, y: number, scale: number) => ({ pos: { x, y, z: 0 }, scale }) as unknown as Fighter;
+    expect(WORLD_TUNING.chestHeightM).toBe(1.2);
+    expect(q.surfaceDistance(at(3, 0, 1), 1)).toBeCloseTo(1.5, 6); // chest (3, 1.2, 0)
+    expect(q.surfaceDistance(at(3, 0.5, 2), 1)).toBeCloseTo(Math.hypot(1.5, 0.9), 6); // chest 2.9 m, over the 2 m top
+    expect(q.surfaceDistance(at(5, 0, 1), 1)).toBe(0); // inside
+    expect(q.surfaceDistance(at(3, 0, 1), 99)).toBe(Infinity);
   });
 });
 

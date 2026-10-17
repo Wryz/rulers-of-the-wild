@@ -142,6 +142,8 @@ export class World implements WorldPort {
   /** Set by a `meta 'save'` command in phase 1c; the save is written at the end of the tick (phase 19). */
   private saveDue = false;
   private disposed = false;
+  /** True from phase 1 until phase 4 starts: bodies moved now are posed in this tick's phase 4, not the next tick's. */
+  private beforeBodySync = false;
 
   /** Synchronous: physicsReady() must have resolved (createWorld awaits it). */
   constructor(o: WorldOptions) {
@@ -238,25 +240,31 @@ export class World implements WorldPort {
     this.events.length = 0;
     this.saveDue = false;
 
-    // 1 COMMANDS (SPEC:696). 1a: frame++, move and button commands applied in queue order.
-    const rest = this.combat.beginTick();
-    const verbCmds: VerbCommand[] = [];
-    const metaCmds: MetaCommand[] = [];
-    for (const c of rest) {
-      if (c.kind === 'verb') verbCmds.push(c);
-      else if (c.kind === 'meta') metaCmds.push(c);
+    let ce: CombatEvent[];
+    this.beforeBodySync = true;
+    try {
+      // 1 COMMANDS (SPEC:696). 1a: frame++, move and button commands applied in queue order.
+      const rest = this.combat.beginTick();
+      const verbCmds: VerbCommand[] = [];
+      const metaCmds: MetaCommand[] = [];
+      for (const c of rest) {
+        if (c.kind === 'verb') verbCmds.push(c);
+        else if (c.kind === 'meta') metaCmds.push(c);
+      }
+      // 1b: validate, apply focus, buffer the rest.
+      this.verbs.applyCommands(verbCmds);
+      // 1c: meta commands, in queue order.
+      for (const c of metaCmds) this.applyMeta(c);
+
+      // 2 MINDS (SPEC:698).
+      this.minds.sense(this);
+
+      // 3 COMBATSIM (SPEC:699): brains, defence, attacks, verbs (WorldPort), movement resolved by the mover at the
+      // separate() site (departure X1), hits, projectiles.
+      ce = this.combat.stepBody();
+    } finally {
+      this.beforeBodySync = false;
     }
-    // 1b: validate, apply focus, buffer the rest.
-    this.verbs.applyCommands(verbCmds);
-    // 1c: meta commands, in queue order.
-    for (const c of metaCmds) this.applyMeta(c);
-
-    // 2 MINDS (SPEC:698).
-    this.minds.sense(this);
-
-    // 3 COMBATSIM (SPEC:699): brains, defence, attacks, verbs (WorldPort), movement resolved by the mover at the
-    // separate() site (departure X1), hits, projectiles.
-    const ce = this.combat.stepBody();
 
     // 4 BODY SYNC (SPEC:700), fighter-id order.
     this.downed.syncDown(this); // 4a
@@ -348,12 +356,22 @@ export class World implements WorldPort {
   }
 
   /**
-   * Moves a fighter to (x, z) on whatever supports it there (terrain, or a fixed, anchored or resting entity), facing
-   * `yaw` if given, at rest. The controller's sweep is skipped for one tick (MAP gap-1 §3.6); the zone or ruler pose
-   * history is reset and its contacts get a grace (§4.3), so the jump is never read as a velocity.
+   * Moves a fighter to (x, z), facing `yaw` if given, at rest, on what supports it there: a player or an ape on the
+   * highest support under a probe teleportProbeM above the terrain (the terrain, or a fixed, anchored or resting entity:
+   * the harness stands the player on a scaffold, §11.2(c)); a ruler on the terrain or an entity low enough to stand on
+   * (the probe starts at the terrain), never on top of an obstacle. The controller's sweep is skipped for one tick (MAP
+   * gap-1 §3.6); the zone or ruler pose history is reset and its contacts get a grace (§4.3), so the jump is never read
+   * as a velocity.
+   *
+   * The grace runs DAMAGE_TUNING.zoneGraceTicks from the tick whose phase 4 poses the bodies at the new place: this tick
+   * when called before phase 4 (phase 1c dev ops, phase 2 minds, phase 3), otherwise the next one (between steps, or
+   * from phase 4 on, such as the respawn in phase 15). The pairs the jump raises start one step after that pose (a
+   * kinematic body's new pose is tested by the step after the one that applies it, §4.3), so they fall inside it.
    */
   teleport(f: Fighter, x: number, z: number, yaw?: number): void {
-    const y = this.supportAt(x, z, this.terrain.heightAt(x, z) + WORLD_TUNING.teleportProbeM);
+    const ground = this.terrain.heightAt(x, z);
+    // TODO(P11): pass the ruler's ankle height as maxAboveTerrainM, as RulerMover does (§4.7 step 1).
+    const y = this.supportAt(x, z, f.ruler ? ground : ground + WORLD_TUNING.teleportProbeM);
     f.pos.set(x, y, z);
     if (yaw !== undefined) f.yaw = yaw;
     f.vel.set(0, 0, 0);
@@ -363,7 +381,8 @@ export class World implements WorldPort {
       this.kcc.teleport(f, x, y, z);
       this.zones.resetHistory(f);
     }
-    this.contacts.grace(f.id, this.tick + DAMAGE_TUNING.zoneGraceTicks);
+    const poseTick = this.beforeBodySync ? this.tick : this.tick + 1;
+    this.contacts.grace(f.id, poseTick + DAMAGE_TUNING.zoneGraceTicks);
   }
 
   /** The entity's body is created now; queries see it after the next physics step. Returns its id. */
@@ -378,9 +397,11 @@ export class World implements WorldPort {
   /**
    * The height a body standing over (x, z) rests on: the terrain, or the top of a fixed, anchored or resting
    * (restTicks ≥ PHYSICS_TUNING.restTicks, or asleep) entity whose top is below fromY + supportReachM, found by a
-   * downward ray against entities (§1.5.2, §4.7). `maxAboveTerrainM` drops supports whose top is higher than that above
-   * the terrain (the ruler passes its ankle height: taller entities are obstacles, never ground); `excludeEntities`
-   * leaves entities out (a cover that just broke and its pieces, §4.7 step 8).
+   * downward ray against entities (§1.5.2, §4.7). An entity the ray starts inside (a trunk, a stake or a wall reaching
+   * that high) is an obstacle, not a support, and the ray looks past it, as it does past an entity that isn't resting.
+   * `maxAboveTerrainM` drops supports whose top is higher than that above the terrain (the ruler passes its ankle height:
+   * taller entities are obstacles, never ground); `excludeEntities` leaves entities out (a cover that just broke and its
+   * pieces, §4.7 step 8). Like every query it sees entities as of the last physics step.
    */
   supportAt(x: number, z: number, fromY: number, o?: { maxAboveTerrainM?: number; excludeEntities?: readonly number[] }): number {
     const ground = this.terrain.heightAt(x, z);
@@ -396,11 +417,14 @@ export class World implements WorldPort {
       });
       if (!hit || hit.owner.kind !== 'entity') return ground;
       const id = hit.owner.id;
-      const e = this.entities.get(id);
-      const resting =
-        !!e &&
-        (e.state === 'fixed' || e.state === 'anchored' || e.restTicks >= PHYSICS_TUNING.restTicks || (e.body?.isSleeping() ?? false));
-      if (resting && hit.point.y - ground <= maxAbove) return Math.max(ground, hit.point.y);
+      // A solid ray starting inside a collider stops at once (toi 0): that entity's top is not below the reach.
+      if (hit.toi > 0) {
+        const e = this.entities.get(id);
+        const resting =
+          !!e &&
+          (e.state === 'fixed' || e.state === 'anchored' || e.restTicks >= PHYSICS_TUNING.restTicks || (e.body?.isSleeping() ?? false));
+        if (resting && hit.point.y - ground <= maxAbove) return Math.max(ground, hit.point.y);
+      }
       exclude.push(id);
     }
   }
@@ -443,7 +467,7 @@ export class World implements WorldPort {
 
   /** The environmental classification and credit (sim/impact.ts), then parts and death (deaths.ts). */
   onKO(d: Fighter, finish: Finish): { environmental: boolean; credit: string[] } {
-    const r = isEnvironmental(d, finish, this.tick);
+    const r = classifyKO(d, finish, this.tick);
     this.deaths.onKO(this, d, finish);
     return r;
   }
@@ -509,4 +533,20 @@ export class World implements WorldPort {
 
   /** Phase 17, 1 Hz: territory, decay, traplines (M3, M4). */
   private slowSystems(): void {}
+}
+
+/**
+ * isEnvironmental (sim/impact.ts), or the legacy answer (not environmental, nobody's credit) while that function is
+ * still P01's placeholder, which throws. Any KO in a world (a DS fight in P08's or P13's tests) reaches it, not only a
+ * ruler's (RF-8), and packages before P09 must not throw from inside step() for it.
+ * TODO(P09): once sim/impact.ts is filled the placeholder's error never occurs and this fallback is dead; world.ts's
+ * owner (P05) folds it back into a plain call then, so P09 never has to edit this file for it.
+ */
+function classifyKO(d: Fighter, finish: Finish, tick: number): { environmental: boolean; credit: string[] } {
+  try {
+    return isEnvironmental(d, finish, tick);
+  } catch (e) {
+    if (e instanceof Error && e.message.startsWith('sim/impact.ts: isEnvironmental is not implemented yet')) return { environmental: false, credit: [] };
+    throw e;
+  }
 }
