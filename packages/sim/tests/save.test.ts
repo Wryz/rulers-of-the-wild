@@ -12,7 +12,8 @@
 // - save → load → save is byte-identical for the M1 loader's scope (entities, joints, terrain with the dug mask, rulers)
 //   and for everything else the loader restores exactly (fighters, CombatSim's state, counters, streams, commands,
 //   impulses …); the loaded world continues: pending commands land at their ticks, two loads of one save stay
-//   bit-identical to each other.
+//   bit-identical to each other; a knocked-down player loads down (slab moving, controller and zones off) and gets up
+//   as the original does; the navmesh is rebuilt over the loaded ground with its dirty queue.
 // - A world at rest, saved and loaded, matches the original within 1 cm and 1° over 10 s (an M3 preview, SPEC:730).
 // - Tuning: loadWorld leaves the registry alone unless applyTuning; a failed load puts it back.
 // - The v1 fixture (tests/fixtures/save-v1.json) loads, so M3's migrations have a v1 to start from. To rewrite it after a
