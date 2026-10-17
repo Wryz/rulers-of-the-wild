@@ -368,7 +368,7 @@ export class CombatSim {
       const hurt = 0.5 + 0.5 * (f.hp / f.stats.maxHp);
       // Holding a heavy weapon up is work in itself: you get your breath back slower.
       const burden = 1 - Math.min(0.5, 0.06 * heft(f.weapon, f.scale));
-      f.stamina = Math.max(0, Math.min(1, f.stamina + (resting > 0 ? resting * hurt * burden * f.staminaRegenMul : resting) * DT));
+      f.stamina = Math.max(0, Math.min(1, f.stamina + (resting > 0 ? resting * hurt * burden : resting) * DT));
     }
     for (const k of Object.keys(f.defenseCooldown) as DefenseKind[]) {
       if (f.defenseCooldown[k] > 0) f.defenseCooldown[k]--;
@@ -1143,7 +1143,6 @@ export class CombatSim {
     if (armored) dmg *= 0.5;
     if (w) dmg *= w.damageMul;
     if (weight > 0) dmg *= (1 + 0.7 * weight) * (a.perks.has('heavyHands') ? 1 + 0.3 * weight : 1);
-    if (w) dmg *= a.weaponDamageMul;
     // Skills.
     if (counter && a.perks.has('counterMaster')) dmg *= 1.2;
     if (a.perks.has('adrenaline') && a.hp < 0.3 * a.stats.maxHp) dmg *= 1.2;

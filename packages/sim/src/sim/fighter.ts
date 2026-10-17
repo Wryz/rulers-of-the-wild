@@ -172,10 +172,6 @@ export class Fighter {
   /** Skills (from the shop) and the once-a-round ones already spent this round. */
   perks = new Set<PerkId>();
   perksUsed = new Set<PerkId>();
-  /** Getting your breath back faster than normal (training, supplies). */
-  staminaRegenMul = 1;
-  /** Extra damage with a weapon in hand (supplies). */
-  weaponDamageMul = 1;
   /** The current defence was yours (Q / E met a strike), not the automatic guard. */
   defenseManual = false;
   /** The strike your parry / dodge was timed perfectly to (-1: none). */
