@@ -235,8 +235,8 @@ describe('saveRecord', () => {
     expect(hist.length).toBe(BONES.length * 2 * 7);
     for (let i = 0; i < hist.length; i += 7) expect(Math.hypot(hist[i + 3], hist[i + 4], hist[i + 5], hist[i + 6]), `quaternion at ${i + 3}`).toBeCloseTo(1, 5);
     const slab = s.bodies[0].slab!;
-    expect(Object.keys(slab)).toEqual(['enabled', 'pose', 'lin', 'ang', 'hold', 'handedBack', 'dv']);
-    expect([slab.enabled, slab.hold, slab.handedBack, slab.dv]).toEqual([false, 0, false, null]);
+    expect(Object.keys(slab)).toEqual(['enabled', 'pose', 'lin', 'ang', 'hold', 'handedBack', 'dv', 'notClearOf']);
+    expect([slab.enabled, slab.hold, slab.handedBack, slab.dv, slab.notClearOf]).toEqual([false, 0, false, null, { entities: [], fighters: [] }]);
     expect(s.rulers).toEqual([]);
     // The empty scene has no creature homes and no sparring ape.
     expect(s.spawner.homes).toEqual([]);
@@ -644,7 +644,7 @@ const INVENTORY: Record<string, Record<string, string>> = {
     cols: "not saved: the bone sensors, rebuilt (a severed bone's is turned off in phase 4b)",
     offs: 'not saved: derived from the scale',
     keys: 'not saved: owner keys',
-    enabled: 'not saved: off exactly while the slab is active or just handed back; the loader sets it from bodies[].slab',
+    enabled: 'not saved: off exactly while the slab is active or just handed back; DownedBodies.restoreRecord sets it from bodies[].slab',
     jump: 'not saved: a load resets the pose history, which sets it',
   },
   DownedBodies: {
@@ -662,7 +662,7 @@ const INVENTORY: Record<string, Record<string, string>> = {
     hold: 'saved: bodies[].slab.hold',
     handedBack: 'saved: bodies[].slab.handedBack',
     dv: 'saved: bodies[].slab.dv',
-    clearOf: 'not saved: the dynamic bodies its core overlaps, derived from the poses in every phase 4a (a load derives it from the restored poses)',
+    clearOf: 'saved: bodies[].slab.notClearOf (by entity and fighter id; it only shrinks after the launch, so it is state)',
   },
   RulerBodies: {
     world: 'not saved: a link',
@@ -1773,6 +1773,29 @@ describe('broken saves', () => {
       (r) => (r.coverBreak = { tick: 2, cause: { kind: 'entity', entityId: 4, fighterId: null, credit: [], held: false, feature: 'cover' } }),
       `${at}.coverBreak.cause.entityId names entity 4, which is not below counters.entity (1)`,
     );
+  });
+
+  it("checks what a slab is not clear of (core-fix): ids increasing, none while the slab is off, each below its counter", () => {
+    const s0 = parsed(good) as unknown as SaveV1;
+    const i = s0.bodies.findIndex((b) => b.slab !== null);
+    expect(i).toBeGreaterThanOrEqual(0);
+    expect(readSave(good).bodies[i].slab!.notClearOf).toEqual({ entities: [], fighters: [] });
+    const at = `save record: bodies[${i}].slab.notClearOf`;
+    const no = (edit: (r: Record<string, unknown>) => void, message: string | RegExp) =>
+      refuse((s) => edit((s.bodies as Record<string, unknown>[])[i].slab as Record<string, unknown>), message);
+    const on = (n: { entities: number[]; fighters: number[] }) => (r: Record<string, unknown>) => {
+      r.enabled = true;
+      r.notClearOf = n;
+    };
+    no((r) => delete r.notClearOf, `${at} is missing, not there`);
+    no((r) => (r.notClearOf = { entities: [] }), `${at}.fighters is missing, not there`);
+    no((r) => (r.notClearOf = { entities: [], fighters: [], bodies: [] }), `${at} has a field this version doesn't have: bodies`);
+    no((r) => (r.notClearOf = { entities: [1], fighters: [] }), /notClearOf\.entities is .*, not empty \(the slab is off\)/);
+    no(on({ entities: [-1], fighters: [] }), `${at}.entities[0] is -1, not a whole number ≥ 0`);
+    no(on({ entities: [2, 1], fighters: [] }), `${at}.entities[1] is 1, not an id after the one before it (increasing, no repeats)`);
+    no(on({ entities: [], fighters: [3, 3] }), `${at}.fighters[1] is 3, not an id after the one before it (increasing, no repeats)`);
+    no(on({ entities: [999], fighters: [] }), `${at}.entities[0] names entity 999, which is not below counters.entity`);
+    no(on({ entities: [], fighters: [999] }), `${at}.fighters[0] names fighter 999, which is not below counters.fighter`);
   });
 
   it("checks a fighter's verb state field by field, and its fighter and entities against the save", () => {

@@ -140,6 +140,13 @@ export interface SlabRecV1 {
   handedBack: boolean;
   /** A world impact's Δv queued for the next phase 4a, or null. */
   dv: V3 | null;
+  /**
+   * The dynamic bodies the active slab isn't clear of (core-fix, world/downed.ts: the step leaves their pairs with it
+   * out; the list only shrinks after the launch): entities and fighters (another's slab, a tripped ruler's body) by id,
+   * each increasing without repeats; both empty while the slab is off. DEVIATION (§8.3 lists no such field): it is state,
+   * not derivable from the poses.
+   */
+  notClearOf: { entities: number[]; fighters: number[] };
 }
 
 /**

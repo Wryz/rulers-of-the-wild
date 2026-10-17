@@ -486,6 +486,12 @@ function crossCheck(s: SaveV1): void {
       throw new Error(`save record: contacts are not sorted by (creature, owner) without repeats at ${p}`);
     }
   });
+  // What a slab isn't clear of (core-fix): ids the world has given (DownedBodies.restoreRecord checks each names a body).
+  s.bodies.forEach((b, i) => {
+    const n = b.slab?.notClearOf;
+    n?.entities.forEach((id, k) => counted('entity', id, `bodies[${i}].slab.notClearOf.entities[${k}]`));
+    n?.fighters.forEach((id, k) => counted('fighter', id, `bodies[${i}].slab.notClearOf.fighters[${k}]`));
+  });
   // A ruler body's mover memory (rulerBody()): the entities it names below the counter (a support or a deflecting
   // obstacle outlives its entity, a vanished cover is the point, but an id the world hasn't given yet would latch onto the
   // next entity made).
@@ -1171,15 +1177,29 @@ function bodies(v: unknown, p: string): BodiesRecV1 {
     }),
     zonesHistory: arr(o.zonesHistory, `${p}.zonesHistory`).map((x, i) => fin(x, `${p}.zonesHistory[${i}]`)),
     slab: nullable(o.slab, `${p}.slab`, (x, q) => {
-      const s = exactKeys(obj(x, q), ['enabled', 'pose', 'lin', 'ang', 'hold', 'handedBack', 'dv'], q);
+      const s = exactKeys(obj(x, q), ['enabled', 'pose', 'lin', 'ang', 'hold', 'handedBack', 'dv', 'notClearOf'], q);
+      const enabled = bool(s.enabled, `${q}.enabled`);
+      // What the active slab isn't clear of (core-fix): ids, each list increasing without repeats, none while it is off;
+      // crossCheck checks them against the counters, DownedBodies.restoreRecord that each names a body.
+      const at = `${q}.notClearOf`;
+      const n = exactKeys(obj(s.notClearOf, at), ['entities', 'fighters'], at);
+      const ids = (v: unknown, path: string): number[] => {
+        const out = arr(v, path).map((x, i) => nat(x, `${path}[${i}]`));
+        out.forEach((id, i) => {
+          if (i > 0 && !(id > out[i - 1])) fail(`${path}[${i}]`, id, 'an id after the one before it (increasing, no repeats)');
+        });
+        if (out.length > 0 && !enabled) fail(path, v, 'empty (the slab is off)');
+        return out;
+      };
       return {
-        enabled: bool(s.enabled, `${q}.enabled`),
+        enabled,
         pose: pose3(s.pose, `${q}.pose`),
         lin: v3(s.lin, `${q}.lin`),
         ang: v3(s.ang, `${q}.ang`),
         hold: nat(s.hold, `${q}.hold`),
         handedBack: bool(s.handedBack, `${q}.handedBack`),
         dv: nullable(s.dv, `${q}.dv`, v3),
+        notClearOf: { entities: ids(n.entities, `${at}.entities`), fighters: ids(n.fighters, `${at}.fighters`) },
       };
     }),
     ruler: nullable(o.ruler, `${p}.ruler`, rulerBody),
