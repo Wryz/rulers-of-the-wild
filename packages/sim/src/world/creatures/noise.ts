@@ -42,6 +42,11 @@ type Pending =
 
 const v3 = (p: { x: number; y: number; z: number }): V3 => ({ x: p.x, y: p.y, z: p.z });
 
+/** A finite point (an event built without one, as some tests build theirs, makes no noise rather than stop the tick). */
+function isPoint(p: { x: number; y: number; z: number } | null | undefined): p is V3 {
+  return !!p && Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z);
+}
+
 /** m: how far a thing of `massKg` landing is heard: clamp(heavyLandBase + heavyLandPerKg × m, base, heavyLandMax). */
 export function heavyLandRadius(massKg: number): number {
   const T = NOISE_TUNING;
@@ -82,8 +87,9 @@ export class NoiseBus {
     return this.queue.length;
   }
 
-  /** Queue a noise for this tick's fold and send its hint to the client. */
+  /** Queue a noise for this tick's fold and send its hint to the client (a noise without a finite point is dropped). */
   emit(n: Noise): void {
+    if (!isPoint(n.at) || !Number.isFinite(n.radius)) return;
     const noise: Noise = { at: v3(n.at), radius: n.radius, kind: n.kind, source: n.source };
     this.queue.push({ kind: 'noise', noise });
     this.world.events.push({ type: 'noise', at: v3(noise.at), radius: noise.radius, kind: noise.kind });
@@ -130,8 +136,8 @@ export class NoiseBus {
       const e = we[i];
       switch (e.type) {
         case 'impact': {
-          const by = e.cause.fighterId !== null ? (byId.get(e.cause.fighterId) ?? null) : null;
-          this.hurtBy(e.defender, e.cause, by, e.point, e.damage > 0 || e.knockdown);
+          const fid = e.cause?.fighterId ?? null;
+          this.hurtBy(e.defender, e.cause ?? null, fid !== null ? (byId.get(fid) ?? null) : null, e.point, e.damage > 0 || e.knockdown);
           break;
         }
         case 'wound':
@@ -227,9 +233,12 @@ export class NoiseBus {
     }
   }
 
-  /** A hit or impact on `d`: the hurt for fold, and an ape's shout when it is still standing to shout. */
-  private hurtBy(d: Fighter, cause: ImpactCause | null, attacker: Fighter | null, at: V3, felt = true): void {
-    this.queue.push({ kind: 'hurt', defender: d, cause, attacker: attacker === d ? null : attacker, at: v3(at) });
+  /**
+   * A hit or impact on `d`: the hurt for fold (at its point, or the defender's position without one), and an ape's
+   * shout when it is still standing to shout.
+   */
+  private hurtBy(d: Fighter, cause: ImpactCause | null, attacker: Fighter | null, at: V3 | undefined, felt = true): void {
+    this.queue.push({ kind: 'hurt', defender: d, cause, attacker: attacker === d ? null : attacker, at: v3(isPoint(at) ? at : d.pos) });
     if (felt && d.alive && d.species === 'ape') this.shout(d);
   }
 
