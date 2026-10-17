@@ -66,6 +66,7 @@ export const JOINT_TUNING = defineTuning(
     tieStillMps: 0.05,
     nnlsIterPerGroup: 3,
     nnlsIterBase: 10,
+    tripwireEndSpeedMul: 1,
   },
   {
     tripwireWindowS: { unit: 's', source: 'SPEC:259' },
@@ -91,6 +92,12 @@ export const JOINT_TUNING = defineTuning(
     },
     nnlsIterPerGroup: { unit: 'iterations per strand group', source: '§4.9 (Lawson-Hanson, at most 3·n + 10 iterations)', min: 1, step: 1 },
     nnlsIterBase: { unit: 'iterations', source: '§4.9 (Lawson-Hanson, at most 3·n + 10 iterations)', min: 0, step: 1 },
+    tripwireEndSpeedMul: {
+      unit: "× the crosser's speed across the rope",
+      source:
+        "NEW: orchestrator decision (P10's tripwire risk): each end's share of the crossing momentum is at most m_end × |v·n̂| × this, so no end leaves faster than the crosser crosses (§4.9's uncapped half of p sent a 2.3 kg stake off at ≈ 85 m/s)",
+      min: 0,
+    },
   },
 );
 
@@ -489,9 +496,13 @@ export class JointStore implements TripwireSink {
    * crosser's momentum across it, p = M·|v·n̂| (n̂ the horizontal unit ⟂ the rope; M the whole creature's mass and v its
    * root velocity, not the touching limb's, RT-5; an entity's mass and stored velocity), as load = p / tripwireWindowS.
    * Above the strand group's strength (ropeKN × 1000 per strand) every strand snaps; otherwise each end takes half of p
-   * along the rope toward the crossing point: a dynamic end body as an impulse queued for the next phase 4d (RF-2), an
-   * anchored end whose capacity the load beats pulled loose with its share, a fixed one into the ground. A `tripwire`
-   * event says what happened. Exempt: the rope's own end entities, ropes the crosser holds, and a crosser working on the
+   * along the rope toward the crossing point, capped at m_end × |v·n̂| × tripwireEndSpeedMul: a dynamic end body as an
+   * impulse queued for the next phase 4d (RF-2), an anchored end whose capacity the load beats pulled loose with its
+   * share, a fixed one into the ground. A `tripwire` event says what happened.
+   * DEVIATION (orchestrator decision on P10's reported risk; replaces §4.9's "every dynamic end body gets an equal share
+   * of impulse `p` along the rope toward the crossing point"): uncapped, an ape at 4 m/s puts 195 N·s on a 2.3 kg stake
+   * it pulls loose, which leaves at ≈ 85 m/s and shatters; a rope can't throw its end faster than the body crossing it
+   * moves across it, so each end's share is at most its mass × the crosser's speed across the rope. Exempt: the rope's own end entities, ropes the crosser holds, and a crosser working on the
    * rope or an entity at its ends (its work target in 'pickup', its tug, or its focus while in 'attack').
    */
   tripwire(w: World, joint: number, by: Owner): void {
@@ -541,6 +552,8 @@ export class JointStore implements TripwireSink {
       for (const s of strands) this.remove(s.id, 'snap');
     } else {
       const c = nearestOnSegment(ends.a, ends.b, at);
+      // The crosser's speed across the rope (p = M·|v·n̂|): no end is sent off faster than this × tripwireEndSpeedMul.
+      const across = p / M;
       for (const [an, P, Q] of [
         [j.a, ends.a, ends.b],
         [j.b, ends.b, ends.a],
@@ -550,13 +563,14 @@ export class JointStore implements TripwireSink {
         if (!e) continue;
         let toward = sub(c, P);
         if (!(norm(toward) > 0)) toward = sub(Q, P);
-        const share = scale(normalize(toward), p / 2);
+        const share = scale(normalize(toward), Math.min(p / 2, e.mass * across * JOINT_TUNING.tripwireEndSpeedMul));
         const dynamic = !!e.body && e.body.isEnabled() && e.body.isDynamic() && !w.entities.isAnchored(e);
         if (dynamic) w.entities.queueImpulse(e.id, share, P);
         else if (e.state === 'anchored' && e.anchor && e.anchor.capacityN < load) {
-          knockLoose(w, e);
+          // Pulled loose (and lifted out of the ground): its share lands where its anchor point now is.
+          const lift = knockLoose(w, e);
           loosed.push(e.id);
-          w.entities.queueImpulse(e.id, share, P);
+          w.entities.queueImpulse(e.id, share, { x: P.x, y: P.y + lift, z: P.z });
         }
       }
     }
