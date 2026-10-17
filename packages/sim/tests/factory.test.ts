@@ -15,6 +15,7 @@ import {
   FACTORY_TUNING,
   grassBox,
   groundRestY,
+  hangVine,
   logPrism,
   LYING_ALONG_X,
   prismRForMass,
@@ -36,7 +37,7 @@ import {
 import { FELL_TUNING } from '../src/world/felling';
 import { MATERIALS } from '../src/world/materials';
 import { PHYSICS_TUNING, physicsReady } from '../src/world/physics';
-import { cylinderPoints, principalAxis, shapeVolume, taperEnd } from '../src/world/shapes';
+import { cylinderPoints, principalAxis, shapeVolume, taperEnd, triangulate } from '../src/world/shapes';
 import type { Anchor, Entity, MaterialId, Pose3, Quat, Shape, V3 } from '../src/world/types';
 import { TOOL_TUNING, VERB_TUNING } from '../src/world/verbs/tuning';
 import { createWorld, type World, type WorldOptions } from '../src/world/world';
@@ -183,6 +184,9 @@ describe('FACTORY_TUNING', () => {
       starterAxe: { handleLengthM: 0.55, handleRoundDiamM: 0.04, handleMaterial: 'greenWood', headKg: 0.6, headMaterial: 'flint', edgeSharpness: 0.9, lashMaterial: 'vine' },
     });
     expect(FACTORY_TUNING.stoneProtos).toHaveLength(4);
+    // The axe head's prototype is one of them.
+    const headProto = tuningLeaves(entry!).find((l) => l.key === 'starterAxe.headProto');
+    expect(headProto?.meta).toMatchObject({ min: 0, max: FACTORY_TUNING.stoneProtos.length - 1, step: 1 });
   });
 
   it('has four compact stone prototypes, longest along x, resting on a flat bottom face', () => {
@@ -340,8 +344,9 @@ describe('hanging vines', () => {
     expect(anchorW.x).toBeCloseTo(0, 6);
     expect(anchorW.y).toBeCloseTo(8, 5);
     expect(anchorW.z).toBeCloseTo(2.4, 6);
-    // b: loose, lying on the ground, the length beyond the anchor height laid out along the yaw.
-    expect(call.b).toEqual({ entity: null, local: { x: expect.closeTo(0, 9), y: 0, z: expect.closeTo(1.4, 9) }, loose: true });
+    // b: loose, lying on the ground, the length beyond the anchor height laid out along the yaw (measured from the tree's
+    // record pose, float32: 2.6 is 2.5999999 there).
+    expect(call.b).toEqual({ entity: null, local: { x: expect.closeTo(0, 9), y: 0, z: expect.closeTo(1.4, 6) }, loose: true });
     expect(call.lengthM).toBe(9);
     expect(call.rope).toEqual({ entity: vine.rope, lengthM: 9 });
     expect(call.credit).toEqual([]);
@@ -387,6 +392,54 @@ describe('hanging vines', () => {
       // Nothing generated and untouched is saved (§8.3).
       expect(w.entities.toRecord()).toEqual([]);
     }
+  });
+
+  it('hangVine hangs vines on trees spawned earlier, so generation can make every tree first (§6.7 id order)', async () => {
+    const w = await make();
+    const joints = standInJoints(w, { tie: true });
+    const g = { generated: true };
+    const t1 = spawnTree(w, { at: { x: 0, z: 2.6 }, diameter: 0.4, height: 14, ...g }).tree;
+    const t2 = spawnTree(w, { at: { x: 0, z: -2.6 }, diameter: 0.4, height: 14, ...g }).tree;
+    const sapling = spawnSapling(w, { at: { x: 6, z: 0 }, diameter: 0.06, height: 3, ...g });
+    const v1 = hangVine(w, t1, { anchorH: 8, lengthM: 9, yaw: Math.PI }, g);
+    const v2 = hangVine(w, t2, { anchorH: 8, lengthM: 9, yaw: 0 }, g);
+    expect([t1, t2, sapling, v1.rope, v2.rope]).toEqual([1, 2, 3, 4, 5]);
+    expect([v1.joint, v2.joint]).toEqual([1, 2]);
+    for (const [call, side] of [[joints.ropes[0], 1], [joints.ropes[1], -1]] as const) {
+      const anchorW = toWorld(ent(w, call.a.entity!).pose, call.a.local);
+      expect(anchorW.y).toBeCloseTo(8, 5);
+      expect(anchorW.z).toBeCloseTo(2.4 * side, 6);
+      expect(call.b.local.z).toBeCloseTo(1.4 * side, 6); // from the tree's float32 pose
+      expect(call.b.loose).toBe(true);
+    }
+    // Generated: the trees stay untouched though the joint store marked them, the ropes are tied and untouched.
+    for (const id of [t1, t2, v1.rope, v2.rope]) expect(ent(w, id).touched).toBe(false);
+    expect(ent(w, v1.rope).state).toBe('tied');
+    expect(w.entities.toRecord()).toEqual([]);
+
+    // Not generated (a dev spawn): the joint store's marks stand.
+    const t3 = spawnTree(w, { at: { x: -6, z: 0 }, diameter: 0.3, height: 12 }).tree;
+    hangVine(w, t3, { anchorH: 6, lengthM: 10, yaw: 2 });
+    expect(ent(w, t3).touched).toBe(true);
+
+    expect(() => hangVine(w, 999, { anchorH: 5, lengthM: 8, yaw: 0 })).toThrow(/no rooted tree 999/);
+    const stick = spawnStick(w, { p: { x: 8, y: 0.05, z: 8 }, length: 1, r: 0.03 });
+    expect(() => hangVine(w, stick, { anchorH: 0.5, lengthM: 2, yaw: 0 })).toThrow(/no rooted tree/);
+    expect(() => hangVine(w, t1, { anchorH: 20, lengthM: 25, yaw: 0 })).toThrow(/anchored 20 m up a 14 m tree/);
+    expect(() => hangVine(w, t1, { anchorH: 5, lengthM: -1, yaw: 0 })).toThrow(/positive/);
+  });
+
+  it('spawnTree\'s vine is hangVine\'s', async () => {
+    const calls: RopeCall[][] = [];
+    for (const split of [false, true]) {
+      const w = await make();
+      const joints = standInJoints(w);
+      const vine = { anchorH: 10, lengthM: 18.2, yaw: 0.7 };
+      if (split) hangVine(w, spawnTree(w, { at: { x: 1, z: 2 }, diameter: 0.3, height: 15 }).tree, vine);
+      else spawnTree(w, { at: { x: 1, z: 2 }, diameter: 0.3, height: 15, vine });
+      calls.push(joints.ropes);
+    }
+    expect(calls[1]).toEqual(calls[0]);
   });
 
   it('calls the joint store, which is P10\'s', async () => {
@@ -778,7 +831,7 @@ describe('every M1 entity kind', () => {
     expect(w.entities.toRecord()).toEqual([]);
   });
 
-  it('groundRestY rests a shape on sloping terrain: no corner below the ground under it, one on it', async () => {
+  it('groundRestY rests a shape on sloping terrain: no point of it below the ground under it, one on it', async () => {
     const w = await make();
     w.terrain.generate((x, z) => 0.3 * x - 0.2 * z);
     const shapes: [Shape, Quat | undefined][] = [
@@ -790,11 +843,61 @@ describe('every M1 entity kind', () => {
     for (const [s, q] of shapes) {
       const y = groundRestY(w, 3, -2, s, q);
       const pose: Pose3 = { p: { x: 3, y, z: -2 }, q: q ?? { x: 0, y: 0, z: 0, w: 1 } };
-      const gaps = corners(s).map((c) => {
+      // Corners in float64, and the whole surface sampled every 2 cm (float32 triangles: 1e-5 m).
+      const cornerGaps = corners(s).map((c) => {
         const p = toWorld(pose, c);
         return p.y - w.terrain.heightAt(p.x, p.z);
       });
-      expect(Math.min(...gaps), s.kind).toBeCloseTo(0, 9);
+      expect(Math.min(...cornerGaps), s.kind).toBeCloseTo(0, 6);
+      expect(minSurfaceGap(w, s, pose, 0.02), s.kind).toBeGreaterThan(-1e-5);
     }
   });
+
+  it('groundRestY rests a long flat underside on a bump between its ends, and what is put there stays put', async () => {
+    const w = await make();
+    // Two domes, tops at (−5, 0) and (5, 0): a 4 m log's ends sit 0.2 m below the top under its middle, and the top is
+    // under the middle of a 2 × 1.5 m box's bottom face, away from every edge.
+    const dome = (x: number, z: number, cx: number): number => -0.05 * ((x - cx) * (x - cx) + z * z);
+    w.terrain.generate((x, z) => Math.max(dome(x, z, -5), dome(x, z, 5)));
+    const log = logPrism(4, 0.2);
+    const box: Shape = { kind: 'box', hx: 1, hy: 0.05, hz: 0.75 };
+    const yLog = groundRestY(w, -5, 0, log, LYING_ALONG_X);
+    const yBox = groundRestY(w, 5, 0, box);
+    console.info(`on the domes: log at ${yLog.toFixed(4)} m (its apothem ${(0.2 * Math.cos(Math.PI / 6)).toFixed(4)}), box at ${yBox.toFixed(4)} m`);
+    expect(yLog).toBeCloseTo(0.2 * Math.cos(Math.PI / 6), 3);
+    expect(yBox).toBeCloseTo(0.05, 3);
+    const logPose: Pose3 = { p: { x: -5, y: yLog, z: 0 }, q: LYING_ALONG_X };
+    const boxPose: Pose3 = { p: { x: 5, y: yBox, z: 0 }, q: { x: 0, y: 0, z: 0, w: 1 } };
+    for (const [s, pose] of [[log, logPose], [box, boxPose]] as const) {
+      const gap = minSurfaceGap(w, s, pose, 0.01);
+      expect(gap, s.kind).toBeGreaterThan(-2e-3);
+      expect(gap, s.kind).toBeLessThan(2e-3);
+    }
+    // Generated there, neither pops up nor settles: both still untouched (nothing to save) a second later.
+    spawnLog(w, { p: logPose.p, length: 4, r: 0.2, generated: true });
+    spawnBox(w, { p: boxPose.p, size: [2, 0.1, 1.5], material: 'dryWood', look: 'plank', generated: true });
+    for (let t = 0; t < 60; t++) w.step();
+    expect(w.entities.toRecord()).toEqual([]);
+  });
 });
+
+/** The smallest height of a posed shape's surface above the terrain under it, sampled every `step` m on every triangle. */
+function minSurfaceGap(w: World, s: Shape, pose: Pose3, step: number): number {
+  const { positions: P, indices } = triangulate(s, pose);
+  let gap = Infinity;
+  for (let t = 0; t < indices.length; t += 3) {
+    const [a, b, c] = [indices[t] * 3, indices[t + 1] * 3, indices[t + 2] * 3];
+    const u = [P[b] - P[a], P[b + 1] - P[a + 1], P[b + 2] - P[a + 2]];
+    const v = [P[c] - P[a], P[c + 1] - P[a + 1], P[c + 2] - P[a + 2]];
+    const n = Math.max(1, Math.ceil(Math.max(Math.hypot(...u), Math.hypot(...v), Math.hypot(v[0] - u[0], v[1] - u[1], v[2] - u[2])) / step));
+    for (let i = 0; i <= n; i++) {
+      for (let j = 0; i + j <= n; j++) {
+        const x = P[a] + (i / n) * u[0] + (j / n) * v[0];
+        const y = P[a + 1] + (i / n) * u[1] + (j / n) * v[1];
+        const z = P[a + 2] + (i / n) * u[2] + (j / n) * v[2];
+        gap = Math.min(gap, y - w.terrain.heightAt(x, z));
+      }
+    }
+  }
+  return gap;
+}

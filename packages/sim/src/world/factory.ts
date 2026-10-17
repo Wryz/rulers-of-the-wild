@@ -6,7 +6,8 @@
 // Conventions:
 // - `p` is the body origin (a prism's or box's centre, a stone's centre of mass); `at: V3` is the point the object rests
 //   on (a coil and the axe are set down on a horizontal support at at.y); `at: XZ` roots a tree or sapling in the
-//   terrain there. `groundRestY` gives the origin height at which a shape rests on the terrain.
+//   terrain there. `groundRestY` gives the origin height at which a shape rests on the terrain (its whole underside,
+//   sampled finer than the terrain grid, not only its corners).
 // - `r` is a prism's circumradius (§2.2) and a tree's `diameter` its circum-diameter (§2.5): a 30 cm × 15 m green trunk
 //   is 738 kg above the 0.5 m cut. §6.7's quoted masses of branches and logs were computed for round sections:
 //   `prismRForRoundDiam` gives the prism with a round stick's cross-section, and `spawnLog` takes a mass instead of r.
@@ -21,8 +22,8 @@
 // - Rope entities have no body once tied (SPEC:265). A rope is made as a coil (`ropeCoilShape`, exported so the joint
 //   store can coil a rope whose ends are both loose the same way, §2.4), handed to the joint store, and then tied.
 //
-// The joint store is P10's: `spawnTree` with a vine calls `joints.rope` and `spawnStarterAxe` calls `joints.lash`, which
-// throw until P10 lands (the factory's side of both is tested with a stand-in joint store).
+// The joint store is P10's: `hangVine` (and `spawnTree` with a vine) calls `joints.rope` and `spawnStarterAxe` calls
+// `joints.lash`, which throw until P10 lands (the factory's side of both is tested with a stand-in joint store).
 //
 // Imports: CLEARING_TUNING (the snags' sharpness) comes from clearing.ts, which will import these factories (P21). The
 // cycle is safe because neither module reads the other at load time; keep it that way.
@@ -32,7 +33,7 @@ import { defineTuning } from '../tuning/registry';
 import { CLEARING_TUNING } from './clearing';
 import { isRopeLike, MATERIAL_IDS, MATERIALS } from './materials';
 import { PHYSICS_TUNING } from './physics';
-import { cylinderPoints, principalAxis, shapeVolume, taperEnd } from './shapes';
+import { cylinderPoints, principalAxis, shapeVolume, taperEnd, triangulate } from './shapes';
 import type { Anchor, Entity, EntitySpec, Material, MaterialId, Quat, Shape, SharpPoint, V3 } from './types';
 import { TOOL_TUNING, VERB_TUNING } from './verbs/tuning';
 import type { World } from './world';
@@ -121,7 +122,8 @@ export const FACTORY_TUNING = defineTuning(
       handleMaterial: { unit: 'material', source: 'NEW: §6.7 (a green stick)', options: MATERIAL_IDS },
       headKg: { unit: 'kg', source: 'NEW: §6.7 (a 0.6 kg flint)', min: 0 },
       headMaterial: { unit: 'material', source: 'NEW: §6.7 (flint)', options: MATERIAL_IDS },
-      headProto: { unit: 'stone prototype', source: 'NEW', min: 0, step: 1 },
+      // max: the last of the four stoneProtos.
+      headProto: { unit: 'stone prototype', source: 'NEW', min: 0, max: 3, step: 1 },
       edgeSharpness: { unit: 'sharpness', source: 'NEW: §6.7 (a 0.9 edge), §5.2 (TOOL_TUNING.refSharpness)', min: 0, max: 1 },
       lashMaterial: { unit: 'material', source: 'NEW: §6.7 (lashed across; a lashing uses VERB_TUNING.lashRopeUseM of rope)', options: MATERIAL_IDS },
     },
@@ -221,15 +223,73 @@ export function grassBox(massKg: number, material: MaterialId, size?: readonly [
 }
 
 /**
- * The origin height at which `shape`, rotated by `q`, rests on the terrain around (x, z): every corner of the shape is
- * on or above the terrain under it (and one is on it). Exact corners for prisms, boxes and hulls; balls and capsules by
- * their axis-extreme points.
+ * The origin height at which `shape`, rotated by `q`, rests on the terrain around (x, z): its underside is on or above
+ * the terrain under it, and touches it. The underside is the shape's surface triangles (`triangulate`) that face down
+ * or sideways. Each is sampled on a grid at most half the terrain's vertex spacing apart along every edge, corners
+ * included, and a downward one also at every terrain vertex under it, so a long flat bottom doesn't sink into a bump
+ * between its ends. The terrain is linear between its vertices, so what sampling can miss is where a terrain edge
+ * crosses a face edge between two samples: under a millimetre on ordinary slopes.
  */
 export function groundRestY(w: World, x: number, z: number, shape: Shape, q: Quat = IDENTITY): number {
+  const step = w.terrain.spacing / 2;
+  // Local triangles (float32 positions), rotated here in float64.
+  const tri = triangulate(shape, { p: { x: 0, y: 0, z: 0 }, q: IDENTITY });
+  const P: number[] = [];
+  for (let i = 0; i + 2 < tri.positions.length; i += 3) {
+    const v = rotate(q, { x: tri.positions[i], y: tri.positions[i + 1], z: tri.positions[i + 2] });
+    P.push(v.x, v.y, v.z);
+  }
+  const indices = tri.indices;
   let y = -Infinity;
-  for (const c of corners(shape)) {
-    const v = rotate(q, c);
-    y = Math.max(y, w.terrain.heightAt(x + v.x, z + v.z) - v.y);
+  for (let t = 0; t + 2 < indices.length; t += 3) {
+    const a = indices[t] * 3;
+    const b = indices[t + 1] * 3;
+    const c = indices[t + 2] * 3;
+    const ux = P[b] - P[a];
+    const uy = P[b + 1] - P[a + 1];
+    const uz = P[b + 2] - P[a + 2];
+    const vx = P[c] - P[a];
+    const vy = P[c + 1] - P[a + 1];
+    const vz = P[c + 2] - P[a + 2];
+    // The outward normal's y: (u × v)·ŷ. Upward faces lie above the underside.
+    const ny = uz * vx - ux * vz;
+    const flat = 1e-9 * Math.hypot(uy * vz - uz * vy, ny, ux * vy - uy * vx);
+    if (ny > flat) continue;
+    const longest = Math.max(Math.hypot(ux, uy, uz), Math.hypot(vx, vy, vz), Math.hypot(vx - ux, vy - uy, vz - uz));
+    const n = Math.max(1, Math.ceil(longest / step));
+    for (let i = 0; i <= n; i++) {
+      for (let j = 0; i + j <= n; j++) {
+        const s = i / n;
+        const r = j / n;
+        const px = P[a] + s * ux + r * vx;
+        const py = P[a + 1] + s * uy + r * vy;
+        const pz = P[a + 2] + s * uz + r * vz;
+        y = Math.max(y, w.terrain.heightAt(x + px, z + pz) - py);
+      }
+    }
+    // A downward face: also every terrain vertex under it (a bump inside the face, away from its edges).
+    if (!(ny < -flat)) continue;
+    const ter = w.terrain;
+    const d = ux * vz - vx * uz;
+    const xs = [P[a], P[b], P[c]];
+    const zs = [P[a + 2], P[b + 2], P[c + 2]];
+    const gi0 = Math.ceil((x + Math.min(...xs) - ter.minX) / ter.spacing);
+    const gi1 = Math.floor((x + Math.max(...xs) - ter.minX) / ter.spacing);
+    const gj0 = Math.ceil((z + Math.min(...zs) - ter.minZ) / ter.spacing);
+    const gj1 = Math.floor((z + Math.max(...zs) - ter.minZ) / ter.spacing);
+    for (let gj = gj0; gj <= gj1; gj++) {
+      for (let gi = gi0; gi <= gi1; gi++) {
+        const wx = ter.minX + gi * ter.spacing;
+        const wz = ter.minZ + gj * ter.spacing;
+        const px = wx - x - P[a];
+        const pz = wz - z - P[a + 2];
+        // Barycentric coordinates in the face's xz projection (d ≠ 0: the face isn't vertical).
+        const s = (px * vz - vx * pz) / d;
+        const r = (ux * pz - px * uz) / d;
+        if (s < -1e-9 || r < -1e-9 || s + r > 1 + 1e-9) continue;
+        y = Math.max(y, ter.heightAt(wx, wz) - (P[a + 1] + s * uy + r * vy));
+      }
+    }
   }
   return y;
 }
@@ -238,33 +298,53 @@ export function groundRestY(w: World, x: number, z: number, shape: Shape, q: Qua
 // Factories
 // ---------------------------------------------------------------------------
 
+/** A hanging vine's placement on its tree (§6.7). */
+export interface VineSpec {
+  /** m up the trunk from its base. */
+  anchorH: number;
+  /** m of vine rope. */
+  lengthM: number;
+  /** The side of the trunk it hangs on: direction (sin yaw, 0, cos yaw). */
+  yaw: number;
+}
+
 /**
  * A rooted tree: a fixed 8-gon trunk of green wood (FACTORY_TUNING.materials.tree) from the lowest ground under its
- * footprint up `height`, `plant` standing (§2.5). With `vine`: a hanging vine (§6.7) anchored `anchorH` up the trunk
- * on its `yaw` side (direction (sin yaw, 0, cos yaw), at the trunk's circumradius), `lengthM` long, its other end loose:
- * it hangs to the ground and its slack lies out along `yaw` (or it hangs free when shorter than anchorH). The vine is a
- * `rope` joint (`world.joints.rope`, P10) from the trunk to the loose end, made of a vine rope entity, tied (no body).
- * Ids: the tree, then the rope entity; then the joint.
+ * footprint up `height`, `plant` standing (§2.5). With `vine`, `hangVine` hangs one on it straight away. Ids: the tree,
+ * then the vine's rope entity; then the vine's joint. (Generation, whose id order puts every tree before every vine,
+ * spawns the trees without `vine` and calls `hangVine` after.)
  */
 export function spawnTree(
   w: World,
-  o: { at: XZ; diameter: number; height: number; vine?: { anchorH: number; lengthM: number; yaw: number } } & SpawnFlags,
+  o: { at: XZ; diameter: number; height: number; vine?: VineSpec } & SpawnFlags,
 ): { tree: number; vine: { rope: number; joint: number } | null } {
-  if (o.vine) {
-    positive('vine anchor height', o.vine.anchorH);
-    positive('vine length', o.vine.lengthM);
-    finite('vine yaw', o.vine.yaw);
-    if (o.vine.anchorH > o.height) throw new Error(`factory: a vine anchored ${o.vine.anchorH} m up a ${o.height} m tree`);
-  }
-  const { e: tree, base } = rooted(w, o, FACTORY_TUNING.materials.tree, 'tree');
-  if (!o.vine) return { tree: tree.id, vine: null };
+  // Checked before the tree is made, so a bad vine leaves no tree behind.
+  if (o.vine) checkVine(o.vine, o.height);
+  const tree = rooted(w, o, FACTORY_TUNING.materials.tree, 'tree');
+  return { tree: tree.id, vine: o.vine ? hangVine(w, tree.id, o.vine, o) : null };
+}
 
-  const { anchorH, lengthM, yaw } = o.vine;
-  const r = o.diameter / 2;
+/**
+ * A hanging vine (§6.7) on the rooted trunk `tree` (as spawnTree and spawnSapling make it: axis local +y, origin at its
+ * centre): anchored `anchorH` up the trunk on its `yaw` side at the trunk's circumradius, `lengthM` long, its other
+ * end loose: it hangs to the ground and its slack lies out along `yaw` (or it hangs free when shorter than anchorH).
+ * The vine is a `rope` joint (`world.joints.rope`, P10) from the trunk to the loose end, made of a vine rope entity,
+ * tied (no body). Ids: the rope entity; then the joint. With `generated`, the rope leaves untouched and the tree as
+ * touched as it was before.
+ */
+export function hangVine(w: World, tree: number, v: VineSpec, flags: SpawnFlags = {}): { rope: number; joint: number } {
+  const t = w.entities.get(tree);
+  if (!t || !t.plant) throw new Error(`factory: no rooted tree ${tree} to hang a vine on`);
+  checkVine(v, t.plant.height);
+  const { anchorH, lengthM, yaw } = v;
+  const r = t.plant.diameter / 2;
   const dx = Math.sin(yaw);
   const dz = Math.cos(yaw);
-  const local: V3 = { x: r * dx, y: anchorH - o.height / 2, z: r * dz };
-  const anchor: V3 = { x: o.at.x + local.x, y: base + anchorH, z: o.at.z + local.z };
+  const local: V3 = { x: r * dx, y: anchorH - t.plant.height / 2, z: r * dz };
+  const anchor = rotate(t.pose.q, local);
+  anchor.x += t.pose.p.x;
+  anchor.y += t.pose.p.y;
+  anchor.z += t.pose.p.z;
   let end: V3;
   if (lengthM >= anchorH) {
     const out = lengthM - anchorH;
@@ -273,18 +353,22 @@ export function spawnTree(
     end = { x: ex, y: w.terrain.heightAt(ex, ez), z: ez };
   } else end = { x: anchor.x, y: anchor.y - lengthM, z: anchor.z };
 
-  const rope = w.entities.create(coilSpec('vine', lengthM, end, o.generated));
-  const a: Anchor = { entity: tree.id, local };
+  const wasTouched = t.touched;
+  const rope = w.entities.create(coilSpec('vine', lengthM, end, flags.generated));
+  const a: Anchor = { entity: t.id, local };
   const b: Anchor = { entity: null, local: end, loose: true };
   const joint = w.joints.rope(a, b, lengthM, { entity: rope.id, lengthM }, []);
   tieRope(w, rope.id);
-  settleGenerated(w, [tree.id, rope.id], o.generated);
-  return { tree: tree.id, vine: { rope: rope.id, joint } };
+  if (flags.generated) {
+    settleGenerated(w, [rope.id], true);
+    t.touched = wasTouched;
+  }
+  return { rope: rope.id, joint };
 }
 
 /** A rooted sapling: a fixed 8-gon of green wood (FACTORY_TUNING.materials.sapling), `plant` standing (§5.9 bends it). */
 export function spawnSapling(w: World, o: { at: XZ; diameter: number; height: number } & SpawnFlags): number {
-  return rooted(w, o, FACTORY_TUNING.materials.sapling, 'sapling').e.id;
+  return rooted(w, o, FACTORY_TUNING.materials.sapling, 'sapling').id;
 }
 
 /** A coil of vine or sinew rope `lengthM` long (ropeCoilShape), lying flat on a support at `at`. */
@@ -323,7 +407,7 @@ export function spawnStick(
  * A 6-gon prism (logPrism) of dry wood unless `material` says otherwise, lying along x unless `q` is given. Give its
  * circumradius `r` or its `mass` (then r follows from density × volume; with both, the mass wins). `state` 'anchored'
  * drives it as a stake is driven (VERB_TUNING.stakeAnchorDepthM). `snags` broken-branch points (§6.7: sharpness
- * CLEARING_TUNING.snagSharpness, capped at the material's maxSharpness) sit on its surface at evenly spaced points
+ * CLEARING_TUNING.snagSharpness, capped at the material's maxSharpness) sit on its circumscribed cylinder at evenly spaced points
  * along it, alternating sides, pointing up (world up at the spawn rotation) and out at snagElevationDeg.
  */
 export function spawnLog(
@@ -447,19 +531,25 @@ function create(w: World, spec: Omit<EntitySpec, 'generated'>, generated: boolea
  * A fixed, rooted 8-gon trunk at `at`: its base is the lowest terrain under its centre and corners (on a slope it is
  * sunk on the uphill side rather than floating on the downhill one), `height` long, `plant` standing.
  */
-function rooted(w: World, o: { at: XZ; diameter: number; height: number } & SpawnFlags, material: MaterialId, look: string): { e: Entity; base: number } {
+function rooted(w: World, o: { at: XZ; diameter: number; height: number } & SpawnFlags, material: MaterialId, look: string): Entity {
   finite('x', o.at.x);
   finite('z', o.at.z);
   const shape = trunkPrism(o.diameter, o.height);
   const ring = cylinderPoints(shape);
   let base = w.terrain.heightAt(o.at.x, o.at.z);
   for (let k = 0; k < shape.sides; k++) base = Math.min(base, w.terrain.heightAt(o.at.x + ring[3 * k], o.at.z + ring[3 * k + 2]));
-  const e = create(
+  return create(
     w,
     { material, shape, p: { x: o.at.x, y: base + o.height / 2, z: o.at.z }, state: 'fixed', plant: { diameter: o.diameter, height: o.height }, look },
     o.generated,
   );
-  return { e, base };
+}
+
+function checkVine(v: VineSpec, treeHeight: number): void {
+  positive('vine anchor height', v.anchorH);
+  positive('vine length', v.lengthM);
+  finite('vine yaw', v.yaw);
+  if (v.anchorH > treeHeight) throw new Error(`factory: a vine anchored ${v.anchorH} m up a ${treeHeight} m tree`);
 }
 
 /** A rope coil's spec: `material` must be rope-like; it lies flat on a support at `at`. */
@@ -492,8 +582,13 @@ function settleGenerated(w: World, ids: readonly number[], generated: boolean | 
 
 /**
  * `n` broken-branch points along a prism (axis local +y, circumradius r) lying at rotation q: at axial positions
- * length × ((k + 1)/(n + 1) − ½), on the circumscribed surface, pointing out (alternately to either side of the axis)
- * and up (world up seen in the prism's frame, across the axis) at snagElevationDeg.
+ * length × ((k + 1)/(n + 1) − ½), on the circumscribed cylinder (on or just outside the prism's faces), pointing out
+ * (alternately to either side of the axis) and up (world up seen in the prism's frame, across the axis) at
+ * snagElevationDeg.
+ *
+ * TODO "snag stub geometry (rule 3)": the stubs have no collider of their own, so the renderer must draw them flush or
+ * short (no longer than what the log's own collider and the sharp-point leading test can reach), never as long
+ * branches a body would visibly pass through.
  */
 function snagPoints(q: Quat, length: number, r: number, n: number, sharpness: number): SharpPoint[] {
   if (n === 0) return [];
