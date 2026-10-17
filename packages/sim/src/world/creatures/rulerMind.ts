@@ -1,6 +1,14 @@
 // The giant ape's mind (docs/M1-DESIGN.md §6.4, §6.6; package P20): rest, patrol, investigate, chase, the telegraphed,
-// committed straight-line charge (8°/s turn), recover, down (and the climb out of a pit), flee on a severe wound,
-// severe-wound effects, deflection adoption, the `charge` script and chargeLineClear.
+// committed straight-line charge (8°/s turn), recover, down (and the climb out of a pit, re-planned when blocked), flee
+// on a severe wound, severe-wound effects (the limp in the speeds and the gait), deflection adoption, the `charge`
+// script and chargeLineClear.
+//
+// The telegraph and the charge show posture headLow (body/poses.ts), an ape's knuckle charge: hips down, back bent, both
+// forearms reaching down in front so the knuckles meet ≈ 1 m up, ≈ 2.5 m ahead of the root. Those forearms are the
+// leading body a charge meets a player with: the giant's knees are 2.75 m up, and at a player's height its shins stand
+// ±0.8 m out with ≈ 1 m between them, so a giant charging upright at the bearing to a player passes over him between
+// them (P20 review, finding 1). With the forearms down it meets him through the same damage rule (rule 2, rule 6),
+// and the charge aims at his bearing as §6.4 says.
 //
 // The mind drives the body only through `f.drive` ({ heading, speed, accel, climb }) and `f.posture`; RulerMover
 // (world/rulerBody.ts, §4.7) resolves the move (shoves, blocks, deflections, trips, ledges, the climb's limits) and the
@@ -14,14 +22,14 @@
 // - `cooldownUntil`: the charge cooldown's end (a tick; the dev panel reads it);
 // - `fleeUntil`: the end of the flee a severe wound started (a knock-down inside it flees on once up);
 // - `mark`: investigate → when the sniff began (−1 while walking to lkp); charge → since when it has been slower than
-//   blockedSpeed (−1 not); down → when the climb out of the pit began (−1 not yet); a charge script's phase tick;
+//   blockedSpeed (−1 not); a charge script's phase tick;
 // - `routeIdx`: patrol → the waypoint being walked to, counted along the loop (route[routeIdx % n]; past n: the lair);
 //   a charge script's phase;
 // - `charge`: the telegraph's and the charge's record (the committed heading, where it began, how far it has gone, a
 //   close charge or not);
 // - `home`: the lair (the spawner sets it; a giant made elsewhere rests where it was made).
 // The route is the spawn data's (§6.7), or one set by hand (setRoute: a test, AC-3's two waypoints), saved as
-// MindRecV1.route.
+// MindRecV1.route; the climb out of a pit (its progress window and the rims given up on) as MindRecV1.climb.
 //
 // TODO "jaw weakens bite attacks": weakJaw only quiets the roar in M1 (§12.4; NoiseBus.roar applies weakJawRoarMul).
 import RAPIER from '@dimforge/rapier3d-compat';
@@ -115,9 +123,11 @@ export function chargeLineClear(w: World, from: V3, to: V3, scale: number = SPEC
  * rad: the heading from a ruler standing in a pit toward the nearest rim point (§6.4 `down`): the nearest terrain
  * vertex (searched ring by ring on the terrain's own grid, nearest first) that is out of the pit (within
  * pitOutDepthFrac × knee height of the original ground, as in-pit ends, §4.7) and no more than climbMaxM above the pit
- * floor it stands on (the climb can reach it, §4.7 step 3); the lowest of equally near ones. null when there is none.
+ * floor it stands on (the climb can reach it, §4.7 step 3); the lowest of equally near ones. `avoid`: bearings (rad) a
+ * climb was blocked along; a rim point ahead along any of them (in the half-plane it faces) is skipped, so the next
+ * pick lies away from them. null when there is none.
  */
-export function rimHeading(w: World, f: Fighter): number | null {
+export function rimHeading(w: World, f: Fighter, avoid: readonly number[] = []): number | null {
   const t = w.terrain;
   const T = RULER_BODY_TUNING;
   const s = t.spacing;
@@ -128,6 +138,7 @@ export function rimHeading(w: World, f: Fighter): number | null {
   const maxX = t.minX + t.tilesX * t.tileSize;
   const maxZ = t.minZ + t.tilesZ * t.tileSize;
   const rings = Math.ceil(Math.max(maxX - t.minX, maxZ - t.minZ) / s);
+  const away = avoid.map((h) => ({ x: Math.sin(h), z: Math.cos(h) }));
   let bestD2 = Infinity;
   let bestH = Infinity;
   let bestI = 0;
@@ -143,6 +154,7 @@ export function rimHeading(w: World, f: Fighter): number | null {
       const x = x0 + i * s;
       const z = z0 + j * s;
       if (x < t.minX || x > maxX || z < t.minZ || z > maxZ) continue;
+      if (away.some((u) => i * u.x + j * u.z > 0)) continue;
       const h = t.heightAt(x, z);
       if (t.originalHeightAt(x, z) - h > outDepth || h - floor > T.climbMaxM) continue;
       const d2 = i * i + j * j;
@@ -157,9 +169,19 @@ export function rimHeading(w: World, f: Fighter): number | null {
   return bestD2 < Infinity ? Math.atan2(bestI, bestJ) : null;
 }
 
+/** The climb out of a pit (§6.4 `down`): its progress window (where and when it opened) and how many rims were blocked. */
+export interface ClimbRecord {
+  from: V3;
+  tick: number;
+  /** Rim directions given up on so far (the next pick lies away from each, rimHeading's `avoid`). */
+  skip: number;
+}
+
 export class RulerMind extends CreatureMind {
   /** A patrol route set by hand (setRoute), or null: the spawn data's (§6.7). Saved as MindRecV1.route. */
   routeOverride: GroundXZ[] | null = null;
+  /** The climb out of a pit under way (`down`, up and in the pit), or null. Saved as MindRecV1.climb. */
+  climb: ClimbRecord | null = null;
 
   // (No `heading` field here: CreatureMind's constructor starts it at the fighter's yaw.)
 
@@ -199,10 +221,11 @@ export class RulerMind extends CreatureMind {
     // roaring as it starts (RR-1).
     if (bodyDown(self) || self.ruler?.inPit) {
       if (this.state !== 'down') this.enter(w, 'down');
-      if (!bodyDown(self) && this.mark < 0) {
-        this.mark = tick;
-        this.heading = rimHeading(w, self) ?? this.heading;
-        w.noise.roar(self);
+      if (!bodyDown(self)) this.climbOut(w);
+      else if (this.climb) {
+        // Knocked down mid-climb: its progress window starts again once it is up.
+        this.climb.from = copy3(self.pos);
+        this.climb.tick = tick;
       }
       return;
     }
@@ -279,9 +302,9 @@ export class RulerMind extends CreatureMind {
       }
       case 'telegraph': {
         if (tick - this.stateTick < this.telegraphTicks(this.charge?.close ?? false)) return;
-        // Commit: the bearing to the player's position at this instant (§6.4), a leg's width aside (legAim).
+        // Commit: the bearing to the player's position at this instant (§6.4).
         const t = self.target && self.target.alive ? self.target : target;
-        const heading = t ? legAim(self, self.yaw, t.pos) : this.heading;
+        const heading = t ? bearingTo(self.pos, t.pos) : this.heading;
         const close = this.charge?.close ?? false;
         this.enter(w, 'charge');
         this.heading = heading;
@@ -318,6 +341,51 @@ export class RulerMind extends CreatureMind {
         this.enter(w, 'rest');
         return;
     }
+  }
+
+  /**
+   * Up in a pit (§6.4 `down`, §4.7 step 3): the climb toward the nearest rim point, roaring as it starts (RR-1). Re-planned
+   * when it makes no progress (a blocker on the rim, P20 review): moved less than climbStuckFrac of the way its slower
+   * climb rate covers in stuckTicks (0.4 m of 0.8 m), its window started over every stuckTicks; the next pick lies away
+   * from every bearing given up on (rimHeading's `avoid`), and with none left it starts over from the nearest.
+   */
+  private climbOut(w: World): void {
+    const self = this.self;
+    const G = CREATURE_TUNING.giant;
+    const T = RULER_BODY_TUNING;
+    const tick = w.tick;
+    const c = this.climb;
+    if (!c) {
+      this.climb = { from: copy3(self.pos), tick, skip: 0 };
+      this.heading = this.climbHeading(w, 0) ?? this.heading;
+      w.noise.roar(self);
+      return;
+    }
+    if (tick - c.tick < G.stuckTicks) return;
+    const moved = Math.hypot(self.pos.x - c.from.x, self.pos.y - c.from.y, self.pos.z - c.from.z);
+    const least = G.climbStuckFrac * Math.min(T.climbRateMps, T.climbWalkMps) * G.stuckTicks * DT;
+    if (moved < least) {
+      c.skip++;
+      let h = this.climbHeading(w, c.skip);
+      if (h === null) {
+        c.skip = 0;
+        h = this.climbHeading(w, 0);
+      }
+      if (h !== null) this.heading = h;
+    }
+    c.from = copy3(self.pos);
+    c.tick = tick;
+  }
+
+  /** The heading of the climb's `skip`-th pick: each pick avoids the bearings of the ones before it (from here). */
+  private climbHeading(w: World, skip: number): number | null {
+    const avoid: number[] = [];
+    let h = rimHeading(w, this.self, avoid);
+    for (let k = 0; k < skip && h !== null; k++) {
+      avoid.push(h);
+      h = rimHeading(w, this.self, avoid);
+    }
+    return h;
   }
 
   /** A stimulus since this state began has raised its awareness to investigateAt (§6.2 Thresholds). */
@@ -422,6 +490,7 @@ export class RulerMind extends CreatureMind {
       this.cooldownUntil = tick + Math.round((G.chargeCooldownS * (this.has('winded') ? G.windedCooldownMul : 1)) / DT);
     }
     if (state !== 'telegraph' && state !== 'charge') this.charge = null;
+    this.climb = null;
     switch (state) {
       case 'rest':
         self.target = null;
@@ -507,7 +576,22 @@ export class RulerMind extends CreatureMind {
   think(self: Fighter, target: Fighter | null, wk: Walkable | null): void {
     const r = self.ruler;
     if (r && r.deflectedHeading !== null && !this.charging()) r.deflectedHeading = null;
+    this.limpGait(self);
     super.think(self, target, wk);
+  }
+
+  /**
+   * A severe limp shows in the gait (§6.4 limp: "visible through FootworkStyle.limp"; P20 review): the leg of the
+   * newest limp wound is the bad one, at full amount, while one exists (wounds on rulers persist); none, no limp. Set
+   * before the footwork runs (updatePose, after the brains); it saves with the footwork record.
+   */
+  private limpGait(self: Fighter): void {
+    let side: 'L' | 'R' | null = null;
+    for (const wd of self.ruler?.wounds ?? []) if (wd.severe && wd.effect === 'limp') side = wd.bone.endsWith('R') ? 'R' : 'L';
+    const style = self.footwork.style;
+    if (side) {
+      if (style.limp?.side !== side || style.limp.amount !== 1) style.limp = { side, amount: 1 };
+    } else if (style.limp) delete style.limp;
   }
 
   /** In a charge: the brain's, or a charge script's charge phases. */
@@ -559,16 +643,16 @@ export class RulerMind extends CreatureMind {
         const t = self.target;
         const want = t && t.alive ? bearingTo(self.pos, t.pos) : null;
         this.driveAt(self, want, this.turn(G.turn.telegraph), G.speed.telegraph * k, G.accel.telegraph);
+        // Going down on its knuckles over the telegraph (body/poses.ts headLow).
         self.posture = { id: 'headLow', weight: Math.min(1, (tick - this.stateTick + 1) / Math.max(1, this.telegraphTicks(this.charge?.close ?? false))) };
         return;
       }
       case 'charge': {
         this.adoptDeflection(self);
         const t = self.target;
-        // Toward the player's current bearing (where it sees him, else where it last saw him) at ≤ turn.charge, a leg's
-        // width aside (legAim).
+        // Toward the player's current bearing (where it sees him, else where it last saw him) at ≤ turn.charge.
         const at = t && t.alive ? (this.senses.seenWithin(tick) ? t.pos : this.senses.lkp) : null;
-        this.driveAt(self, at ? legAim(self, this.heading, at) : null, this.turn(G.turn.charge), G.speed.charge * (this.has('limp') ? G.limpChargeMul : 1), G.accel.charge);
+        this.driveAt(self, at ? bearingTo(self.pos, at) : null, this.turn(G.turn.charge), G.speed.charge * (this.has('limp') ? G.limpChargeMul : 1), G.accel.charge);
         if (this.charge) this.charge.heading = this.heading;
         self.posture = { id: 'headLow', weight: 1 };
         return;
@@ -784,48 +868,24 @@ export class RulerMind extends CreatureMind {
   // Save record (§6.8)
   // -------------------------------------------------------------------------
 
-  /** CreatureMind's record with the giant's own field: `route`, the route set by hand (null: the spawn data's). */
+  /**
+   * CreatureMind's record with the giant's own fields: `route`, the route set by hand (null: the spawn data's), and
+   * `climb`, the climb out of a pit under way (null: none).
+   */
   toRecord(): MindRecV1 {
     const r = super.toRecord();
     r.route = this.routeOverride ? this.routeOverride.map((p) => ({ x: p.x, z: p.z })) : null;
+    r.climb = this.climb ? { from: copy3(this.climb.from), tick: this.climb.tick, skip: this.climb.skip } : null;
     return r;
   }
 
   restoreRecord(r: MindRecV1): void {
     super.restoreRecord(r);
     if (r.route === undefined) throw new Error(`RulerMind.restoreRecord: fighter ${r.fighter}'s record has no route (a giant's record always has one)`);
+    if (r.climb === undefined) throw new Error(`RulerMind.restoreRecord: fighter ${r.fighter}'s record has no climb (a giant's record always has one)`);
     this.routeOverride = r.route ? r.route.map((p) => ({ x: p.x, z: p.z })) : null;
+    this.climb = r.climb ? { from: copy3(r.climb.from), tick: r.climb.tick, skip: r.climb.skip } : null;
   }
-}
-
-/**
- * rad: the heading that runs one of the giant's legs, not the gap between them, through `at` (the player): the bearing
- * to it turned aside by asin(a / d), a = how far its feet stand out from its root (the mean of the two, from the
- * footwork), so that `at` lies on the line of the leg on its side of the heading `h` (the left leg when dead ahead).
- * DEVIATION (§6.4 "commits RulerMind.heading = the bearing to the player's position"; "turns toward the player's
- * current bearing"): the B lab's dodge table models the giant as a 1.95 m disc, but its real body meets a 1.8 m
- * player only with its shins (its knee is 2.75 m up), which stand ±0.8 m out with a 0.8 m gap between them: aimed at
- * its centre, the charge straddles a standing player and never touches him (measured: no contact at 7 m/s, the
- * player then pushed 2 m aside by separate() once the root has passed). Aimed with a leg, it hits him (rule 9, §4.4
- * RF-5: the charge is a contact). A few degrees at charge range (3° at 15 m).
- */
-function legAim(f: Fighter, h: number, at: { x: number; z: number }): number {
-  const dx = at.x - f.pos.x;
-  const dz = at.z - f.pos.z;
-  const d = Math.hypot(dx, dz);
-  const b = Math.atan2(dx, dz);
-  if (!(d > 0)) return b;
-  const c = Math.cos(h);
-  const s = Math.sin(h);
-  let a = 0;
-  for (const side of ['L', 'R'] as const) {
-    const p = f.footwork.foot(side).pos;
-    a += Math.abs((p.x - f.pos.x) * c - (p.z - f.pos.z) * s) / 2;
-  }
-  // Nearer than its feet stand out, he is between or at its legs already: straight at him.
-  if (!(d > a)) return b;
-  const left = dx * c - dz * s;
-  return b - (left >= 0 ? 1 : -1) * Math.asin(a / d);
 }
 
 /** The world point of a wound (its bone's frame at the rig's pose; WoundRecord.local is in bone units, × scale). */

@@ -134,6 +134,8 @@ export const CREATURE_TUNING = defineTuning(
       windedCooldownMul: 1.5,
       windedChaseMul: 0.85,
       woundAwareness: 1.2,
+      // Not a §9.1 row (P20 review, finding 4): the climb out of a pit is re-planned when it makes less progress than this.
+      climbStuckFrac: 0.5,
     },
   },
   {
@@ -284,6 +286,10 @@ export const CREATURE_TUNING = defineTuning(
       windedCooldownMul: meta('×', 'NEW'),
       windedChaseMul: meta('×', 'NEW'),
       woundAwareness: meta('awareness', 'NEW'),
+      climbStuckFrac: meta(
+        '× the way its slower climb rate covers in stuckTicks',
+        'NEW (P20 review): a climb out of a pit that moves less than this in stuckTicks is blocked (0.4 m of a normal 0.8 m), and goes for another rim',
+      ),
     },
   },
 );

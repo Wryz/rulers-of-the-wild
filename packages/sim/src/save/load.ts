@@ -1018,10 +1018,10 @@ const SCRIPT_POSTURES: Readonly<Record<PostureId, true>> = {
  * BrawlerAI.restoreRecord itself (P04's readers).
  */
 function mind(v: unknown, p: string): MindRecV1 {
-  const o = exactKeys(obj(v, p), MIND_KEYS, p, ['route']);
+  const o = exactKeys(obj(v, p), MIND_KEYS, p, ['route', 'climb']);
   nat(o.fighter, `${p}.fighter`);
   const kind = oneOf(o.kind, { ape: true, giantApe: true }, `${p}.kind`);
-  // The giant's hand-set route (P20, RulerMind): on every giant's record (null: the spawn data's), never on an ape's.
+  // The giant's hand-set route and its climb (P20, RulerMind): on every giant's record (null: none), never on an ape's.
   if (kind === 'giantApe') {
     nullable(o.route, `${p}.route`, (x, q) =>
       arr(x, q).forEach((pt, k) => {
@@ -1031,7 +1031,16 @@ function mind(v: unknown, p: string): MindRecV1 {
         fin(xz.z, `${r}.z`);
       }),
     );
-  } else if (o.route !== undefined) fail(`${p}.route`, o.route, "absent (only a giant's mind has a route)");
+    nullable(o.climb, `${p}.climb`, (x, q) => {
+      const c = exactKeys(obj(x, q), ['from', 'tick', 'skip'], q);
+      v3(c.from, `${q}.from`);
+      int(c.tick, `${q}.tick`);
+      return nat(c.skip, `${q}.skip`);
+    });
+  } else {
+    if (o.route !== undefined) fail(`${p}.route`, o.route, "absent (only a giant's mind has a route)");
+    if (o.climb !== undefined) fail(`${p}.climb`, o.climb, "absent (only a giant's mind climbs out of a pit)");
+  }
   oneOf(o.state, MIND_STATE_DOMAIN, `${p}.state`);
   nullable(o.resume, `${p}.resume`, (x, q) => oneOf(x, MIND_STATE_DOMAIN, q));
   bool(o.paused, `${p}.paused`);

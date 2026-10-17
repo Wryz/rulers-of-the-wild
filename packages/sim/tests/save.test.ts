@@ -768,6 +768,7 @@ const INVENTORY: Record<string, Record<string, string>> = {
     charge: 'saved: minds[].charge',
     current: 'saved: minds[].script',
     routeOverride: "saved: minds[].route (a giant's record only: null when it follows the spawn data's route)",
+    climb: "saved: minds[].climb (a giant's record only: null with no climb out of a pit under way)",
   },
   Senses: {
     awareness: 'saved: minds[].awareness',
@@ -833,6 +834,10 @@ const UNREACHED: Record<string, string> = {};
 const KIND_ONLY: Record<string, { why: string; has: (s: SaveV1) => { yes: unknown[]; no: unknown[] } }> = {
   'minds[].route': {
     why: "only a giant's mind has a patrol route of its own (RulerMind); an ape's record has no such field",
+    has: (s) => ({ yes: s.minds.filter((m) => m.kind === 'giantApe'), no: s.minds.filter((m) => m.kind !== 'giantApe') }),
+  },
+  'minds[].climb': {
+    why: "only a giant's mind climbs out of a pit (RulerMind); an ape's record has no such field",
     has: (s) => ({ yes: s.minds.filter((m) => m.kind === 'giantApe'), no: s.minds.filter((m) => m.kind !== 'giantApe') }),
   },
 };

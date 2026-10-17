@@ -1,8 +1,9 @@
 // The giant ape's mind (docs/M1-DESIGN.md §6.4, §6.6; package P20): createCreature's giant with its RulerMind, the
-// patrol loop, investigating a felled tree, the chase, the telegraph and the committed charge (8°/s), the dodge table
-// with the real body and the real separate() (RF-5), a staked shin-height log and a 20° wall, the limp, the blind side,
-// a severe wound and the flee to the lair, the climb out of a pit (RR-1), chargeLineClear, the charge script, the
-// cooldown, determinism and the save round trip taken mid-charge (RR-19).
+// patrol loop, investigating a felled tree, the chase, the telegraph and the committed charge (8°/s) knuckles down, the
+// dodge table with the real body and the real separate() (RF-5) at 10, 15 and 25 m both ways, a staked shin-height log
+// and a 20° wall, the limp (speed and gait), the blind side, a severe wound and the flee to the lair, the climb out of a
+// pit (RR-1) and its re-plan, chargeLineClear, the charge script, the cooldown, determinism and the save round trip
+// taken mid-charge (RR-19).
 //
 // Scenes are flat `scene 'empty'` worlds with a navmesh (nav 'full'). Scene numbers (distances, masses, tick budgets)
 // are test constants, never tuning (§9); expected values come from the tuning tables.
@@ -14,6 +15,7 @@ import { serializeWorld } from '../src/save/serialize';
 import { MOVE_SPRINT, moveCommand } from '../src/sim/commands';
 import type { Fighter } from '../src/sim/fighter';
 import { DT } from '../src/sim/math';
+import { MOVE_TUNING } from '../src/sim/rules';
 import { RULER_TUNING, rulerDamage, rulerDown } from '../src/sim/ruler';
 import { SPECIES_BODY } from '../src/sim/species';
 import { resetTuning } from '../src/tuning/registry';
@@ -359,8 +361,8 @@ describe('the telegraph and the charge (§6.4)', () => {
     hunting(w, mind, p);
     until(w, () => mind.state === 'charge', secs(5), 'charging');
     const commit = mind.heading;
-    // The commit is the bearing to the player (a leg's width aside: rulerMind.ts legAim, a few degrees).
-    expect(Math.abs(angleDiff(commit, yawTo(g.pos, p.pos))) / DEG).toBeLessThan(5);
+    // The commit is the bearing to the player's position at that instant (§6.4); he stands still until then.
+    expect(Math.abs(angleDiff(commit, yawTo(g.pos, p.pos))) / DEG).toBeLessThan(1e-6);
     let last = mind.heading;
     let maxTurn = 0;
     let turned = 0;
@@ -431,69 +433,80 @@ describe('the telegraph and the charge (§6.4)', () => {
 
 describe('the dodge table with the real body and the real separate() (§6.4, RF-5)', () => {
   /**
-   * The giant 15 m from a standing player, facing him, in chase; at the telegraph's end it commits. The player then
-   * moves sideways (+x) with move input `input`, starting `react` s after the commit. Returns the first impact on him
-   * during the charge, and how close the giant's root came.
+   * The giant `D` m from a standing player, facing him, in chase; at the telegraph's end it commits. The player then
+   * moves sideways (along `dir` × +x) with move input `input` (and `flags`), starting `react` s after the commit.
+   * Returns the first impact on him during the charge, how close the giant's root came, and his top speed.
    */
-  async function dodge(input: number, flags: number, react: number) {
+  async function dodge(D: number, dir: number, input: number, flags: number, react: number) {
     const w = await make();
     const p = w.player!;
-    const { g, mind } = giantAt(w, 0, -15, 0);
+    const { g, mind } = giantAt(w, 0, -D, 0);
     hunting(w, mind, p);
     const commit = until(w, () => mind.state === 'charge', secs(3), 'charging');
+    // The charge goes knuckles down (posture headLow, its forearms in front at a player's height).
+    expect(g.posture?.id).toBe('headLow');
     let hit: Extract<WorldEvent, { type: 'impact' }> | null = null;
     let minD = Infinity;
-    let maxSide = 0;
-    until(w, () => mind.state !== 'charge', secs(10), 'charge over', () => {
-      const t = w.tick + 1;
-      if (input > 0 && t >= commit + secs(react)) w.commands.push(moveCommand(t, 1, input, 0, flags));
+    let top = 0;
+    const look = (): void => {
       for (const e of w.events) if (!hit && e.type === 'impact' && e.defender === p) hit = e;
+    };
+    const move = (): void => {
+      const t = w.tick + 1;
+      if (input > 0 && t >= commit + secs(react)) w.commands.push(moveCommand(t, 1, dir * input, 0, flags));
+      top = Math.max(top, speedOf(p));
+    };
+    until(w, () => mind.state !== 'charge', secs(10), 'charge over', () => {
+      move();
+      look();
       minD = Math.min(minD, flat(p.pos, g.pos));
-      maxSide = Math.max(maxSide, speedOf(p));
     });
-    for (const e of w.events) if (!hit && e.type === 'impact' && e.defender === p) hit = e;
-    return { hit: hit as Extract<WorldEvent, { type: 'impact' }> | null, minD, side: maxSide, w, g, p };
+    look();
+    // (His top speed over a second more: at 10 m the charge is past him before a late sprint is up to speed.)
+    steps(w, secs(1), move);
+    return { hit: hit as Extract<WorldEvent, { type: 'impact' }> | null, minD, top, g };
   }
 
-  it('a player standing still is hit and launched', async () => {
-    const r = await dodge(0, 0, 0);
-    expect(r.hit).not.toBeNull();
-    expect(r.hit!.launched).toBe(true);
-    expect(r.hit!.damage).toBeGreaterThan(0);
-    expect(r.hit!.cause.kind).toBe('creature');
-    expect(r.hit!.cause.fighterId).toBe(r.g.id);
-  });
-
-  it('running sideways from the commit (3.77 m/s) misses', async () => {
-    const r = await dodge(1, 0, 0);
-    expect(r.side).toBeGreaterThan(3.5);
-    expect(r.hit).toBeNull();
-    expect(r.minD).toBeGreaterThan(3);
-  });
-
-  it('running sideways 0.5 s late misses', async () => {
-    const r = await dodge(1, 0, 0.5);
-    expect(r.hit).toBeNull();
-    expect(r.minD).toBeGreaterThan(3);
-  });
-
-  it('sprinting sideways 0.8 s late misses', async () => {
-    const r = await dodge(1, MOVE_SPRINT, 0.8);
-    expect(r.side).toBeGreaterThan(5);
-    expect(r.hit).toBeNull();
-    expect(r.minD).toBeGreaterThan(3);
-  });
-
-  // DEVIATION, flagged (§6.4's dodge table, 8°/s row: "walks sideways from the commit | hit (1.67)"): the B lab's disc
-  // of 1.95 m hits a walker whose closest approach is 1.67 m; the real body meets a 1.8 m player only with its shins,
-  // ±0.8 m out (r 0.3 m), and a walker 1.7-1.9 m off its centre line clears the outer one (rulerMind.ts legAim; P20
-  // report). The design's cell, kept as it is and marked failing: walking is enough with the real body at 8°/s.
-  it.fails('walking sideways from the commit (1.8 m/s) is hit (the table’s 8°/s row; fails with the real legs, flagged)', async () => {
-    const r = await dodge(1.8 / 3.77, 0, 0);
-    expect(r.side).toBeGreaterThan(1.6);
-    expect(r.side).toBeLessThan(2.0);
-    expect(r.hit).not.toBeNull();
-  });
+  // §6.4's table, the 8°/s row: standing hit; walking sideways from the commit hit; running from the commit, running
+  // 0.5 s late and sprinting 0.8 s late missed. The B lab measured it at 15 m on a 1.95 m disc; here the real body (its
+  // knuckle-charge forearms in front, its shins) at 10, 15 and 25 m, both ways.
+  for (const D of [10, 15, 25]) {
+    it(`${D} m: a player standing still is hit, and launched or knocked out`, async () => {
+      const r = await dodge(D, 1, 0, 0, 0);
+      expect(r.hit).not.toBeNull();
+      expect(r.hit!.damage).toBeGreaterThan(0);
+      expect(r.hit!.launched || r.hit!.ko).toBe(true);
+      expect(r.hit!.cause.kind).toBe('creature');
+      expect(r.hit!.cause.fighterId).toBe(r.g.id);
+    });
+    for (const dir of [1, -1]) {
+      const way = dir > 0 ? '+x' : '−x';
+      it(`${D} m, ${way}: walking sideways from the commit (1.8 m/s) is hit`, async () => {
+        const r = await dodge(D, dir, 1.8 / 3.77, 0, 0);
+        expect(r.top).toBeGreaterThan(1.6);
+        expect(r.top).toBeLessThan(2.0);
+        expect(r.hit).not.toBeNull();
+        expect(r.hit!.damage).toBeGreaterThan(0);
+      });
+      it(`${D} m, ${way}: running sideways from the commit (3.77 m/s) is missed`, async () => {
+        const r = await dodge(D, dir, 1, 0, 0);
+        expect(r.top).toBeGreaterThan(3.5);
+        expect(r.hit).toBeNull();
+        if (D >= 15) expect(r.minD).toBeGreaterThan(3);
+      });
+      it(`${D} m, ${way}: running sideways 0.5 s late is missed`, async () => {
+        const r = await dodge(D, dir, 1, 0, 0.5);
+        expect(r.hit).toBeNull();
+        if (D >= 15) expect(r.minD).toBeGreaterThan(3);
+      });
+      it(`${D} m, ${way}: sprinting sideways 0.8 s late is missed`, async () => {
+        const r = await dodge(D, dir, 1, MOVE_SPRINT, 0.8);
+        expect(r.top).toBeGreaterThan(5);
+        expect(r.hit).toBeNull();
+        if (D >= 15) expect(r.minD).toBeGreaterThan(3);
+      });
+    }
+  }
 });
 
 describe('what the charge meets (§4.7 through the mind)', () => {
@@ -688,6 +701,49 @@ describe('severe effects and wounds (§6.4)', () => {
     expect(w.tick).toBeLessThan(mind.fleeUntil);
   });
 
+  it('a severe limp shows in the gait: the bad leg is dragged low, the good one hurried through; it saves with the footwork', async () => {
+    /** A giant walking 40 m north at the patrol speed (a route script: the same speed lame or sound); its steps. */
+    async function walk(limp: boolean) {
+      const w = await make({ player: false });
+      const { g, mind } = giantAt(w, 0, -30, 0);
+      if (limp) severe(w, g, 'limp');
+      steps(w, 2);
+      mind.script = { kind: 'route', points: [{ x: 0, z: 30 }], speed: G.speed.patrol };
+      const out = { L: { dur: [] as number[], height: [] as number[] }, R: { dur: [] as number[], height: [] as number[] } };
+      steps(w, secs(14), () => {
+        for (const foot of [g.footwork.L, g.footwork.R]) {
+          if (w.tick >= secs(3) && foot.stepping && foot.t === 0) {
+            out[foot.side].dur.push(foot.dur);
+            out[foot.side].height.push(foot.height);
+          }
+        }
+      });
+      return { w, g, out };
+    }
+    const mean = (xs: number[]): number => xs.reduce((a, x) => a + x, 0) / xs.length;
+    const sound = await walk(false);
+    const lame = await walk(true);
+    // The wound is on shinL (the test's severe(): a knee): the left leg is the bad one.
+    expect(lame.g.footwork.style.limp).toEqual({ side: 'L', amount: 1 });
+    expect(sound.g.footwork.style.limp).toBeUndefined();
+    expect(lame.out.L.height.length).toBeGreaterThan(4);
+    expect(lame.out.R.dur.length).toBeGreaterThan(4);
+    expect(mean(lame.out.L.height) / mean(sound.out.L.height)).toBeCloseTo(MOVE_TUNING.limpStepHeightMul, 1);
+    expect(mean(lame.out.R.dur) / mean(sound.out.R.dur)).toBeCloseTo(1 - MOVE_TUNING.limpStanceMul, 1);
+    // The good leg isn't dragged.
+    expect(mean(lame.out.R.height)).toBeCloseTo(mean(sound.out.R.height), 1);
+    // It saves with the footwork record and comes back on the loaded giant.
+    const a = serializeWorld(lame.w);
+    const l = track(await loadWorld(a, { nav: 'full' }));
+    const lg = l.combat.fighters.find((f) => f.id === lame.g.id)!;
+    expect(lg.footwork.style.limp).toEqual({ side: 'L', amount: 1 });
+    expect(canonicalJson(parsed(serializeWorld(l)).fighters)).toBe(canonicalJson(parsed(a).fighters));
+    // Healed of nothing (wounds persist), but a giant without the wound has none: cleared when the wound is gone.
+    lame.g.ruler!.wounds.length = 0;
+    steps(lame.w, 1);
+    expect(lame.g.footwork.style.limp).toBeUndefined();
+  });
+
   it('winded: the cooldown × windedCooldownMul and the chase × windedChaseMul', async () => {
     const w = await make();
     const p = w.player!;
@@ -712,10 +768,11 @@ describe('down in a pit (§6.4, §4.7, RR-1)', () => {
   it('after a trip into a 2.5 m pit it gets up, climbs out in 6-9 s (roaring as it starts) and only then recovers', async () => {
     const w = await make();
     const p = w.player!;
-    // AC-3's pit (§11.3): 8 × 6 × 2.5 m, uncovered here, across the line of the charge.
+    // AC-3's pit (§11.3): 8 × 6 × 2.5 m, uncovered here, across the line of the charge; the player 28 m off beyond it,
+    // so the giant charges at once, straight through (from farther its chase would path round the pit first).
     digPit(w, -4, 4, -3, 3, 2.5);
-    w.teleport(p, 22, 0, -EAST);
-    const { g, mind } = giantAt(w, -26, 0, EAST);
+    w.teleport(p, 6, 0, -EAST);
+    const { g, mind } = giantAt(w, -22, 0, EAST);
     steps(w, 2);
     hunting(w, mind, p);
     let trip: Extract<WorldEvent, { type: 'trip' }> | null = null;
@@ -768,6 +825,30 @@ describe('down in a pit (§6.4, §4.7, RR-1)', () => {
     expect(recover).toBeGreaterThanOrEqual(out);
     expect(g.ruler!.inPit).toBe(false);
     expect(g.pos.y).toBeGreaterThan(-0.5);
+  });
+
+  it('a climb blocked at the nearest rim (a fixed log across it) is re-planned away from it after stuckTicks, and gets out', async () => {
+    const w = await make({ player: false });
+    digPit(w, -4, 4, -3, 3, 2.5);
+    // A fixed 1 m log, 12 m long, lying along the north rim just beyond the wall.
+    spawnLog(w, { p: { x: 0, y: 0.5, z: 4.6 }, length: 12, r: 0.5, state: 'fixed' });
+    steps(w, 2);
+    const { g, mind } = giantAt(w, 0, 1, 0);
+    steps(w, 2);
+    expect(mind.state).toBe('down');
+    // The nearest rim is the north wall, 2 m off.
+    expect(Math.abs(angleDiff(mind.heading, 0)) / DEG).toBeLessThan(1);
+    const first = mind.climb!.tick;
+    until(w, () => (mind.climb?.skip ?? 0) > 0, secs(20), 're-planned');
+    // Not before a whole stuckTicks without progress.
+    expect(w.tick - first).toBeGreaterThanOrEqual(G.stuckTicks);
+    // Away from the blocked bearing (north): the new rim lies in the half-plane behind it.
+    expect(Math.abs(angleDiff(mind.heading, 0)) / DEG).toBeGreaterThanOrEqual(90);
+    until(w, () => !g.ruler!.inPit, secs(30), 'out of the pit');
+    expect(g.pos.z).toBeLessThan(3);
+    until(w, () => mind.state !== 'down', 5, 'up and out');
+    expect(mind.state).toBe('recover');
+    expect(mind.climb).toBeNull();
   });
 
   it('teleported into a pit (no trip) it is down at once and climbs out toward the nearest rim', async () => {
@@ -932,7 +1013,8 @@ describe('determinism and the record (§6.8, §8)', () => {
       { x: 1, z: 2 },
       { x: 3, z: 4 },
     ]);
-    expect(Object.keys(r).at(-1)).toBe('route');
+    expect(Object.keys(r).slice(-2)).toEqual(['route', 'climb']);
+    expect(r.climb).toBeNull();
     const w2 = await make({ player: false });
     const { mind: m2 } = giantAt(w2, 0, 0, 0);
     m2.restoreRecord(parseCanonicalJson(canonicalJson(r)) as MindRecV1);
@@ -940,6 +1022,8 @@ describe('determinism and the record (§6.8, §8)', () => {
     expect(m2.route(w2)).toEqual(r.route);
     const { route: _route, ...noRoute } = r;
     expect(() => m2.restoreRecord(noRoute as MindRecV1)).toThrow(/route/);
+    const { climb: _climb, ...noClimb } = r;
+    expect(() => m2.restoreRecord(noClimb as MindRecV1)).toThrow(/climb/);
   });
 
   it("the loader takes a giant's record only with its route, and an ape's only without one", async () => {
@@ -957,6 +1041,11 @@ describe('determinism and the record (§6.8, §8)', () => {
     await expect(loadWorld(edit((s) => delete s.minds.find((m) => m.kind === 'giantApe')!.route), { nav: 'off' })).rejects.toThrow(/route/);
     await expect(loadWorld(edit((s) => (s.minds.find((m) => m.kind === 'ape')!.route = null)), { nav: 'off' })).rejects.toThrow(/route/);
     await expect(loadWorld(edit((s) => (s.minds.find((m) => m.kind === 'giantApe')!.route = [{ x: 1 } as never])), { nav: 'off' })).rejects.toThrow(/route\[0\]/);
+    await expect(loadWorld(edit((s) => delete s.minds.find((m) => m.kind === 'giantApe')!.climb), { nav: 'off' })).rejects.toThrow(/climb/);
+    await expect(loadWorld(edit((s) => (s.minds.find((m) => m.kind === 'ape')!.climb = null)), { nav: 'off' })).rejects.toThrow(/climb/);
+    await expect(
+      loadWorld(edit((s) => (s.minds.find((m) => m.kind === 'giantApe')!.climb = { from: { x: 0, y: 0, z: 0 }, tick: 1, skip: -1 })), { nav: 'off' }),
+    ).rejects.toThrow(/climb\.skip/);
   });
 
   it('save → load → save taken mid-charge is byte-identical for the minds, fighters and rulers, and the loaded giant charges on', async () => {
