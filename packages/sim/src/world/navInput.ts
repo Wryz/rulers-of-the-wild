@@ -79,7 +79,8 @@ export function navPresence(e: Entity, restTicks: number): NavPresence {
 
 /** Fixed, anchored (or lashed to an anchored entity, §2.3), or at least `blockerMinKg` (SPEC:781, 880). */
 export function isNavBlocker(w: World, e: Entity, blockerMinKg: number): boolean {
-  return w.entities.isAnchored(e) || e.mass >= blockerMinKg;
+  // The mass test first: isAnchored walks the entity's joints (and allocates) on every call.
+  return e.mass >= blockerMinKg || w.entities.isAnchored(e);
 }
 
 /**

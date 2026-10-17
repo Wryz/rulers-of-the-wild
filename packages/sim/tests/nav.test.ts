@@ -182,6 +182,12 @@ function rawQuery(n: NavSystem, layer: NavLayer) {
   return (n as unknown as { layers: { query: { computePath(a: V3, b: V3, o: { halfExtents: V3 }): { success: boolean; path: V3[] } } }[] }).layers[NAV_LAYERS.indexOf(layer)].query;
 }
 
+/** The poly ref recast returns for the polygon nearest `p` (0: none), as the binding hands it back. */
+function rawNearestRef(n: NavSystem, layer: NavLayer, p: V3): number {
+  const q = (n as unknown as { layers: { query: { findNearestPoly(p: V3, o: { halfExtents: V3 }): { nearestRef: number } } }[] }).layers[NAV_LAYERS.indexOf(layer)].query;
+  return q.findNearestPoly(p, { halfExtents: { x: 1, y: 2, z: 1 } }).nearestRef;
+}
+
 /** A fence along z = 0 across the whole world with one opening `gap` m wide between two 1 m trunks at x = 0. */
 function gate(w: World, gap: number): void {
   const across = 1;
@@ -390,6 +396,57 @@ describe('dirty tiles and rebuilds (§7, phase 16)', () => {
     expect(ticks).toBe(Math.max(Math.ceil(q0.filter((e) => e[0] === 0).length / 2), q0.filter((e) => e[0] === 1).length));
   });
 
+  it('a tile rebuilt 600 times (its salt past bit 31) stays walkable, stays in its paths and still bumps their versions', async () => {
+    // Detour's 32-bit refs hold the tile's salt in their top 10 bits, bumped on every rebuild of the tile: past 511
+    // rebuilds bit 31 is set and the binding returns the tile's refs as negative numbers. A pit dug strike by strike
+    // re-marks its tile thousands of times, so the slot lookup (isWalkable, findPath's tiles) must read refs as uint32.
+    const w = await make();
+    const n = nav(w);
+    const p = { x: 3, z: 3 };
+    const tiles = { human: n.tileAt('human', p.x, p.z), ruler: n.tileAt('ruler', p.x, p.z) };
+    const mark = () => n.markDirty({ min: { x: p.x, y: 0, z: p.z }, max: { x: p.x, y: 0, z: p.z } }, 'test');
+    mark();
+    const grid = (layer: NavLayer) => n.grid(layer).tilesX;
+    expect(n.dirtyQueue()).toEqual(
+      NAV_LAYERS.map((layer, l) => [l, Math.floor(tiles[layer] / grid(layer)), tiles[layer] % grid(layer)] as [number, number, number]),
+    );
+    const v0 = NAV_LAYERS.map((layer) => n.tileVersion(layer, tiles[layer]));
+    for (let i = 0; i < 600; i++) {
+      if (i > 0) mark();
+      n.rebuildDirty();
+      if (i % 100 === 0) await yieldToLoop();
+    }
+    expect(NAV_LAYERS.map((layer) => n.tileVersion(layer, tiles[layer]))).toEqual(v0.map((v) => v + 600));
+    expect(n.buildFailures).toBe(0);
+    const walk = new NavWalkable(w);
+    const routes: Record<NavLayer, [V3, V3]> = { human: [at(w, p.x, -10), at(w, p.x, 10)], ruler: [at(w, -20, p.z), at(w, 20, p.z)] };
+    for (const layer of NAV_LAYERS) {
+      // The case under test: the tile's refs have bit 31 set now.
+      expect(rawNearestRef(n, layer, at(w, p.x, p.z)) >>> 0).toBeGreaterThanOrEqual(2 ** 31);
+      expect(n.isWalkable(layer, p.x, p.z)).toBe(true);
+      const path = n.findPath(layer, ...routes[layer]);
+      expect(path.complete).toBe(true);
+      expect(path.tiles).toContain(tiles[layer]);
+      expect(path.versions[path.tiles.indexOf(tiles[layer])]).toBe(n.tileVersion(layer, tiles[layer]));
+      // One more rebuild: the path's version of the tile goes stale (a mind following it re-paths, §6.5).
+      mark();
+      n.rebuildDirty();
+      expect(n.tileVersion(layer, tiles[layer])).not.toBe(path.versions[path.tiles.indexOf(tiles[layer])]);
+      expect(n.isWalkable(layer, p.x, p.z)).toBe(true);
+      expect(n.findPath(layer, ...routes[layer]).tiles).toContain(tiles[layer]);
+    }
+    // The walk bitmap of the tile still agrees with the recast query.
+    const g = n.grid('human');
+    const q = new Rng(21);
+    const x0 = g.origX + (tiles.human % g.tilesX) * g.tileM;
+    const z0 = g.origZ + Math.floor(tiles.human / g.tilesX) * g.tileM;
+    for (let i = 0; i < 100; i++) {
+      const x = q.range(x0, x0 + g.tileM);
+      const z = q.range(z0, z0 + g.tileM);
+      expect(walk.isWalkable(x, z), `(${x}, ${z})`).toBe(n.isWalkable('human', x, z));
+    }
+  });
+
   it('the scan marks placing, coming to rest, moving more than 0.25 m, picking up and removing; not a falling body or a nudge', async () => {
     const w = await make();
     const n = nav(w);
@@ -440,6 +497,43 @@ describe('dirty tiles and rebuilds (§7, phase 16)', () => {
     expect(changedTiles(v, versions(w, 'human'))).toContain(tile(5, 5));
     expect(n.bakedIds()).not.toContain(block.id);
     expect(n.dirtyReasons.get('entity removed')).toBeGreaterThanOrEqual(2);
+  });
+
+  it('the full build bakes free entities placed still (as generation places them), so their settling rebuilds nothing', async () => {
+    const w = await make();
+    const n = nav(w);
+    // Logs and blocks placed at rest on the ground, as the Clearing's generator places its free entities (awake,
+    // restTicks 0, zero velocity), then a full build (createWorld builds after generation; loadWorld after loading).
+    const still = [
+      log(w, -8, -8, { length: 3, r: 0.15, along: 'x' }),
+      log(w, 8, -4, { length: 4, r: 0.2, along: 'z' }),
+      log(w, -6, 9, { length: 2.5, r: 0.12, along: 'x' }),
+      box(w, { x: 10, y: 0.25, z: 10 }, [0.25, 0.25, 0.25], { state: 'free' }),
+    ];
+    // A log thrown in the same tick is moving: not input until it rests.
+    const thrown = w.entities.create({
+      material: 'greenWood',
+      shape: { kind: 'cylinder', halfHeight: 1, r: 0.1, sides: 6 },
+      p: { x: 0, y: 2, z: -12 },
+      q: ALONG_X,
+      lin: { x: 0, y: 2, z: 0 },
+      state: 'free',
+      look: 'log',
+    });
+    for (const e of still) expect(e.restTicks).toBe(0);
+    n.build(w);
+    expect(n.bakedIds()).toEqual(still.map((e) => e.id));
+    const v = { human: versions(w, 'human'), ruler: versions(w, 'ruler') };
+    const reasons = new Map(n.dirtyReasons);
+    // They settle (within millimetres) and reach restTicks: nothing is marked or rebuilt.
+    stepUntil(w, () => still.every((e) => e.restTicks >= 30) && n.bakedIds().includes(thrown.id), 600, 'the entities at rest');
+    const settled = n.dirtyReasons.get('entity placed or at rest') ?? 0;
+    expect(settled - (reasons.get('entity placed or at rest') ?? 0)).toBe(1);
+    drain(w);
+    const human = changedTiles(v.human, versions(w, 'human'));
+    for (const e of still) expect(human).not.toContain(n.tileAt('human', e.pose.p.x, e.pose.p.z));
+    expect(human).toContain(n.tileAt('human', thrown.pose.p.x, thrown.pose.p.z));
+    expect(n.dirtyReasons.get('entity moved or changed') ?? 0).toBe(reasons.get('entity moved or changed') ?? 0);
   });
 
   it('felling a tree: the footprint clears at once, the trunk at rest; rebuilt tiles give the same paths as a fresh build over 1,200 queries', async () => {
@@ -649,6 +743,32 @@ describe('the walk and blocker bitmaps NavWalkable reads (§4.1, RF-23)', () => 
     agree(g.origX + tx * g.tileM, g.origZ + tz * g.tileM, g.origX + (tx + 1) * g.tileM, g.origZ + (tz + 1) * g.tileM, 300, 12);
   });
 
+  it('debugGeometry draws the navmesh for the dev panel: triangles on the ground, none inside a trunk, read-only', async () => {
+    const w = await make();
+    const t = trunk(w, 5, 5, 1);
+    nav(w).build(w);
+    const n = nav(w);
+    const bytes = n.meshBytes('human');
+    for (const layer of NAV_LAYERS) {
+      const g = n.debugGeometry(layer);
+      expect(g.indices.length).toBeGreaterThan(0);
+      expect(g.indices.length % 3).toBe(0);
+      expect(Math.max(...g.indices)).toBeLessThan(g.positions.length / 3);
+      for (let i = 0; i < g.positions.length; i += 3) expect(Math.abs(g.positions[i + 1] - w.terrain.heightAt(g.positions[i], g.positions[i + 2]))).toBeLessThan(0.5);
+      // No triangle's centre lies within the trunk (radius 0.54 m).
+      for (let k = 0; k < g.indices.length; k += 3) {
+        let cx = 0;
+        let cz = 0;
+        for (let j = 0; j < 3; j++) {
+          cx += g.positions[g.indices[k + j] * 3] / 3;
+          cz += g.positions[g.indices[k + j] * 3 + 2] / 3;
+        }
+        expect(Math.hypot(cx - t.pose.p.x, cz - t.pose.p.z)).toBeGreaterThan(0.5);
+      }
+    }
+    expect(Buffer.from(n.meshBytes('human')).equals(Buffer.from(bytes))).toBe(true);
+  });
+
   it('with nav off, NavWalkable reads open ground and nothing solid (the physics-only worlds)', async () => {
     const w = await make({ nav: 'off' });
     box(w, { x: 0, y: 1, z: 0 }, [1, 1, 1]);
@@ -704,26 +824,62 @@ describe('determinism (rule 7) and memory', () => {
     for (const layer of NAV_LAYERS) expect(Buffer.from(nav(a).meshBytes(layer)).equals(Buffer.from(nav(b).meshBytes(layer)))).toBe(true);
   });
 
-  it('20 create/dispose cycles do not grow the WASM heap', async () => {
+  /**
+   * Bytes of recast's WASM heap in use: the heap's size minus what malloc still hands out in PROBE_BLOCK blocks before
+   * the heap has to grow (every block freed again). The heap's size alone can't see a leak: it has megabytes free.
+   * Small blocks count the free gaps between live allocations too, so the figure moves by a few hundred bytes at most
+   * between calls on an unchanged heap. Each call grows the heap once (its last block).
+   */
+  function wasmHeapInUse(): number {
+    const M = Raw.Module as unknown as { HEAPU8: Uint8Array; _malloc(n: number): number; _free(p: number): void };
+    const PROBE_BLOCK = 256;
+    const size = M.HEAPU8.length;
+    const blocks: number[] = [];
+    for (;;) {
+      const p = M._malloc(PROBE_BLOCK);
+      if (p === 0 || M.HEAPU8.length !== size) {
+        if (p !== 0) M._free(p);
+        break;
+      }
+      blocks.push(p);
+    }
+    // A block's footprint in the heap (the request plus malloc's header): the gap between the last two, both cut from
+    // the top of the heap.
+    const stride = blocks[blocks.length - 1] - blocks[blocks.length - 2];
+    for (const p of blocks) M._free(p);
+    expect(stride).toBeGreaterThanOrEqual(PROBE_BLOCK);
+    expect(stride).toBeLessThanOrEqual(PROBE_BLOCK + 16);
+    return size - blocks.length * stride;
+  }
+
+  it('20 create/dispose cycles leave the WASM heap in use where it was (within 1 KB)', async () => {
     const cycle = async () => {
       const w = await createWorld({ seed: 5, scene: 'empty', nav: 'full', player: false, size: 50 });
       const rng = new Rng(3);
       for (let k = 0; k < 8; k++) trunk(w, rng.range(-20, 20), rng.range(-20, 20), 0.5);
       nav(w).build(w);
       nav(w).findPath('human', at(w, -20, -20), at(w, 20, 20));
+      nav(w).raycast('ruler', at(w, -20, 0), at(w, 20, 0));
+      nav(w).nearest('human', at(w, 3, 3));
       nav(w).isWalkable('ruler', 0, 0);
+      nav(w).debugGeometry('human');
       nav(w).markDirty({ min: { x: -10, y: 0, z: -10 }, max: { x: 10, y: 1, z: 10 } }, 'test');
       for (let k = 0; k < 5; k++) w.step();
       w.dispose();
       expect(() => nav(w).findPath('human', at(w, 0, 0), at(w, 1, 1))).toThrow();
     };
-    await cycle();
-    await cycle();
-    const heap = Raw.Module.HEAPU8.length;
+    // Warm-up: the shared build scratch and the binding's argument buffer reach their sizes.
+    for (let i = 0; i < 3; i++) await cycle();
+    const before = wasmHeapInUse();
+    // Each cycle builds about 175 tiles and 4 navmeshes and their queries. Measured leaks over the 20 cycles: the
+    // navmeshes never destroyed 1.67 MB, the create params of every tile 552 KB, the binding's createNavMeshData result
+    // (16 bytes a tile) 59 KB, NavMeshQuery's wrapper 4.1 KB; leak-free, a few hundred bytes either way.
     for (let i = 0; i < 20; i++) {
       await yieldToLoop();
       await cycle();
     }
-    expect(Raw.Module.HEAPU8.length).toBe(heap);
+    const after = wasmHeapInUse();
+    console.log(`WASM heap in use: ${before} B before 20 cycles, ${after} B after (${after - before} B)`);
+    expect(Math.abs(after - before)).toBeLessThan(1024);
   });
 });

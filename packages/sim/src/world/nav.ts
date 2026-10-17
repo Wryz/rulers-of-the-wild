@@ -9,6 +9,9 @@
 //   thing that differs (MAP recast §5.1, §8). The pipeline is Recast's tiled sample, written out here instead of calling
 //   the library's generateTileNavMeshData, which leaks WASM memory on every call (a triangle-area array, a chunk-id
 //   array, the cloned config and the create params are never freed) and builds a chunky mesh a local tile doesn't need.
+//   Two binding objects the library's own wrappers never free are freed here too: createNavMeshData's result struct
+//   (16 bytes a tile, `createTileNavMeshData`) and NavMeshQuery's wrapper (`freeLayers`). The memory test measures the
+//   heap in use, not its size, so a leak of a few bytes a tile fails it.
 // - The baked set: the entities the navmesh sees, as records (navInput.ts NavEntityInput). Tiles are built from these
 //   records, never from live entities. At the start of phase 16 a scan brings the set up to date and marks the tiles of
 //   every change dirty (§7's dirty rules): an entity that enters it (placed, or come to rest for the first time), leaves
@@ -16,17 +19,30 @@
 //   moving more than dirtyMinMoveM or turning more than dirtyMinTurnDeg from its baked pose, or whose shape, state or
 //   class changed (cross-cut, anchored, lashed). Terrain edits are found the same way, by each terrain tile's version
 //   and a diff of its heights. markDirty stays public for the systems §7 names (felling, breaking, dig, place); their
-//   marks and the scan's are the same tiles.
+//   marks and the scan's are the same tiles. The full build also bakes a free entity placed still (zero velocity, not
+//   yet at rest: generation's logs and stones at createWorld), so the first second of play doesn't mark every tile
+//   with a generated entity dirty when they all reach restTicks together; one that settles within dirtyMinMoveM of
+//   where it was placed rebuilds nothing.
+// - Derived state, not saved (§7: "the navmesh is not saved"): the baked set, the terrain heights the scan diffs
+//   against, the tile versions and the poly-ref slot map are all rebuilt by build() on load, from the loaded poses
+//   (an entity that had moved less than dirtyMinMoveM since it was baked is baked where it is now, so a loaded world's
+//   navmesh can differ from the continuous run's by such sub-threshold moves until those tiles are next rebuilt).
+//   Tile versions restart at 1 on load, so a saved path version of any tile rebuilt before the save reads as stale and
+//   the mind holding it re-paths once (§6.5). Only the dirty queue is saved (dirtyQueue/restoreDirty, §8.3).
 // - Dirty tiles are rebuilt synchronously in phase 16, at most tilesPerTick per layer, in sorted (layer, ty, tx) order:
 //   a fixed count, never a time budget (rule 7). Each rebuild bumps the tile's version and, on the human layer, rebuilds
 //   its walk and blocker bitmaps.
 // - Queries return positions only: poly refs die when a tile is rebuilt (MAP recast §7.7). findPath checks the
-//   `nearestRef 0` trap and reports partial paths (recast calls them a success, MAP recast §7.1-7.2).
+//   `nearestRef 0` trap and reports partial paths (recast calls them a success, MAP recast §7.1-7.2). Refs are read as
+//   uint32 wherever this file looks inside one (`slotOf`): the binding returns them as signed int32 or as uint32
+//   depending on the call, and a tile's salt (the top 10 bits) sets bit 31 once the tile has been rebuilt 511 times.
 // - Determinism: no randomness (findRandomPoint* is never called), no wall clock (the build context's timers are off),
 //   every loop in id or tile order; two builds of one state are byte-identical (`meshBytes`).
 //
-// NAV_TUNING's layer values (radius, cs, tile size…) are read when build() runs (a navmesh can't change its tiling in
-// place); the rest (tilesPerTick, the dirty thresholds, query extents and limits, goal tolerances) at use time.
+// NAV_TUNING's layer values (radius, cs, tile size…), the Recast build parameters (maxSimplificationError to
+// maxEdgeLenM), maxNodes and the vertical bounds are read when build() runs (a navmesh can't change its tiling in place;
+// their registry sources say so); the rest (tilesPerTick, the dirty thresholds, query extents and limits, goal
+// tolerances) at use time.
 // TODO "ruler nav radius" (1.65 m vs the lab's 2.5 m): NAV_TUNING.ruler.radius keeps BODY_RADIUS × 5.5 (§7, §12.4).
 import {
   allocCompactHeightfield,
@@ -41,7 +57,6 @@ import {
   buildPolyMeshDetail,
   buildRegions,
   createHeightfield,
-  createNavMeshData,
   Detour,
   erodeWalkableArea,
   exportNavMesh,
@@ -54,6 +69,7 @@ import {
   freeHeightfield,
   freePolyMesh,
   freePolyMeshDetail,
+  getNavMeshPositionsAndIndices,
   IntArray,
   markConvexPolyArea,
   markWalkableTriangles,
@@ -147,44 +163,44 @@ export const NAV_TUNING = defineTuning(
   },
   {
     human: {
-      radius: { unit: 'm', source: 'NEW: MAP recast §10.3' },
-      height: { unit: 'm', source: 'NEW: MAP recast §10.3' },
-      climb: { unit: 'm', source: 'NEW: MAP recast §10.3' },
-      maxSlopeDeg: { unit: '°', source: 'NEW: MAP recast §10.3' },
-      cs: { unit: 'm', source: 'NEW: MAP recast §10.3' },
-      ch: { unit: 'm', source: 'NEW: MAP recast §10.3' },
-      tileVox: { unit: 'voxels', source: 'NEW: MAP recast §10.3' },
+      radius: { unit: 'm', source: 'NEW: MAP recast §10.3; read when the navmesh is built' },
+      height: { unit: 'm', source: 'NEW: MAP recast §10.3; read when the navmesh is built' },
+      climb: { unit: 'm', source: 'NEW: MAP recast §10.3; read when the navmesh is built' },
+      maxSlopeDeg: { unit: '°', source: 'NEW: MAP recast §10.3; read when the navmesh is built' },
+      cs: { unit: 'm', source: 'NEW: MAP recast §10.3; read when the navmesh is built' },
+      ch: { unit: 'm', source: 'NEW: MAP recast §10.3; read when the navmesh is built' },
+      tileVox: { unit: 'voxels', source: 'NEW: MAP recast §10.3; read when the navmesh is built' },
       halfExtents: { unit: 'm', source: 'NEW: MAP recast §6, §10.3' },
       tilesPerTick: { unit: 'tiles', source: 'NEW: MAP recast §6, §10.3' },
       goalTolM: { unit: 'm', source: "NEW (P12): a path is complete when it ends this close to the goal: the ape's arriveM (§6.5)" },
     },
     ruler: {
-      radius: { unit: 'm', source: 'DS (BODY_RADIUS × 5.5); SPEC:774' },
-      height: { unit: 'm', source: 'NEW: MAP recast §10.3' },
-      climb: { unit: 'm', source: 'NEW: MAP recast §10.3' },
-      maxSlopeDeg: { unit: '°', source: 'NEW: MAP recast §10.3' },
-      cs: { unit: 'm', source: 'NEW' },
-      ch: { unit: 'm', source: 'NEW' },
-      tileVox: { unit: 'voxels', source: 'NEW' },
+      radius: { unit: 'm', source: 'DS (BODY_RADIUS × 5.5); SPEC:774; read when the navmesh is built' },
+      height: { unit: 'm', source: 'NEW: MAP recast §10.3; read when the navmesh is built' },
+      climb: { unit: 'm', source: 'NEW: MAP recast §10.3; read when the navmesh is built' },
+      maxSlopeDeg: { unit: '°', source: 'NEW: MAP recast §10.3; read when the navmesh is built' },
+      cs: { unit: 'm', source: 'NEW; read when the navmesh is built' },
+      ch: { unit: 'm', source: 'NEW; read when the navmesh is built' },
+      tileVox: { unit: 'voxels', source: 'NEW; read when the navmesh is built' },
       halfExtents: { unit: 'm', source: 'NEW' },
       tilesPerTick: { unit: 'tiles', source: 'NEW' },
       goalTolM: { unit: 'm', source: "NEW (P12): a path is complete when it ends this close to the goal: the giant's arriveM (§6.5)" },
     },
-    maxSimplificationError: { unit: 'voxels', source: 'NEW: MAP recast §10.3' },
-    minRegionArea: { unit: 'voxels', source: 'NEW: MAP recast §10.3' },
-    mergeRegionArea: { unit: 'voxels', source: 'NEW: MAP recast §10.3' },
-    maxVertsPerPoly: { unit: '—', source: 'NEW: MAP recast §7.6' },
-    detailSampleDist: { unit: 'voxels', source: 'NEW: MAP recast §7.6 (≥ 0.9)' },
-    detailSampleMaxError: { unit: 'voxels', source: 'NEW: MAP recast §7.6' },
-    maxEdgeLenM: { unit: 'm', source: "NEW (P12): the MAP recast lab's 12 m (world.mjs recastConfigFor: 12 / cs voxels)" },
-    maxNodes: { unit: 'nodes', source: 'NEW' },
+    maxSimplificationError: { unit: 'voxels', source: 'NEW: MAP recast §10.3; read when the navmesh is built' },
+    minRegionArea: { unit: 'voxels', source: 'NEW: MAP recast §10.3; read when the navmesh is built' },
+    mergeRegionArea: { unit: 'voxels', source: 'NEW: MAP recast §10.3; read when the navmesh is built' },
+    maxVertsPerPoly: { unit: '—', source: 'NEW: MAP recast §7.6; read when the navmesh is built' },
+    detailSampleDist: { unit: 'voxels', source: 'NEW: MAP recast §7.6 (≥ 0.9); read when the navmesh is built' },
+    detailSampleMaxError: { unit: 'voxels', source: 'NEW: MAP recast §7.6; read when the navmesh is built' },
+    maxEdgeLenM: { unit: 'm', source: "NEW (P12): the MAP recast lab's 12 m (world.mjs recastConfigFor: 12 / cs voxels); read when the navmesh is built" },
+    maxNodes: { unit: 'nodes', source: 'NEW; read when the navmesh is built (the query is made with it)' },
     maxPathPolys: { unit: 'polygons', source: 'NEW (P12): a path corridor across the 200 m Clearing on 6.4 m tiles' },
     maxStraightPoints: { unit: 'points', source: "NEW (P12): recast's default (MAP recast §7)" },
     dirtyMinMoveM: { unit: 'm', source: 'NEW' },
     dirtyMinTurnDeg: { unit: '°', source: 'NEW' },
     blockerMinKg: { unit: 'kg', source: 'SPEC:880' },
     extrudeAboveAnkleM: { unit: 'm above original ground', source: "NEW: the giant's ankle (§7)" },
-    walkReachM: { unit: 'm', source: 'NEW: §4.1 (a walk bit is set when a polygon lies within this of the cell centre)' },
+    walkReachM: { unit: 'm', source: 'NEW: §4.1 (a walk bit is set when a polygon lies within this of the cell centre); a walk bitmap takes it when its tile is rebuilt' },
     boundsBelowM: { unit: 'm below the dig floor', source: "NEW (P12): the navmesh's vertical bounds (read at build)" },
     boundsAboveM: { unit: 'm above the highest generated ground', source: "NEW (P12): the navmesh's vertical bounds (read at build)" },
   },
@@ -305,7 +321,11 @@ export class NavSystem {
 
   /**
    * Full tiled build of both layers (createWorld, load) from the current terrain and entities: the baked set is taken
-   * afresh, every tile is built in (ty, tx) order, every tile version is bumped and the dirty queue is cleared.
+   * afresh, every tile is built in (ty, tx) order, every tile version is bumped and the dirty queue is cleared. The
+   * baked set is every static or resting entity, and every free one placed still (zero velocity) that hasn't had time
+   * to reach restTicks: generation creates its logs, stones and branches awake with restTicks 0, and without this they
+   * would all enter the set together restTicks later, marking a large share of the tiles dirty (seconds of rebuild
+   * ticks right after createWorld, with every early path going stale).
    */
   build(w: World): void {
     this.alive('build');
@@ -318,7 +338,7 @@ export class NavSystem {
     const restTicks = PHYSICS_TUNING.restTicks;
     for (const e of w.entities.all()) {
       const pres = navPresence(e, restTicks);
-      if (pres === 'static' || pres === 'resting') this.baked.set(e.id, this.bake(e));
+      if (pres === 'static' || pres === 'resting' || (pres === 'moving' && placedStill(e))) this.baked.set(e.id, this.bake(e));
     }
     this.seeTerrain();
     const t = w.terrain;
@@ -472,7 +492,8 @@ export class NavSystem {
       for (let i = 0; i < n; i++) corridor.push(fp.polys.get(i));
       const lastPoly = corridor[n - 1];
       let end = e.nearestPoint;
-      if (lastPoly !== e.nearestRef) {
+      const reachedGoalPoly = sameRef(lastPoly, e.nearestRef);
+      if (!reachedGoalPoly) {
         const c = q.closestPointOnPoly(lastPoly, to);
         if (!c.success) return NO_PATH();
         end = c.closestPoint;
@@ -490,7 +511,7 @@ export class NavSystem {
         sp.straightPathRefs.destroy();
       }
       if (points.length === 0) return NO_PATH();
-      const partial = statusDetail(fp.status, Detour.DT_PARTIAL_RESULT) || lastPoly !== e.nearestRef;
+      const partial = statusDetail(fp.status, Detour.DT_PARTIAL_RESULT) || !reachedGoalPoly;
       const last = points[points.length - 1];
       const complete = !partial && Math.hypot(last.x - to.x, last.z - to.z) <= NAV_TUNING[layer].goalTolM;
       const tiles = [...new Set(corridor.map((r) => this.tileOfRef(L, r)).filter((t) => t >= 0))].sort((a, b) => a - b);
@@ -629,6 +650,17 @@ export class NavSystem {
     return exportNavMesh(this.layer(layer, 'meshBytes').navMesh);
   }
 
+  /**
+   * The layer's navmesh as triangles (each polygon's detail mesh, world positions, three indices a triangle), for the
+   * dev panel's nav polygons toggle (§10.10, GAME_TUNING.showNav). Presentation only: it reads the navmesh and changes
+   * nothing. It makes a binding call per vertex, so the panel calls it when the toggle turns on or a tile version
+   * changes, never per frame.
+   */
+  debugGeometry(layer: NavLayer): { positions: Float32Array; indices: Uint32Array } {
+    const [positions, indices] = getNavMeshPositionsAndIndices(this.layer(layer, 'debugGeometry').navMesh);
+    return { positions: Float32Array.from(positions), indices: Uint32Array.from(indices) };
+  }
+
   /** The baked set's ids, in id order (tests and the dev panel). */
   bakedIds(): number[] {
     return this.sortedBaked().map((e) => e.id);
@@ -666,7 +698,9 @@ export class NavSystem {
     if (!layers) return;
     for (const L of layers) {
       Raw.destroy(L.query.defaultFilter.raw);
+      // NavMeshQuery.destroy() frees the Detour query but not the binding's wrapper object (NavMesh.destroy() frees both).
       L.query.destroy();
+      Raw.destroy(L.query.raw);
       L.navMesh.destroy();
     }
   }
@@ -701,7 +735,8 @@ export class NavSystem {
         const changed =
           e.shape !== rec.shape ||
           anchored !== rec.anchored ||
-          isNavBlocker(w, e, blockerMinKg) !== rec.blocker ||
+          // A fixed or anchored entity is a blocker; skip isAnchored's joint walk for the 250-odd trunks every tick.
+          (anchored || isNavBlocker(w, e, blockerMinKg)) !== rec.blocker ||
           Math.hypot(e.pose.p.x - rec.pose.p.x, e.pose.p.y - rec.pose.p.y, e.pose.p.z - rec.pose.p.z) > moveM ||
           turnDegrees(e.pose.q, rec.pose.q) > turnDeg;
         if (changed) {
@@ -912,9 +947,29 @@ function halfExtentsOf(layer: NavLayer): V3 {
   return { x: h[0], y: h[1], z: h[2] };
 }
 
-/** A poly or tile ref's tile slot (Detour's `it`): bits [polyBits, polyBits + tileBits). */
+/**
+ * A poly or tile ref's tile slot (Detour's `it`): bits [polyBits, polyBits + tileBits). The ref is read as uint32
+ * (`>>>`): the binding returns refs as signed int32 from some calls (findNearestPoly's nearestRef, findPath's corridor,
+ * addTile's tileRef) and as uint32 from others (queryPolygons, read from a heap view), and the salt in the top 10 bits
+ * sets bit 31 once a tile has been rebuilt 511 times (a pit dug strike by strike re-marks its tile thousands of times).
+ */
 function slotOf(s: LayerSpec, ref: number): number {
-  return Math.floor(ref / 2 ** s.polyBits) % 2 ** s.tileBits;
+  return (ref >>> s.polyBits) & ((1 << s.tileBits) - 1);
+}
+
+/** Two refs from the binding are the same polygon (one may come back signed, the other unsigned; see slotOf). */
+function sameRef(a: number, b: number): boolean {
+  return a >>> 0 === b >>> 0;
+}
+
+/**
+ * A free entity with zero velocity (its body was made at rest and hasn't been stepped, or was loaded so): build() bakes
+ * it as if at rest. The scan keeps a free entity's record while it moves and compares its pose when it rests, so one
+ * that settles within dirtyMinMoveM marks nothing and one that falls elsewhere is re-baked there (§7).
+ */
+function placedStill(e: Entity): boolean {
+  const { lin, ang } = e.vel;
+  return lin.x === 0 && lin.y === 0 && lin.z === 0 && ang.x === 0 && ang.y === 0 && ang.z === 0;
 }
 
 /** The angle between two orientations, degrees. */
@@ -959,6 +1014,13 @@ interface Solid {
  * voxel of an entity's top stays (the top of a box or a log is something to stand on), and so does an entity too thin
  * to have an inside (a cover slab, a branch), so a covered pit's cover stays walkable. An extruded blocker's inside is
  * its extrusion's (its footprint up to extrudeM).
+ *
+ * TODO "nav solid of a tilted entity": the inside is the whole convex footprint between the AABB's bottom and top, so a
+ * tilted or leaning entity (a propped deadfall log, a lean-to, a plank ramp) makes all the ground under its hull
+ * unwalkable, even where it has more than the agent's height of headroom, and a ramp can't be walked up. Conservative
+ * and enough for M1 (AC-2 runs with nav 'off' and scripted routes), but a creature won't plan under a high leaning log
+ * it could walk under (rule 3). Later: mark only the cells whose column actually meets the shape (a per-cell inside
+ * test against the shape, or the shape's local bottom and top over each cell).
  */
 function solidsOf(s: LayerSpec, ents: readonly NavEntityInput[]): Solid[] {
   const out: Solid[] = [];
@@ -1055,7 +1117,7 @@ function buildTileData(
       params.setBuildBvTree(true);
       params.setTileX(tx);
       params.setTileY(tz);
-      created = createNavMeshData(params);
+      created = createTileNavMeshData(params);
     } finally {
       Raw.destroy(params.raw);
     }
@@ -1070,6 +1132,20 @@ function buildTileData(
     if (cset) freeContourSet(cset);
     if (pmesh) freePolyMesh(pmesh);
     if (dmesh) freePolyMeshDetail(dmesh);
+  }
+}
+
+/**
+ * The library's createNavMeshData without its leak: the result struct the binding returns is allocated on the WASM heap
+ * per call and never freed (16 bytes a tile). The tile data it points to is the caller's (added to the navmesh, or
+ * destroyed).
+ */
+function createTileNavMeshData(params: NavMeshCreateParams): { success: boolean; navMeshData: UnsignedCharArray } {
+  const res = Raw.DetourNavMeshBuilder.createNavMeshData(params.raw);
+  try {
+    return { success: res.success, navMeshData: UnsignedCharArray.fromRaw(res.navMeshData) };
+  } finally {
+    Raw.destroy(res);
   }
 }
 
