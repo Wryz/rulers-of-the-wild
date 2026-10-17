@@ -11,9 +11,8 @@
 //   beyond fightExitM (−1 within);
 // - `heading`: the facing the look-around sways about (± lookAroundDeg);
 // - `routeIdx`: the patrol loop's waypoint.
-// Arrivals at a goal (lkp, home, a loop waypoint) count within repathMoveM (the distance under which the follower takes
-// two goals for one), or when a complete path has been followed to its end. Deviation (P19): §6.3 writes "on arrival
-// (≤ 1.5 m)" with no tuning key; repathMoveM (1.5 m) is that value, so the starting value lives in the table.
+// Arrivals at a goal (lkp, home, a loop waypoint) count within investigateArriveM (§6.3 investigate's "on arrival
+// (≤ 1.5 m)"; home and the loop's waypoints use it too), or when a complete path has been followed to its end.
 // An ape made without a spawn-data home (a dev spawn, the sparring ape) has no patrol loop: it grazes around its home.
 // Randomness: the mind's own stream (idle and wander times, wander points, the flee roll and time); the inner BrawlerAI
 // keeps sharing CombatSim.rng exactly as DungeonStyle does (§6.1).
@@ -119,7 +118,7 @@ export class ApeMind extends CreatureMind {
         const loop = this.loop(w);
         while (this.routeIdx < loop.length) {
           const wp = this.ground(loop[this.routeIdx]);
-          if (!(this.path.done || this.path.unreachable || flatDist(self.pos, wp) <= A.repathMoveM)) {
+          if (!(this.path.done || this.path.unreachable || flatDist(self.pos, wp) <= A.investigateArriveM)) {
             this.path.goTo(w, self, wp);
             return;
           }
@@ -133,7 +132,7 @@ export class ApeMind extends CreatureMind {
         const lkp = this.senses.lkp;
         if (this.mark >= 0) {
           // Looking around; a new stimulus somewhere else sends it to see.
-          const elsewhere = lkp !== null && this.senses.lkpTick > this.mark && flatDist(lkp, self.pos) > A.repathMoveM;
+          const elsewhere = lkp !== null && this.senses.lkpTick > this.mark && flatDist(lkp, self.pos) > A.investigateArriveM;
           if (!elsewhere) {
             if (tick - this.mark >= Math.round(A.lookAroundS / DT)) this.enter(w, 'return');
             return;
@@ -143,7 +142,8 @@ export class ApeMind extends CreatureMind {
         }
         if (!lkp || this.path.unreachable) return this.enter(w, 'return');
         const goal = this.path.goal;
-        const arrived = flatDist(lkp, self.pos) <= A.repathMoveM || (this.path.done && goal !== null && flatDist(goal, lkp) <= A.repathMoveM);
+        // (The path's goal is lkp's when it was asked for: within repathMoveM of it, or the follower would have asked again.)
+        const arrived = flatDist(lkp, self.pos) <= A.investigateArriveM || (this.path.done && goal !== null && flatDist(goal, lkp) <= A.repathMoveM);
         if (arrived) {
           this.mark = tick;
           this.heading = self.yaw;
@@ -188,8 +188,8 @@ export class ApeMind extends CreatureMind {
       }
       case 'flee': {
         if (tick >= this.fleeUntil || this.path.unreachable) {
-          // Awareness halved (§6.3).
-          for (const [id, a] of this.senses.awareness) this.senses.awareness.set(id, a * 0.5);
+          // Awareness halved (§6.3: × fleeAwarenessMul).
+          for (const [id, a] of this.senses.awareness) this.senses.awareness.set(id, a * A.fleeAwarenessMul);
           return this.enter(w, 'return');
         }
         if (this.path.goal) this.path.goTo(w, self, this.path.goal);
@@ -199,7 +199,7 @@ export class ApeMind extends CreatureMind {
         if (hunting) return this.enter(w, 'chase');
         if (tick < this.restUntil) return; // gloating
         const home = this.ground(this.home);
-        if (flatDist(self.pos, home) <= A.repathMoveM || this.path.done || this.path.unreachable) return this.enter(w, 'idle');
+        if (flatDist(self.pos, home) <= A.investigateArriveM || this.path.done || this.path.unreachable) return this.enter(w, 'idle');
         this.path.goTo(w, self, home);
         return;
       }

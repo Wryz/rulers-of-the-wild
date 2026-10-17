@@ -20,7 +20,7 @@ import { ApeMind } from '../src/world/creatures/apeMind';
 import { CREATURE_TUNING, NOISE_TUNING } from '../src/world/creatures/defs';
 import { createCreature } from '../src/world/creatures/factory';
 import type { CreatureMind, MindState } from '../src/world/creatures/mind';
-import { spawnLog } from '../src/world/factory';
+import { spawnBox, spawnLog } from '../src/world/factory';
 import { physicsReady } from '../src/world/physics';
 import type { Finish, V3, WorldEvent } from '../src/world/types';
 import { createWorld, type World, type WorldOptions } from '../src/world/world';
@@ -257,7 +257,7 @@ describe('the ape notices, investigates, chases and fights (§6.2, §6.3)', () =
     w.noise.emit({ at: { x: 2, y: 1, z: 0 }, radius: NOISE_TUNING.chop, kind: 'chop', source: null });
     until(w, () => mind.state === 'investigate', 3, 'investigate');
     const arrive = until(w, () => mind.mark >= 0, secs(15), 'the look-around');
-    expect(flat(f.pos, { x: 2, z: 0 })).toBeLessThanOrEqual(A.repathMoveM + 0.5);
+    expect(flat(f.pos, { x: 2, z: 0 })).toBeLessThanOrEqual(A.investigateArriveM + 0.5);
     steps(w, 2);
     expect(f.posture).toEqual({ id: 'sniff', weight: 1 });
     // The body sways about the heading it arrived with, within ± lookAroundDeg.
@@ -271,7 +271,7 @@ describe('the ape notices, investigates, chases and fights (§6.2, §6.3)', () =
     expect(back - arrive).toBeGreaterThanOrEqual(secs(A.lookAroundS));
     expect(f.posture).toBeNull();
     until(w, () => mind.state === 'idle', secs(20), 'idle at home');
-    expect(flat(f.pos, mind.home)).toBeLessThanOrEqual(A.repathMoveM + 0.5);
+    expect(flat(f.pos, mind.home)).toBeLessThanOrEqual(A.investigateArriveM + 0.5);
   });
 
   it('goes back to the state it was in once up after a knockdown (down keeps its timers)', async () => {
@@ -312,7 +312,7 @@ describe('the ape notices, investigates, chases and fights (§6.2, §6.3)', () =
     steps(w, secs(A.gloatS) - 30);
     expect(flat(f.pos, at)).toBeLessThan(0.3);
     until(w, () => mind.state === 'idle', secs(30), 'idle at home');
-    expect(flat(f.pos, mind.home)).toBeLessThanOrEqual(A.repathMoveM + 0.5);
+    expect(flat(f.pos, mind.home)).toBeLessThanOrEqual(A.investigateArriveM + 0.5);
   });
 
   it('dead once knocked out (no input), and idle again if it is brought back (the spawner, §6.6)', async () => {
@@ -401,6 +401,34 @@ describe('the fight (§6.3: BrawlerAI unchanged, Bruiser plan)', () => {
     expect(w.minds.attackTaken(b.f, w.tick + 2)).toBe(false);
   });
 
+  it("two counters due on one tick (DS's counter path skips the director): the lower id swings, the other a tick later", async () => {
+    const w = await make();
+    const p = w.player!;
+    p.minHp = 1;
+    // Both within counter range of him (Bruiser's attackRange + 0.3 × scale), free, each with a counter window open
+    // (as after taking one of his swings on the guard): BrawlerAI counters at once, without asking the director.
+    const a = apeAt(w, 0, 1.3, Math.PI);
+    const b = apeAt(w, 1.3, 0, -Math.PI / 2);
+    a.mind.engage(w, p);
+    b.mind.engage(w, p);
+    expect(a.f.id).toBeLessThan(b.f.id);
+    for (const { f, mind } of [a, b]) {
+      expect(f.free).toBe(true);
+      expect(f.distanceTo(p)).toBeLessThan(mind.inner.plan.attackRange + 0.3 * f.scale);
+      f.counter = { kind: 'block', frames: 10 };
+    }
+    w.step();
+    expect(startedAttack(a.f)).toBe(true);
+    expect(a.f.isCounterAttack).toBe(true);
+    // The other waited this tick out: no swing, its window still open.
+    expect(startedAttack(b.f)).toBe(false);
+    expect(b.f.counter).not.toBeNull();
+    expect(b.f.free).toBe(true);
+    w.step();
+    expect(startedAttack(b.f)).toBe(true);
+    expect(b.f.isCounterAttack).toBe(true);
+  });
+
   it('beyond fightExitM for fightExitTicks it chases again', async () => {
     const w = await make({ size: 100 });
     const p = w.player!;
@@ -445,13 +473,26 @@ describe('flee once per fight (§6.3)', () => {
     });
     expect(mind.state).toBe('return');
     expect(w.tick).toBe(mind.fleeUntil);
-    // Halved (after this tick's sight: unseen at ≥ 18 m, a decay of decayPerS × DT).
-    expect(mind.senses.of(p.id)).toBeCloseTo((before - A.decayPerS * DT) / 2, 6);
+    // Halved, × fleeAwarenessMul (after this tick's sight: unseen at ≥ 18 m, a decay of decayPerS × DT).
+    expect(mind.senses.of(p.id)).toBeCloseTo((before - A.decayPerS * DT) * A.fleeAwarenessMul, 6);
     expect(flat(f.pos, p.pos)).toBeGreaterThan(15);
-    // Back to the fight (he is near home), and no second flee: it rolled already.
-    until(w, () => mind.state === 'fight', secs(30), 'the fight again');
+    // He steps out 3 m ahead of it on its way home: the same fight again (return → chase → fight, never idle at home,
+    // which ends a fight), still at or below fleeHpFrac, and no second flee: it rolled already. Its stream's next draw
+    // would flee, so a second roll would show; and nothing draws from it.
+    const toHome = Math.atan2(mind.home.x - f.pos.x, mind.home.z - f.pos.z);
+    w.teleport(p, f.pos.x + 3 * Math.sin(toHome), f.pos.z + 3 * Math.cos(toHome));
+    const again = trace(mind, (note) => until(w, () => (note(), mind.state === 'fight'), secs(5), 'the fight again'));
+    expect(again).toEqual(['return', 'chase', 'fight']);
+    expect(f.hp).toBeLessThanOrEqual(f.stats.maxHp * A.fleeHpFrac);
+    const rolled = mind.fleeUntil;
+    expect(rolled).toBeGreaterThanOrEqual(0);
+    mind.rng.state = rngStateWhereNextIs(true);
+    const s0 = mind.rng.state;
     const states = trace(mind, (note) => steps(w, secs(20), note));
     expect(states).not.toContain('flee');
+    expect(states).not.toContain('idle');
+    expect(mind.fleeUntil).toBe(rolled);
+    expect(mind.rng.state).toBe(s0);
   });
 
   it('a losing roll keeps it fighting for the rest of the fight, however hurt; above fleeHpFrac it never rolls', async () => {
@@ -523,7 +564,7 @@ describe('idle and patrol (§6.3)', () => {
     until(
       w,
       () => {
-        for (let k = 0; k < loop.length; k++) if (!reached.includes(k) && flat(f.pos, loop[k]) <= A.repathMoveM + 0.3) reached.push(k);
+        for (let k = 0; k < loop.length; k++) if (!reached.includes(k) && flat(f.pos, loop[k]) <= A.investigateArriveM + 0.3) reached.push(k);
         return mind.state === 'idle';
       },
       secs(90),
@@ -706,6 +747,56 @@ describe('pause and scripts (§6.6)', () => {
     // Cleared, the brain takes over: it sees him and chases.
     mind.script = null;
     until(w, () => mind.state === 'chase', secs(2), 'the chase');
+  });
+
+  it('a navigated route asks for a path to each point in turn, even to points nearer each other than repathMoveM', async () => {
+    const w = await make({ player: false });
+    const { f, mind } = apeAt(w, 0, -4, 0);
+    const pts = [
+      { x: 0, z: 5 },
+      { x: 0, z: 6 },
+    ];
+    // Nearer each other than the distance under which goTo takes two goals for one, farther than a point is reached.
+    expect(flat(pts[0], pts[1])).toBeLessThan(A.repathMoveM);
+    expect(flat(pts[0], pts[1])).toBeGreaterThan(A.arriveM);
+    mind.script = { kind: 'route', points: pts, useNav: true };
+    const goals: { x: number; z: number }[] = [];
+    until(
+      w,
+      () => {
+        const g = mind.path.goal;
+        if (g && !goals.some((q) => flat(q, g) < 1e-9)) goals.push({ x: g.x, z: g.z });
+        return mind.scriptDone;
+      },
+      secs(10),
+      'the end of the route',
+    );
+    expect(goals).toEqual(pts);
+    expect(flat(f.pos, pts[1])).toBeLessThanOrEqual(A.arriveM + 0.2);
+    // Done: no path, no request, standing.
+    steps(w, 2);
+    expect(mind.path.goal).toBeNull();
+    expect(f.moveInput.length()).toBe(0);
+  });
+
+  it('a navigated point off the navmesh is reached at the end of the path to it (its goal snapped), and the route goes on', async () => {
+    const w = await make({ player: false });
+    // A stone pillar too tall to climb, its top beyond the layer's search height: no navmesh near its centre line.
+    spawnBox(w, { p: { x: 0, y: 3, z: 6 }, size: [2, 6, 2], material: 'stone', state: 'fixed', look: 'pillar' });
+    steps(w, 20);
+    const snapped = w.nav!.nearest('human', { x: 0, y: w.terrain.heightAt(0, 6), z: 6 })!;
+    expect(flat(snapped, { x: 0, z: 6 })).toBeGreaterThan(A.arriveM);
+    const { f, mind } = apeAt(w, 0, -4, 0);
+    const pts = [
+      { x: 0, z: 6 },
+      { x: 4, z: 6 },
+    ];
+    mind.script = { kind: 'route', points: pts, useNav: true };
+    const reachedFirst = until(w, () => mind.routeIdx === 1, secs(10), 'the first point');
+    expect(flat(f.pos, snapped)).toBeLessThanOrEqual(A.arriveM);
+    until(w, () => mind.scriptDone, secs(10), 'the end of the route');
+    expect(w.tick).toBeGreaterThan(reachedFirst);
+    expect(flat(f.pos, pts[1])).toBeLessThanOrEqual(A.arriveM + 0.2);
   });
 });
 

@@ -51,7 +51,7 @@ import { WEAPONS } from '../sim/weapons';
 import { resetTuning, restoreTuning, setTuningValue, TUNING, tuningSnapshot } from '../tuning/registry';
 import { MATERIALS } from '../world/materials';
 import { physicsReady } from '../world/physics';
-import type { MindScript, MindState } from '../world/creatures/mind';
+import { MIND_STATE_DOMAIN, type MindScript } from '../world/creatures/mind';
 import type { VerbStateRecord } from '../world/verbs/index';
 import type {
   CauseFeature,
@@ -377,15 +377,12 @@ function fighterById(w: World, id: number, field: string): Fighter {
 }
 
 /**
- * The minds' records. TODO(P19): MindRegistry.restoreRecord(r: MindRecV1[]) (by fighter id: each mind's state, script,
- * awareness, memory, path and inner BrawlerAI) is P19's; until it exists a save with a mind can't be loaded.
+ * The minds' records: MindRegistry.restoreRecord puts each onto the mind of the fighter it names (its state, script,
+ * awareness, memory, path and inner BrawlerAI), after a check that every one names a fighter of this world.
  */
 function restoreMinds(w: World, minds: readonly MindRecV1[]): void {
-  if (minds.length === 0) return;
-  const reg = w.minds as unknown as { restoreRecord?: (r: MindRecV1[]) => void };
-  if (typeof reg.restoreRecord !== 'function') throw new Error('loadWorld: the save has creature minds, and MindRegistry.restoreRecord is not implemented yet (P19)');
   for (const m of minds) fighterById(w, m.fighter, 'minds');
-  reg.restoreRecord([...minds]);
+  w.minds.restoreRecord(minds);
 }
 
 function checkTerrainEdits(w: World, s: SaveV1): void {
@@ -1024,23 +1021,6 @@ const MIND_KEYS: readonly (keyof MindRecV1)[] = [
   'rng',
   'inner',
 ];
-
-/** Every MindState (world/creatures/mind.ts). */
-const MIND_STATE_DOMAIN: Readonly<Record<MindState, true>> = {
-  idle: true,
-  patrol: true,
-  investigate: true,
-  chase: true,
-  fight: true,
-  flee: true,
-  return: true,
-  rest: true,
-  telegraph: true,
-  charge: true,
-  recover: true,
-  down: true,
-  dead: true,
-};
 
 /** Every PostureId (world/types.ts), for a `hold` script. */
 const SCRIPT_POSTURES: Readonly<Record<PostureId, true>> = {

@@ -52,8 +52,25 @@ export type MindState =
   | 'down'
   | 'dead';
 
-/** Every MindState (the loader checks a saved state against it). */
-export const MIND_STATES: readonly MindState[] = ['idle', 'patrol', 'investigate', 'chase', 'fight', 'flee', 'return', 'rest', 'telegraph', 'charge', 'recover', 'down', 'dead'];
+/**
+ * Every MindState, as a domain the compiler checks complete (a state added to the union and not here fails the
+ * typecheck); the save's loader checks a saved `state` and `resume` against it (save/load.ts).
+ */
+export const MIND_STATE_DOMAIN: Readonly<Record<MindState, true>> = {
+  idle: true,
+  patrol: true,
+  investigate: true,
+  chase: true,
+  fight: true,
+  flee: true,
+  return: true,
+  rest: true,
+  telegraph: true,
+  charge: true,
+  recover: true,
+  down: true,
+  dead: true,
+};
 
 /**
  * Scripts drive creatures in tests (§6.6); while one runs, senses update but transitions are suspended.
@@ -269,7 +286,7 @@ export abstract class CreatureMind implements Brain {
   // Scripts (§6.6)
   // -------------------------------------------------------------------------
 
-  /** Phase 2 for a script: a navigated route keeps its path to the next point. */
+  /** Phase 2 for a script: a navigated route keeps its path to the next point (a new one per point, routeScript). */
   protected planScript(w: World, s: MindScript): void {
     if (s.kind !== 'route' || !s.useNav) return;
     const p = s.points[this.routeIdx];
@@ -297,13 +314,19 @@ export abstract class CreatureMind implements Brain {
 
   /**
    * Walk the points in order (straight lines, or the navmesh's path with useNav): a point is reached within the
-   * species' arriveM, as a path corner is (§6.5). Gait `gait`, or the gait that walks at `speed`, or the patrol gait.
+   * species' arriveM, as a path corner is (§6.5), or, with useNav, at the end of a complete path to it (its goal snapped
+   * onto the navmesh, as the species' own arrivals count it). Each point gets a path of its own: reaching one drops the
+   * path, so the next phase 2 asks for the next point's however near it is (goTo alone would take two points within
+   * repathMoveM for one goal and never ask). Gait `gait`, or the gait that walks at `speed`, or the patrol gait.
    */
   protected routeScript(self: Fighter, s: Extract<MindScript, { kind: 'route' }>): void {
     const crouch = s.crouch === true;
     self.posture = null;
     const arrive = this.path.layer === 'ruler' ? CREATURE_TUNING.giant.arriveM : CREATURE_TUNING.ape.arriveM;
+    const from = this.routeIdx;
     while (this.routeIdx < s.points.length && flatDist(self.pos, s.points[this.routeIdx]) <= arrive) this.routeIdx++;
+    if (s.useNav && this.routeIdx === from && this.routeIdx < s.points.length && this.path.done) this.routeIdx++;
+    if (this.routeIdx !== from) this.path.clear();
     if (this.routeIdx >= s.points.length) {
       this.stand(self, crouch);
       return;
