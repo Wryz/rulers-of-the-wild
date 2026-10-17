@@ -21,7 +21,11 @@
 // - Each tested entity's per-tick load goes into `loadHist` (loadWindowS of ticks); an average above its capacity
 //   (E_b ÷ loadLeverM, SPEC:345) → Breaking.loadBreak at the heaviest load point (and the next one more than
 //   loadPointSplitM away along it). A load break under a planted ruler foot whose support then drops more than
-//   ledgeTripDropFrac × knee height trips the ruler `cover` (§4.7 step 8).
+//   ledgeTripDropFrac × knee height trips the ruler `cover` (§4.7 step 8); the support is looked for without the
+//   entities that broke this tick and the coverings that rested only on them.
+// - A fresh piece in its grace (RF-7) takes none of its breaker's load: no foot share from the fighter that broke it,
+//   and no share of a covering's load that came from that fighter. Without that, the pieces of a bearer broken by a
+//   ruler foot broke again under the same foot every tick until they fell.
 import RAPIER from '@dimforge/rapier3d-compat';
 import type { Fighter } from '../sim/fighter';
 import { DT } from '../sim/math';
@@ -68,7 +72,15 @@ interface Share {
   point: V3;
   loader: Owner | null;
   /** The planted foot it came from, or null (a resting weight). */
-  foot: { f: Fighter; side: 'L' | 'R'; at: V3 } | null;
+  foot: Foot | null;
+}
+
+/** A planted foot whose load is being delivered, and every covering that load passed through on its way down. */
+interface Foot {
+  f: Fighter;
+  side: 'L' | 'R';
+  at: V3;
+  via: Set<number>;
 }
 
 export class Loads {
@@ -87,13 +99,16 @@ export class Loads {
       if (!s) supports.set(e.id, (s = this.supportsOf(w, e)));
       return s;
     };
-    const deliver = (e: Entity, n: number, point: V3, loader: Owner | null, foot: Share['foot'], depth: number, seen: ReadonlySet<number>): void => {
+    const deliver = (e: Entity, n: number, point: V3, loader: Owner | null, foot: Foot | null, depth: number, seen: ReadonlySet<number>): void => {
       if (!(n > 0)) return;
-      const sup = dynamicBody(e) ? supportsOf(e) : [];
+      // A fresh piece ignores its breaker until clear (RF-7): it carries none of the breaker's load either, so the
+      // pieces of a bearer a foot broke fall away instead of breaking again under the same foot every tick.
+      const sup = dynamicBody(e) ? supportsOf(e).filter((s) => !s.entity || !ignores(s.entity, loader)) : [];
       const covering = sup.some((s) => s.entity !== null);
       if (covering && depth < LOAD_TUNING.maxSpreadDepth) {
         const share = n / sup.length;
         const next = new Set(seen).add(e.id);
+        foot?.via.add(e.id);
         for (const s of sup) if (s.entity && !next.has(s.entity.id)) deliver(s.entity, share, s.point, loader, foot, depth + 1, next);
         return;
       }
@@ -104,6 +119,7 @@ export class Loads {
     const g = Math.abs(WORLD_TUNING.gravityY);
 
     // Foot loads.
+    const feet: Foot[] = [];
     for (const f of w.combat.fighters) {
       if (!standing(w, f)) continue;
       const planted = (['L', 'R'] as const).filter((s) => !f.footwork.foot(s).stepping);
@@ -113,8 +129,11 @@ export class Loads {
       for (const side of planted) {
         const fp = f.footwork.foot(side).pos;
         const at = { x: fp.x, y: fp.y, z: fp.z };
-        const e = this.underFoot(w, f, at);
-        if (e) deliver(e, share, at, loader, { f, side, at }, 0, new Set());
+        const e = this.underFoot(w, f, at, loader);
+        if (!e) continue;
+        const foot: Foot = { f, side, at, via: new Set() };
+        feet.push(foot);
+        deliver(e, share, at, loader, foot, 0, new Set());
       }
     }
     // Resting weights.
@@ -125,6 +144,7 @@ export class Loads {
     }
 
     // Tested loads, the averages, load breaks (entity id order).
+    const broken = new Set<number>();
     const n = Math.max(1, Math.round(LOAD_TUNING.loadWindowS / DT));
     for (const e of w.entities.all()) {
       const shares = received.get(e.id);
@@ -160,8 +180,9 @@ export class Loads {
       const t0 = along(main.point);
       const far = byLoad.find((s) => s.foot !== null && Math.abs(along(s.point) - t0) > BREAK_TUNING.loadPointSplitM);
       if (far) w.breaking.loadBreak(e, far.point, far.loader);
-      this.coverTrips(w, e, points);
+      broken.add(e.id);
     }
+    if (broken.size > 0) this.coverTrips(w, feet, broken, received, supportsOf);
   }
 
   /** Break energy ÷ loadLeverM, N (SPEC:345, 884); Infinity for a material with no break energy (ropes). */
@@ -172,7 +193,7 @@ export class Loads {
   // -------------------------------------------------------------------------
 
   /** The topmost entity a planted foot's disc overlaps, if it is dynamic or anchored (a fixed one is the ground). */
-  private underFoot(w: World, f: Fighter, at: V3): Entity | null {
+  private underFoot(w: World, f: Fighter, at: V3, loader: Owner): Entity | null {
     const r = (SPECIES_BODY[f.species ?? 'human']?.footRadiusM ?? SPECIES_BODY.human.footRadiusM) * f.scale;
     const disc = { kind: 'cylinder' as const, halfHeight: LOAD_TUNING.footDiscH / 2, r, sides: PHYSICS_TUNING.cylinderFacets };
     const owners = w.queries.overlaps(disc, { p: at, q: { x: 0, y: 0, z: 0, w: 1 } }, { terrain: false, entities: 'all', fighters: 'none' });
@@ -181,7 +202,7 @@ export class Loads {
     for (const o of owners) {
       if (o.kind !== 'entity') continue;
       const e = w.entities.get(o.id);
-      if (!e?.collider) continue;
+      if (!e?.collider || ignores(e, loader)) continue;
       const pr = e.collider.projectPoint({ x: at.x, y: at.y + LOAD_TUNING.footDiscH, z: at.z }, false);
       const y = pr ? pr.point.y : -Infinity;
       if (y > bestY) {
@@ -273,19 +294,46 @@ export class Loads {
 
   /**
    * §4.7 step 8: a load break under a planted ruler foot whose support then drops more than ledgeTripDropFrac × its knee
-   * height trips the ruler `cover`, with the broken entity as the cause (feature 'cover').
+   * height trips the ruler `cover`, with the lowest-id broken entity under that foot as the cause (feature 'cover'). The
+   * support is found without everything giving way under the foot: every entity load-broken this tick, and every
+   * covering the foot's load passed through whose dynamic supports are all giving way (a mat on ten bearers that all
+   * broke falls with them; one on bearers that mostly held doesn't). At most once per ruler per tick, feet in combat
+   * order.
    */
-  private coverTrips(w: World, e: Entity, points: readonly Share[]): void {
+  private coverTrips(
+    w: World,
+    feet: readonly Foot[],
+    broken: ReadonlySet<number>,
+    received: ReadonlyMap<number, Share[]>,
+    supportsOf: (e: Entity) => Support[],
+  ): void {
     const done = new Set<number>();
-    for (const s of points) {
-      const foot = s.foot;
-      if (!foot || !foot.f.ruler || done.has(foot.f.id)) continue;
-      done.add(foot.f.id);
+    for (const foot of feet) {
       const f = foot.f;
+      if (!f.ruler || done.has(f.id)) continue;
+      const under = [...broken].filter((id) => received.get(id)?.some((s) => s.foot === foot)).sort((a, b) => a - b);
+      if (under.length === 0) continue;
+      const falling = new Set(broken);
+      const via = [...foot.via].sort((a, b) => a - b);
+      for (let changed = true; changed; ) {
+        changed = false;
+        for (const id of via) {
+          if (falling.has(id)) continue;
+          const c = w.entities.get(id);
+          const sup = c ? supportsOf(c) : [];
+          if (sup.length > 0 && sup.every((s) => s.entity !== null && falling.has(s.entity.id))) {
+            falling.add(id);
+            changed = true;
+          }
+        }
+      }
       const knee = f.rig[foot.side === 'L' ? 'shinL' : 'shinR'].pos;
       const kneeH = knee.y - foot.at.y;
-      const drop = foot.at.y - w.supportAt(foot.at.x, foot.at.z, foot.at.y, { excludeEntities: [e.id] });
+      const exclude = [...falling].sort((a, b) => a - b);
+      const drop = foot.at.y - w.supportAt(foot.at.x, foot.at.z, foot.at.y, { excludeEntities: exclude });
       if (!(drop > RULER_BODY_TUNING.ledgeTripDropFrac * kneeH)) continue;
+      done.add(f.id);
+      const e = w.entities.get(under[0])!;
       const cause: ImpactCause = { kind: 'entity', entityId: e.id, fighterId: null, credit: [...e.credit], held: false, feature: 'cover' };
       w.rulers.requestTrip(f, 'cover', cause);
     }
@@ -303,6 +351,15 @@ function standing(w: World, f: Fighter): boolean {
 }
 
 const dynamicBody = (e: Entity): boolean => !!e.body && e.body.isEnabled() && e.body.isDynamic();
+
+/** A fresh piece in its grace ignores its breaker (RF-7): the same entity, or the same fighter by any of its parts. */
+function ignores(e: Entity, loader: Owner | null): boolean {
+  const g = e.grace?.from;
+  if (!g || !loader) return false;
+  if (g.kind === 'fighter' && loader.kind === 'fighter') return g.id === loader.id;
+  if (g.kind === 'entity' && loader.kind === 'entity') return g.id === loader.id;
+  return false;
+}
 
 /** At rest, or asleep (the rest radius is loose for long bodies). */
 const resting = (e: Entity): boolean => e.restTicks >= PHYSICS_TUNING.restTicks || (e.body?.isSleeping() ?? false);
