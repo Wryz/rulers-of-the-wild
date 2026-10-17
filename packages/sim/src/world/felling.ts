@@ -17,6 +17,13 @@
 //   ordinary free log. DEVIATION (§2.5: "once the trunk rests"): also "torn and clear of its stump", so a trunk hung up
 //   on its hinge, or resting with its butt still in its stump, stays `falling` with its joint (dropping the joint there
 //   would leave a hinged trunk unhinged, or depenetrate the butt out of the stump into a spin).
+//   TODO "felled needs torn and clear" (for a §12 entry): the design's felled test is "once the trunk rests".
+// TODO "short thick trees stand back up": a short, thick trunk (d / L^1.5 above ≈ 0.039, e.g. 0.15 m × 2.5 m) given
+//   FELL_TUNING.tipAngVel (0.15 rad/s) rocks back onto its hinge and rests upright, staying `falling` with its runtime
+//   joint for good. Options for the design: a tipAngVel scaled by d / L^1.5, or a falling tree resting upright (never
+//   torn) for restTicks counted as notched again.
+// TODO "felled trunks shatter on landing" (P09 design conflict, see whileFalling): a 30 cm × 15 m trunk lands tip
+//   first at ≈ 20 m/s and the contact rule scores it with the whole trunk's mass, so it breaks.
 // TODO "canopy collision (rule 3)": trees have no canopy collider in M1 (§2.5, X22); the client draws a falling crown
 // collapsed against the trunk.
 import RAPIER from '@dimforge/rapier3d-compat';
@@ -167,9 +174,10 @@ export class Felling {
       } else if (p.phase === 'falling') this.whileFalling(w, e);
     }
     this.moments.clear();
-    for (const [id, rt] of [...this.falls]) {
+    // Id order (insertion order differs between a run and a loaded one; Rapier's joint arena sees the removal order).
+    for (const id of [...this.falls.keys()].sort((a, b) => a - b)) {
       if (w.entities.get(id)?.plant?.phase === 'falling') continue;
-      this.drop(rt);
+      this.drop(this.falls.get(id)!);
       this.falls.delete(id);
     }
   }
@@ -191,7 +199,7 @@ export class Felling {
    * from upright; or the never-taut rope once torn).
    */
   restoreRecord(r: FellingRecV1[]): void {
-    for (const rt of this.falls.values()) this.drop(rt);
+    for (const id of [...this.falls.keys()].sort((a, b) => a - b)) this.drop(this.falls.get(id)!);
     this.falls.clear();
     this.moments.clear();
     r.forEach((rec, i) => {

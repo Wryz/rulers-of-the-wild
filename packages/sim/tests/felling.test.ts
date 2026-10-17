@@ -5,7 +5,12 @@
 // - The §4.12 numbers [I verified: fell.mjs]: a 30 cm × 15 m green tree, 738 kg above the cut, back-moment 1,086 N·m,
 //   M_cap 15,904 N·m at half, 3,435 at 0.3, 1,018 at 0.2.
 // - A 30 cm tree holds through 14 stone-axe chops and falls at the 15th, away from the chopper's side (at any angle, not
-//   in the 8-gon's 45° steps), on the fall line within 1° while it falls.
+//   in the 8-gon's 45° steps), on the fall line within 1° while it falls and where it first meets the ground.
+// - DESIGN CONFLICT (P09's m_eff, reported): §13.1 asks that the 30 cm × 15 m trunk *lands* within 1° of the fall line;
+//   the contact rule scores its landing with the whole trunk's mass (E ≈ 133 kJ against E_b ≈ 29.5 kJ), so it shatters
+//   into 4 pieces where it lands. Every green trunk 8 m or taller shatters (0.3 × 8 m: 36.7 kJ vs 15.3 kJ); 6 m and
+//   shorter land whole. The whole-trunk landing is kept as an expected failure until the design decides; a 20 cm × 6 m
+//   tree is felled whole on the fall line.
 // - Pulls fell it at the §4.12 thresholds: 500 N through a rope tied 10 m up, from 15.6 m out on the fall line, at
 //   remaining 0.28 yes and 0.30 no; the 1,200 N yank at 0.40 yes and 0.50 no.
 // - A falling trunk takes its vine along; a rope below the cut goes to the stump.
@@ -129,17 +134,60 @@ describe('chops and the fall (§2.5)', () => {
     expect(p.fall!.hinge.x).toBeCloseTo(0.15, 6);
     expect(tree.body!.isDynamic()).toBe(true);
     expect(tree.body!.isCcdEnabled()).toBe(true);
-    // It falls along +x, never off the line by more than 1° (until it lands).
+    // It falls along +x, never off the line by more than 1°, and meets the ground on it: the trunk where it lands, or,
+    // when the landing breaks it (see the expected failure below), every piece it breaks into in that tick (each keeps
+    // the trunk's rotation, §4.10).
     let worst = 0;
-    let landed = false;
-    for (let i = 0; i < 600 && !landed; i++) {
+    let landing: Entity[] | null = null;
+    for (let i = 0; i < 600 && !landing; i++) {
       const ev = run(w, 1);
       const e = w.entities.get(t);
-      if (!e || ev.some((x) => x.type === 'land' && x.entity === t)) landed = true;
-      else if (tiltDeg(e) > 5) worst = Math.max(worst, offLineDeg(e, { x: 1, y: 0, z: 0 }));
+      const broke = ev.find((x): x is Extract<WorldEvent, { type: 'break' }> => x.type === 'break' && x.entity === t);
+      if (broke) landing = broke.pieces.map((id) => ent(w, id));
+      else if (e && ev.some((x) => x.type === 'land' && x.entity === t)) landing = [e];
+      else if (e && tiltDeg(e) > 5) worst = Math.max(worst, offLineDeg(e, { x: 1, y: 0, z: 0 }));
     }
-    expect(landed).toBe(true);
+    expect(landing).not.toBeNull();
     expect(worst).toBeLessThan(1);
+    for (const e of landing!) expect(offLineDeg(e, { x: 1, y: 0, z: 0 })).toBeLessThan(1);
+  });
+
+  // DESIGN CONFLICT (P09 m_eff for entity vs terrain = the whole mass, §4.3): expected to fail until the design decides
+  // (the effective mass at the contact point, 1/(1/m + (r×n)ᵀI⁻¹(r×n)), ≈ m/4 at the tip, would score ≈ 37 kJ and take
+  // ≈ 0.25 of its integrity). When it passes, `it.fails` fails: make it an ordinary `it`.
+  it.fails('a 30 cm × 15 m tree felled by 15 chops lands whole, within 1° of the fall line, and is felled (§13.1)', async () => {
+    const w = await make();
+    const t = tree30(w);
+    run(w, 5);
+    for (let c = 1; c <= 15; c++) w.felling.chop(t, { x: -3, y: 0.4, z: 0 }, 0.02, ['p1']);
+    let felled = false;
+    for (let i = 0; i < 900 && !felled; i++) {
+      w.step();
+      felled = w.entities.get(t)?.plant === null;
+    }
+    expect(felled).toBe(true);
+    const e = ent(w, t);
+    expect(e.integrity).toBeGreaterThan(0);
+    expect(offLineDeg(e, { x: 1, y: 0, z: 0 })).toBeLessThan(1);
+  });
+
+  it('a 20 cm × 6 m tree felled by chops lands whole, at rest within 1° of the fall line, and is felled', async () => {
+    const w = await make();
+    const t = spawnTree(w, { at: { x: 0, z: 0 }, diameter: 0.2, height: 6 }).tree;
+    run(w, 5);
+    w.felling.chop(t, { x: 0, y: 0, z: 2 }, 0.2, ['p1']);
+    let felled = -1;
+    const ev = run(w, 900, () => {
+      if (felled < 0 && w.entities.get(t)?.plant === null) felled = w.tick;
+    });
+    expect(ev.filter((x) => x.type === 'break' && x.entity === t)).toEqual([]);
+    expect(felled).toBeGreaterThan(0);
+    const e = ent(w, t);
+    expect(e.state).toBe('free');
+    expect(e.integrity).toBeGreaterThan(0);
+    expect(tiltDeg(e)).toBeGreaterThan(80);
+    // Away from the chopper's side (+z): along −z.
+    expect(offLineDeg(e, { x: 0, y: 0, z: -1 })).toBeLessThan(1);
   });
 
   it('the fall follows the chopper’s side at any angle (fromDir is the chopper’s horizontal direction, not a facet’s)', async () => {

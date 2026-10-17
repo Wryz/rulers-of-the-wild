@@ -39,8 +39,9 @@ export const BREAK_TUNING = defineTuning(
   },
   {
     integrityPerExcess: { unit: '—', source: 'D-17' },
-    piecesMin: { unit: 'pieces', source: 'SPEC:344' },
-    piecesMax: { unit: 'pieces', source: 'SPEC:344' },
+    // fracture() makes 2, 3 or 4 pieces: the piece count is clamped into that range whatever these say.
+    piecesMin: { unit: 'pieces', source: 'SPEC:344 (fracture() makes 2-4)', min: 2, max: 4, step: 1 },
+    piecesMax: { unit: 'pieces', source: 'SPEC:344 (fracture() makes 2-4)', min: 2, max: 4, step: 1 },
     loadLeverM: { unit: 'm', source: 'SPEC:345, 884' },
     pieceGraceTicks: { unit: 'ticks', source: 'NEW: C §7 item 7 (the minimum; the grace lasts until the piece is clear)' },
     pieceGraceMaxTicks: { unit: 'ticks', source: 'NEW: a piece still inside its breaker after 10 s is crushed (RF-7)' },
@@ -248,12 +249,18 @@ export function knockLoose(w: World, e: Entity): number {
   return lift;
 }
 
+/** Floats per vertex in triangulate()'s positions (x, y, z): a layout, not a tuning value. */
+const XYZ_STRIDE = 3;
+
 /** How far a shape at `pose` reaches below the terrain (m; 0 when it doesn't): its deepest vertex under the surface. */
 export function groundDepth(w: World, shape: Shape, pose: Pose3): number {
   const { positions } = triangulate(shape, pose);
   let d = 0;
-  for (let i = 0; i < positions.length; i += 3) {
-    const below = w.terrain.heightAt(positions[i], positions[i + 2]) - positions[i + 1];
+  for (let i = 0; i < positions.length; i += XYZ_STRIDE) {
+    const x = positions[i];
+    const y = positions[i + 1];
+    const z = positions[i + 2];
+    const below = w.terrain.heightAt(x, z) - y;
     if (below > d) d = below;
   }
   return d;
@@ -263,11 +270,17 @@ export function groundDepth(w: World, shape: Shape, pose: Pose3): number {
 // Pieces
 // ---------------------------------------------------------------------------
 
-/** n = clamp(2 + ⌊E/E_b − 1⌋, piecesMin, piecesMax) (SPEC:344 "2-4"). */
+/** The piece counts fracture() can make (its `n`): BREAK_TUNING.piecesMin/piecesMax are clamped into them. */
+const FRACTURE_PIECES: readonly (2 | 3 | 4)[] = [2, 3, 4];
+
+/**
+ * n = clamp(2 + ⌊E/E_b − 1⌋, piecesMin, piecesMax) (SPEC:344 "2-4"). fracture() makes 2-4 pieces, so a piecesMax tuned
+ * above 4 (or a piecesMin below 2) is held to that range.
+ */
 function pieceCount(ratio: number): 2 | 3 | 4 {
   const T = BREAK_TUNING;
-  const n = Math.max(T.piecesMin, Math.min(T.piecesMax, 2 + Math.floor(ratio - 1)));
-  return (n <= 2 ? 2 : n >= 4 ? 4 : 3) as 2 | 3 | 4;
+  const n = Math.round(Math.max(T.piecesMin, Math.min(T.piecesMax, 2 + Math.floor(ratio - 1))));
+  return FRACTURE_PIECES.find((k) => k >= n) ?? FRACTURE_PIECES[FRACTURE_PIECES.length - 1];
 }
 
 /**

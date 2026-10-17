@@ -278,9 +278,10 @@ export class Loads {
   private spans(w: World, e: Entity, point: V3): boolean {
     const c = e.collider;
     if (!c) return false;
-    const reach = bodyReach(e);
-    const from = { x: point.x, y: point.y - 2 * reach, z: point.z };
-    const toi = c.castRay(new RAPIER.Ray(from, { x: 0, y: 1, z: 0 }), 4 * reach, true);
+    // Up through the entity from twice its reach below the point, as far again above it: the first hit is its underside.
+    const below = 2 * bodyReach(e);
+    const from = { x: point.x, y: point.y - below, z: point.z };
+    const toi = c.castRay(new RAPIER.Ray(from, { x: 0, y: 1, z: 0 }), 2 * below, true);
     const under = toi >= 0 ? from.y + toi : point.y;
     const gap = LOAD_TUNING.spanGapM;
     if (under - w.terrain.heightAt(point.x, point.z) <= gap) return false;
