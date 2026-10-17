@@ -1588,9 +1588,10 @@ describe('broken saves', () => {
     w.dispose();
   });
 
-  const refuse = (edit: (s: Record<string, unknown>) => void, message: string | RegExp) => {
-    expect(() => readSave(edited(good, edit))).toThrow(message);
+  const refuseIn = (bytes: Uint8Array, edit: (s: Record<string, unknown>) => void, message: string | RegExp) => {
+    expect(() => readSave(edited(bytes, edit))).toThrow(message);
   };
+  const refuse = (edit: (s: Record<string, unknown>) => void, message: string | RegExp) => refuseIn(good, edit, message);
 
   it('migrate is the identity for v1 (a fresh copy of the record)', () => {
     const raw = parsed(good);
@@ -1673,6 +1674,51 @@ describe('broken saves', () => {
           [1, 41],
         ]),
       'save record: contactGrace is not in increasing fighter order at contactGrace[1]',
+    );
+  });
+
+  it("checks a ruler body field by field (P11's RulerBodies record), and the entities its mover remembers against the counter", async () => {
+    const w = await createWorld({ seed: 5, scene: 'empty', nav: 'off', size: 25 });
+    addGiant(w, 0, 0);
+    run(w, 5, new Rng(5));
+    const bytes = serializeWorld(w);
+    w.dispose();
+    const s0 = parsed(bytes) as unknown as SaveV1;
+    const i = s0.bodies.findIndex((b) => b.ruler !== null);
+    expect(i).toBeGreaterThanOrEqual(0);
+    expect(s0.counters.entity).toBe(1);
+    const at = `save record: bodies[${i}].ruler`;
+    const ruler = (s: Record<string, unknown>): Record<string, unknown> => (s.bodies as Record<string, unknown>[])[i].ruler as Record<string, unknown>;
+    const no = (edit: (r: Record<string, unknown>) => void, message: string) => refuseIn(bytes, (s) => edit(ruler(s)), message);
+    // As written, every field reads back as it is.
+    expect(readSave(bytes).bodies[i].ruler).toEqual(s0.bodies[i].ruler);
+    const zero = { x: 0, y: 0, z: 0 };
+    const unit = { x: 0, y: 0, z: 0, w: 1 };
+    no((r) => (r.dynamic = 1), `${at}.dynamic is 1, not a boolean`);
+    no((r) => delete r.coverBreak, `${at}.coverBreak is missing, not there`);
+    no((r) => (r.mood = 'calm'), `${at} has a field this version doesn't have: mood`);
+    no((r) => (r.pose = { p: zero, q: { x: 0, y: 0, z: 0 } }), `${at}.pose.q.w is missing, not there`);
+    no((r) => (r.lin = { x: Infinity, y: 0, z: 0 }), `${at}.lin.x is Infinity, not a finite number`);
+    no((r) => (r.history = [1, 2, 3]), `${at}.history is 3, not 0 or ${6 * BONES.length} numbers`);
+    no((r) => (r.local = [{ bone: 'pelvis', p: zero, q: unit }]), `${at}.local is 1, not 0 bones (dynamic false)`);
+    no((r) => (r.dynamic = true), `${at}.local is 0, not ${BONES.length} bones (dynamic true)`);
+    no((r) => (r.local = [{ bone: 'head', p: zero, q: unit }]), `${at}.local[0].bone is "head", not the bone ${BONES[0]} (BONES order)`);
+    no((r) => (r.sleeping = null), `${at}.sleeping is null, not a boolean`);
+    no((r) => (r.climbFloor = 'low'), `${at}.climbFloor is "low", not a finite number`);
+    no((r) => (r.deflect = { entity: 0, tick: 3 }), `${at}.deflect.entity is 0, not a whole number ≥ 1`);
+    no((r) => (r.deflect = { entity: 1, tick: 3, by: 2 }), `${at}.deflect has a field this version doesn't have: by`);
+    no((r) => (r.supports = [{ entity: 3, tick: 1, credit: [7] }]), `${at}.supports[0].credit[0] is 7, not a string`);
+    no(
+      (r) => (r.supports = [{ entity: 3, tick: 1, credit: [] }, { entity: 3, tick: 2, credit: [] }]),
+      `${at}.supports[1].entity is 3, not an entity after the one before it (increasing, no repeats)`,
+    );
+    no((r) => (r.coverBreak = { tick: 2, cause: { kind: 'magic', entityId: null, fighterId: null, credit: [], held: false, feature: 'cover' } }), `${at}.coverBreak.cause.kind is "magic"`);
+    // The entities it names: below the counter (a support outlives its entity, an unmade id doesn't).
+    no((r) => (r.supports = [{ entity: 3, tick: 1, credit: [] }]), `${at}.supports[0].entity names entity 3, which is not below counters.entity (1)`);
+    no((r) => (r.deflect = { entity: 1, tick: 3 }), `${at}.deflect.entity names entity 1, which is not below counters.entity (1)`);
+    no(
+      (r) => (r.coverBreak = { tick: 2, cause: { kind: 'entity', entityId: 4, fighterId: null, credit: [], held: false, feature: 'cover' } }),
+      `${at}.coverBreak.cause.entityId names entity 4, which is not below counters.entity (1)`,
     );
   });
 

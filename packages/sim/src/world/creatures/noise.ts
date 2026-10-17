@@ -184,9 +184,8 @@ export class NoiseBus {
           break;
       }
     }
-    // Footsteps: the feet set down this tick (footwork.landed is emptied by the mover before the footwork runs; the
-    // downed slab empties it too). TODO(P11): RulerMover.resolve must empty it the same way, or a ruler's last steps
-    // would be heard again every tick.
+    // Footsteps: the feet set down this tick (footwork.landed is emptied by the mover before the footwork runs, the
+    // KCC's and RulerMover.resolve's alike; the downed slab empties it too).
     const minSpeed = CREATURE_TUNING.shared.movingMinSpeed;
     for (const f of w.combat.fighters) {
       if (!f.alive || f.state === 'knockdown' || f.state === 'tripped' || f.footwork.landed.length === 0) continue;
