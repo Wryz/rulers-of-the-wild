@@ -129,9 +129,9 @@ export class Senses {
   lastSeenTick = -1;
   /**
    * The awareness the strongest stimulus since the last decision added (Infinity after a hurt); reset by sight().
-   * Not in the senses' own record: the mind saves it as MindRecV1.stimulus and puts it back after restoreRecord
-   * (CreatureMind, P19), so a load mid-window (a creature sensed once a second, saved between its sensed ticks) weighs
-   * the next noise against the ones heard before the save.
+   * TODO(P13/P19): not in MindRecV1, so a load mid-window (a creature sensed once a second, saved between its sensed
+   * ticks) restarts the window at 0: the first noise heard after the load then moves lkp even if weaker than one heard
+   * before the save. Exact only once MindRecV1 carries it (M3's save, load, continue gate).
    */
   stimulus = 0;
 
@@ -227,7 +227,7 @@ export class Senses {
     };
   }
 
-  /** Restores toRecord()'s fields; the decision window starts empty (the mind then restores `stimulus`). */
+  /** Restores toRecord()'s fields; the decision window starts empty (see `stimulus`). */
   restoreRecord(r: SensesRecord): void {
     this.awareness.clear();
     for (const [id, a] of r.awareness) this.awareness.set(id, a);
