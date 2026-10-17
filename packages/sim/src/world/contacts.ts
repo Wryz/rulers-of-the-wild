@@ -68,8 +68,10 @@ export type UnscoredWhy = 'bounce' | 'grace' | 'limb' | 'held' | 'released' | 'p
 /**
  * What phase 9d hands the joint store (P10, §4.9): a new episode (not a bounce, outside the crosser's grace) between
  * rope sensor `joint` and `by`, a creature's collider or a dynamic entity. The tripwire rule (root momentum, the
- * exemptions, the load against the rope's strength, queued shares, the `tripwire` event) is the joint store's; until
- * it has this method, rope episodes are only counted.
+ * exemptions, the load against the rope's strength, queued shares, the `tripwire` event) is the joint store's.
+ * TODO(P10): JointStore `implements TripwireSink` (§1.5.7 gains the method); then phase 9d's cast goes. Until then no
+ * rope sensor exists (only P10's JointStore makes them), so the call never runs; a JointStore that has rope sensors and
+ * no `tripwire` throws at the first crossing instead of silently never firing.
  */
 export interface TripwireSink {
   tripwire(w: World, joint: number, by: Owner): void;
@@ -168,6 +170,12 @@ export class ContactSystem {
   private readonly episodes = new Map<string, Episode>();
   /** Fighter id → the tick its contact grace ends (pairs starting before it are never scored). */
   private readonly graceUntil = new Map<number, number>();
+  /**
+   * The groups restoreRecord brought back touching, until the next process() re-syncs their counts with the rebuilt
+   * narrow phase (see restoreRecord). Never saved: a save taken before that process() writes the restored counts, and
+   * loading it marks them again.
+   */
+  private resync: Set<Episode> | null = null;
 
   constructor(world: World) {
     this.world = world;
@@ -185,10 +193,25 @@ export class ContactSystem {
     const fresh: Fresh[] = [];
     const freshByEp = new Map<Episode, Fresh>();
     const thrownHit = new Set<number>();
+    const resync = this.resync;
+    this.resync = null;
+    const resynced = new Set<Episode>();
     for (const p of pairs) {
       if (!p.started) continue;
       const ep = this.episodeOf(p.a, p.b, true);
       if (!ep) continue;
+      if (resync?.has(ep)) {
+        // The first step after a load: the rebuilt narrow phase re-raises a start for every pair of a restored episode
+        // that still overlaps. They rebuild its count (never added to the saved one) and are that episode going on:
+        // never a new episode, never scored, never a thrown entity's first contact.
+        if (!resynced.has(ep)) {
+          resynced.add(ep);
+          ep.touching = 0;
+        }
+        ep.touching++;
+        this.unscored.continuing++;
+        continue;
+      }
       if (ep.touching === 0) {
         ep.episodeStart = tick;
         const fr: Fresh = { ep, pairs: [], bounce: tick <= ep.cooldownUntil, creature: [], entity: [], land: null, rope: null };
@@ -206,6 +229,15 @@ export class ContactSystem {
       ep.touching--;
       if (ep.touching === 0) ep.cooldownUntil = tick + DAMAGE_TUNING.impactCooldownTicks;
     }
+    // A restored episode none of whose pairs was re-raised separated in that step: it ends here, as the stop the saved
+    // world's next step raised would have ended it.
+    if (resync) {
+      for (const ep of resync) {
+        if (resynced.has(ep) || ep.touching === 0) continue;
+        ep.touching = 0;
+        ep.cooldownUntil = tick + DAMAGE_TUNING.impactCooldownTicks;
+      }
+    }
 
     // Evaluate every new episode (read-only: velocities from the phase-5 store, poses, the rule).
     for (const fr of fresh) {
@@ -220,9 +252,9 @@ export class ContactSystem {
     for (const fr of fresh) for (const h of fr.creature) this.applyCreatureHit(w, h);
     // 9c: entities (integrity; a notched tree's fall-direction moment), after the creature damage (SPEC:344).
     for (const fr of fresh) for (const h of fr.entity) this.applyEntityHit(w, h);
-    // 9d: rope sensors → tripwires.
-    const sink = w.joints as unknown as Partial<TripwireSink>;
-    for (const fr of fresh) if (fr.rope && typeof sink.tripwire === 'function') sink.tripwire.call(w.joints, w, fr.rope.joint, fr.rope.by);
+    // 9d: rope sensors → tripwires (a plain call: a joint store without the method fails loudly, never silently).
+    const sink = w.joints as unknown as TripwireSink;
+    for (const fr of fresh) if (fr.rope) sink.tripwire(w, fr.rope.joint, fr.rope.by);
     // 9e: thrown entities stop being held at their first contact or at rest (D-31); `land` events for heavy landings.
     for (const e of w.entities.all()) {
       if (!e.thrown) continue;
@@ -298,14 +330,29 @@ export class ContactSystem {
     return out.sort((x, y) => x.creature - y.creature || (x.owner < y.owner ? -1 : x.owner > y.owner ? 1 : 0));
   }
 
+  /**
+   * The load's restore (§8.3), into a world whose Rapier bodies were just built from the save and not stepped yet
+   * (P13's loadWorld: createWorld steps no body, every body is made fresh, so the narrow phase is empty). Its first step
+   * re-raises a `started` for every collider pair that still overlaps, and nothing else of the saved contacts: so the
+   * next process() rebuilds each group restored as touching from the starts re-raised for it (they are the saved
+   * episode going on, never a new one, never scored), and ends at that tick, with its cooldown, a restored episode none
+   * of whose pairs is re-raised (it separated in that step, where the saved world's next step raised the stop).
+   * Episode starts and cooldown ends stand as saved, so a bounce after the load is still a bounce.
+   * Contract for P13: restore into the freshly built world, before its first step, and don't prime the narrow phase
+   * (a world that has already stepped these bodies re-raises nothing, and the counts of contacts that go on would drop).
+   */
   restoreRecord(r: ContactRecV1[]): void {
     this.episodes.clear();
+    const resync = new Set<Episode>();
     for (const rec of r) {
       const subject: Merged = rec.creature > 0 ? { kind: 'fighter', id: rec.creature } : { kind: 'entity', id: -rec.creature };
       const other = parseMergedKey(rec.owner);
       const [a, b] = compareMerged(subject, other) <= 0 ? [subject, other] : [other, subject];
-      this.episodes.set(groupKey(a, b), { a, b, touching: rec.touching, episodeStart: rec.episodeStart, cooldownUntil: rec.cooldownUntil });
+      const ep: Episode = { a, b, touching: rec.touching, episodeStart: rec.episodeStart, cooldownUntil: rec.cooldownUntil };
+      this.episodes.set(groupKey(a, b), ep);
+      if (ep.touching > 0) resync.add(ep);
     }
+    this.resync = resync.size > 0 ? resync : null;
   }
 
   /** (fighter, untilTick), sorted: the open contact graces (§8.3 `contactGrace`). */
@@ -569,7 +616,10 @@ export class ContactSystem {
       w.entities.queueImpulse(h.reactionEntity, r.reaction, i.point);
     }
     // Impact trip (§4.7 step 9, SPEC:305): a blocking-class impactor (≥ impactTripMinKg, or static) on a leg between
-    // ankle and knee faster than tripSpeed along the normal trips a standing ruler; smaller momenta are dropped.
+    // ankle and knee faster than tripSpeed along the normal trips a standing ruler; smaller momenta are dropped. It runs
+    // on scored impacts only. A static impactor meets a standing ruler only by the ruler's own motion, so a blunt one is
+    // a brush (v_safe 14.07 m/s takes its energy) and RulerMover's obstacle trip (§4.7 step 6.2) is what trips on it; a
+    // sharp one keeps its energy (SPEC:415), is scored, and trips here.
     if (standingRuler && f.state !== 'ko' && shinBand(f, i.bone, i.point)) {
       const T = RULER_BODY_TUNING;
       if ((i.impactorMass === Infinity || i.impactorMass >= T.impactTripMinKg) && i.vn > T.tripSpeed) w.rulers.requestTrip(f, 'impact', i.cause);

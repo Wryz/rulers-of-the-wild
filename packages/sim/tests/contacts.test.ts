@@ -18,7 +18,7 @@ import * as ruler from '../src/sim/ruler';
 import { DAMAGE_TUNING } from '../src/sim/rules';
 import { SPECIES_BODY } from '../src/sim/species';
 import { restoreTuning, tuningSnapshot } from '../src/tuning/registry';
-import { castContact } from '../src/world/contacts';
+import { castContact, type TripwireSink } from '../src/world/contacts';
 import { dot } from '../src/world/damage';
 import { spawnLog, spawnStick } from '../src/world/factory';
 import { COLLIDES_WITH, collisionGroups, G, GROUP, solverGroups } from '../src/world/groups';
@@ -310,8 +310,9 @@ describe('a log on a standing player', () => {
   it('300 kg arriving at the lab’s 6.2 m/s: keeps ≥ 80 % of its speed over the measured tick (AC-6, D-23), hurts, rests on the terrain', async () => {
     // The AC-6 recipe drops the log's centre from 4 m; the lab's player zone topped out at 1.81 m and the log met it at
     // 6.21 m/s (Δv 4.99 m/s, the hitstun branch). The real rig's head ball tops out at 1.72 m, so from 4 m the log
-    // arrives at 6.38 m/s and presses the player (Δv 5.09 ≥ launchDv): see the next test. Here the centre starts at
-    // 3.75 m, so it meets the head at the lab's 5.9-6.1 m/s whatever the tick phase, in the lab's branch.
+    // arrives at 6.38 m/s and presses the player (Δv 5.09 ≥ launchDv): see the next two tests (the second, AC-6 part 2
+    // at 4 m, waits on a P08-fix to DownedBodies.launch). Here the centre starts at 3.75 m, so it meets the head at the
+    // lab's 5.9-6.1 m/s whatever the tick phase, in the lab's branch.
     const w = await make({ seed: 3 });
     const p = w.player!;
     run(w, 10);
@@ -361,9 +362,34 @@ describe('a log on a standing player', () => {
     const r = queue.mock.calls.find((c) => c[0] === id)!;
     expect(r[1].y).toBeCloseTo(-p.mass * hit.dv.y, 6);
     expect(slab).toHaveBeenCalledWith(p, hit.dv);
-    // TODO(P08-fix, reported): the slab is enabled upright inside the log in the next phase 4a and Rapier's
-    // depenetration throws the log up (measured +4.95 m/s): AC-6 part 2's ≥ 80 % holds only in the hitstun branch until
-    // DownedBodies.launch stops depenetrating a slab out of the body that pressed it.
+  });
+
+  // TODO(P08-fix, reported): AC-6 part 2 at the design's 4 m. The press puts the player down, and in the next phase 4a
+  // DownedBodies.launch enables the slab upright where the player stood, inside the falling log; Rapier's depenetration
+  // throws the 300 kg log up (+4.95 m/s at N + 1, measured) and it lands on the lying slab before it rolls off. Expected
+  // to fail until the slab is never enabled overlapping a dynamic body (start it lying when the queued Δv is a press, or
+  // a collision grace without ENTITY until clear); then `it.fails` fails and this becomes a plain `it` (P27's gate).
+  it.fails('AC-6 part 2 from 4 m in the press branch: the log keeps ≥ 80 % of its speed over the measured tick and rests on the terrain', async () => {
+    const w = await make({ seed: 3 });
+    const p = w.player!;
+    run(w, 10);
+    const id = spawnLog(w, { p: { x: p.pos.x, y: 4, z: p.pos.z }, length: 3, mass: 300 });
+    const rows = watchLog(w, id, p);
+    run(w, 80, () => rows.length > 1 && rows[rows.length - 2].hit !== null);
+    const i = rows.findIndex((r) => r.hit);
+    const before = speed(rows[i].pre);
+    const after = speed(rows[i + 1].post);
+    expect(rows[i].hit!.damage).toBeGreaterThan(0);
+    expect(rows[i + 1].post!.y).toBeLessThan(0); // still falling
+    expect(after).toBeGreaterThanOrEqual(0.8 * before);
+    // It lands on the terrain, never on the body: no rest above 0.5 m on the way.
+    let highest = -Infinity;
+    for (let t = 0; t < 300; t++) {
+      w.step();
+      const e = w.entities.get(id)!;
+      if (speed(e.vel.lin) < 0.1) highest = Math.max(highest, e.pose.p.y);
+    }
+    expect(highest).toBeLessThan(0.5);
   });
 
   it('a log falling through a standing body scores one impact for the whole episode (RF-12)', async () => {
@@ -486,34 +512,56 @@ describe('contact grace after a pose jump (RF-1)', () => {
     expect(w.contacts.unscored.grace).toBeGreaterThan(g0);
   });
 
-  it('a body switched to sensors over a stake (the ruler’s get-up) scores 0 J inside its grace', async () => {
-    const w = await make({ seed: 8, player: false });
-    const g = addFakeRuler(w);
-    const id = stake(w, 2, 0);
-    const body = w.physics.rapier.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(-3, 0.6, 0));
-    const col = rulerCollider(
-      w,
-      g,
-      'chest',
-      body,
-      RAPIER.ColliderDesc.cuboid(0.5, 0.5, 0.5).setMass(2865).setCollisionGroups(collisionGroups('RULER_SOLID')).setSolverGroups(solverGroups('RULER_SOLID')),
-    );
-    g.setState('tripped');
-    run(w, 30);
-    // The get-up switch: kinematic, sensors, posed over the stake, history reset and a grace (as RulerBodies does).
-    body.setBodyType(RAPIER.RigidBodyType.KinematicPositionBased, true);
-    col.setSensor(true);
-    col.setActiveCollisionTypes(RAPIER.ActiveCollisionTypes.ALL);
-    col.setCollisionGroups(collisionGroups('RULER_ZONE'));
-    col.setSolverGroups(solverGroups('RULER_ZONE'));
-    body.setTranslation({ x: 2.3, y: 1.4, z: 0 }, true);
-    w.physics.resetHistory(ownerKey({ kind: 'fighter', id: g.id, part: 'ruler', bone: 'chest' }));
-    w.contacts.grace(g.id, w.tick + 1 + DAMAGE_TUNING.zoneGraceTicks);
-    g.setState('idle');
-    const ev = run(w, 10);
-    expect(w.contacts.touching(ent(id), { kind: 'fighter', id: g.id, part: 'ruler' })).toBeGreaterThan(0);
-    expect(impactsOn(ev, g)).toHaveLength(0);
-    expect(ruler.rulerDamage).not.toHaveBeenCalled();
+  it('a body switched to sensors over a stake (the ruler’s get-up) scores 0 J inside its grace, even from a stale history; without the grace the stale jump scores', async () => {
+    for (const [reset, grace] of [
+      [true, true],
+      [false, true],
+      [false, false],
+    ] as const) {
+      const label = `${reset ? 'history reset' : 'stale history'}, ${grace ? 'grace' : 'no grace'}`;
+      vi.mocked(ruler.rulerDamage).mockClear();
+      const w = await make({ seed: 8, player: false });
+      const g = addFakeRuler(w);
+      const id = stake(w, 2, 0);
+      const body = w.physics.rapier.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(-3, 0.6, 0));
+      const col = rulerCollider(
+        w,
+        g,
+        'chest',
+        body,
+        RAPIER.ColliderDesc.cuboid(0.5, 0.5, 0.5).setMass(2865).setCollisionGroups(collisionGroups('RULER_SOLID')).setSolverGroups(solverGroups('RULER_SOLID')),
+      );
+      g.setState('tripped');
+      run(w, 30);
+      // The get-up switch: kinematic, sensors, posed over the stake in phase 4 (setNextKinematic, as RulerBodies poses
+      // it), history reset and a grace. The pair starts at the step after the one that moved it there; without the
+      // reset, that tick's store still holds the tripped pose as the previous one and reads the 5.3 m jump as one tick's
+      // motion (≈ 320 m/s, RF-1's stale history), so only the grace stands between the switch and a huge score.
+      body.setBodyType(RAPIER.RigidBodyType.KinematicPositionBased, true);
+      col.setSensor(true);
+      col.setActiveCollisionTypes(RAPIER.ActiveCollisionTypes.ALL);
+      col.setCollisionGroups(collisionGroups('RULER_ZONE'));
+      col.setSolverGroups(solverGroups('RULER_ZONE'));
+      body.setNextKinematicTranslation({ x: 2.3, y: 1.4, z: 0 });
+      if (reset) w.physics.resetHistory(ownerKey({ kind: 'fighter', id: g.id, part: 'ruler', bone: 'chest' }));
+      if (grace) w.contacts.grace(g.id, w.tick + 1 + DAMAGE_TUNING.zoneGraceTicks);
+      g.setState('idle');
+      const g0 = w.contacts.unscored.grace;
+      const ev = run(w, 10);
+      expect(w.contacts.touching(ent(id), { kind: 'fighter', id: g.id, part: 'ruler' }), label).toBeGreaterThan(0);
+      if (grace) {
+        expect(impactsOn(ev, g), label).toHaveLength(0);
+        expect(ruler.rulerDamage, label).not.toHaveBeenCalled();
+        expect(w.contacts.unscored.grace, label).toBeGreaterThan(g0);
+      } else {
+        // The control: the same switch outside a grace is scored, from the stale jump's speed.
+        const hits = impactsOn(ev, g).filter((e) => e.cause.entityId === id);
+        expect(hits, label).toHaveLength(1);
+        expect(hits[0].energy, label).toBeGreaterThan(1e6);
+        expect(ruler.rulerDamage, label).toHaveBeenCalledTimes(1);
+        expect(w.contacts.unscored.grace, label).toBe(g0);
+      }
+    }
   });
 });
 
@@ -685,17 +733,64 @@ describe('the impact trip (§4.7 step 9, SPEC:305)', () => {
       const e = w.entities.get(id)!;
       expect(e.mass).toBeCloseTo(mass, 6);
       const trip = vi.spyOn(w.rulers, 'requestTrip');
+      const queue = vi.spyOn(w.entities, 'queueImpulse');
       const ev = run(w, 40, () => {
         e.body!.setLinvel({ x: v, y: 0, z: 0 }, true);
       });
-      // The block met the shin (an impact on the ruler, or at least an episode).
-      expect(impactsOn(ev, g).length + w.contacts.touching(ent(id), { kind: 'fighter', id: g.id, part: 'ruler' }), `${mass} kg at ${v} m/s`).toBeGreaterThan(0);
+      // The block met the shin and was scored on the ruler; a standing ruler takes no Δv from it (its only momentum
+      // exchange is the mover's shove and this trip check, RF-4), so the block gets no reaction either.
+      const hits = impactsOn(ev, g).filter((x) => x.cause.entityId === id);
+      expect(hits.length, `${mass} kg at ${v} m/s`).toBeGreaterThan(0);
+      for (const h of hits) expect(h.dv, `${mass} kg at ${v} m/s`).toEqual({ x: 0, y: 0, z: 0 });
+      expect(queue.mock.calls.filter((c) => c[0] === id), `${mass} kg at ${v} m/s`).toHaveLength(0);
       if (trips) {
         expect(trip).toHaveBeenCalledTimes(1);
         expect(trip.mock.calls[0][0]).toBe(g);
         expect(trip.mock.calls[0][1]).toBe('impact');
         expect(trip.mock.calls[0][2]).toMatchObject({ kind: 'entity', entityId: id });
       } else expect(trip, `${mass} kg at ${v} m/s`).not.toHaveBeenCalled();
+    }
+  });
+
+  it('a static impactor trips too (the "or anchored" of step 9): a sharp anchored stake met by the shin at 6 m/s; the same stake blunt is a brush, left to the mover’s obstacle trip', async () => {
+    for (const sharp of [true, false]) {
+      const w = await make({ seed: 19, player: false });
+      const g = addFakeRuler(w);
+      const knee = g.rig.shinL.pos.y;
+      const y = knee - 0.8;
+      // An anchored horizontal stake, its point at x = 0 aimed at the shin coming from −x.
+      const id = w.addEntity({
+        material: 'dryWood',
+        shape: { kind: 'box', hx: 0.4, hy: 0.04, hz: 0.04 },
+        p: { x: 0.4, y, z: 0 },
+        state: 'anchored',
+        sharpPoints: sharp ? [{ local: { x: -0.4, y: 0, z: 0 }, dir: { x: -1, y: 0, z: 0 }, sharpness: 0.6 }] : [],
+        look: 'stake',
+      });
+      expect(w.entities.isAnchored(w.entities.get(id)!)).toBe(true);
+      // The standing ruler's shin walking into it at 0.1 m a tick (6 m/s > tripSpeed): its own motion.
+      let x = -1.5;
+      const body = w.physics.rapier.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(x, y, 0));
+      rulerCollider(w, g, 'shinL', body, sensorDesc(RAPIER.ColliderDesc.ball(0.25)));
+      const trip = vi.spyOn(w.rulers, 'requestTrip');
+      const brush0 = w.contacts.unscored.brush;
+      const ev = run(w, 30, () => {
+        x += 0.1;
+        body.setNextKinematicTranslation({ x, y, z: 0 });
+      });
+      const hits = impactsOn(ev, g).filter((e) => e.cause.entityId === id);
+      if (sharp) {
+        expect(hits).toHaveLength(1);
+        expect(hits[0].cause.feature).toBe('sharpPoint');
+        expect(hits[0].dv).toEqual({ x: 0, y: 0, z: 0 });
+        expect(trip).toHaveBeenCalledTimes(1);
+        expect(trip.mock.calls[0][1]).toBe('impact');
+        expect(trip.mock.calls[0][2]).toMatchObject({ kind: 'entity', entityId: id });
+      } else {
+        expect(hits).toHaveLength(0);
+        expect(w.contacts.unscored.brush).toBeGreaterThan(brush0);
+        expect(trip).not.toHaveBeenCalled();
+      }
     }
   });
 });
@@ -808,11 +903,115 @@ describe('released and thrown entities', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Rope sensors and the tripwire sink (phase 9d, §4.9)
+// ---------------------------------------------------------------------------
+
+describe('rope sensors and the tripwire sink (phase 9d)', () => {
+  /** A rope sensor (a parentless capsule along x at height y, as JointStore makes them) registered as joint `joint`. */
+  function ropeSensor(w: World, joint: number, y: number, z = 0): RAPIER.Collider {
+    const c = w.physics.rapier.createCollider(
+      RAPIER.ColliderDesc.capsule(1.5, 0.02)
+        .setRotation({ x: 0, y: 0, z: -Math.SQRT1_2, w: Math.SQRT1_2 })
+        .setTranslation(0, y, z)
+        .setSensor(true)
+        .setActiveCollisionTypes(RAPIER.ActiveCollisionTypes.ALL)
+        .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS)
+        .setCollisionGroups(collisionGroups('ROPE'))
+        .setSolverGroups(solverGroups('ROPE')),
+    );
+    w.physics.register(c, { kind: 'rope', joint });
+    return c;
+  }
+
+  it('JointStore.tripwire(w, joint, by) once per new episode with a crossing dynamic entity; a bounce inside the cooldown doesn’t call it', async () => {
+    const w = await make({ seed: 22, player: false });
+    WORLD_TUNING.gravityY = 0;
+    ropeSensor(w, 5, 1);
+    const calls: [World, number, Owner][] = [];
+    const sink = w.joints as unknown as TripwireSink;
+    sink.tripwire = (ww, joint, by) => void calls.push([ww, joint, by]);
+    const id = spawnLog(w, { p: { x: 0.3, y: 1.6, z: 0 }, q: { x: Math.SQRT1_2, y: 0, z: 0, w: Math.SQRT1_2 }, length: 1.2, mass: 20 });
+    const e = w.entities.get(id)!;
+    const touching = () => w.contacts.touching(ent(id), { kind: 'rope', joint: 5 });
+    // Down through the rope, straight back up through it (a bounce), then away and down through it again.
+    let phase: 'down' | 'up' | 'away' | 'again' = 'down';
+    let leftAt = -1;
+    let backAt = -1;
+    let crossed = 0;
+    let met = false;
+    const b0 = w.contacts.unscored.bounce;
+    for (let t = 0; t < 200 && crossed < 3; t++) {
+      e.body!.setLinvel({ x: 0, y: phase === 'down' || phase === 'again' ? -4 : 4, z: 0 }, true);
+      w.step();
+      const n = touching();
+      if (n > 0) met = true;
+      if (phase === 'down' && met && n === 0) {
+        phase = 'up';
+        leftAt = w.tick;
+        crossed++;
+      } else if (phase === 'up' && n > 0 && backAt < 0) backAt = w.tick;
+      else if (phase === 'up' && backAt > 0 && n === 0 && e.pose.p.y > 1.6) {
+        phase = 'away';
+        crossed++;
+      } else if (phase === 'away' && e.pose.p.y > 2.4) phase = 'again';
+      else if (phase === 'again' && e.pose.p.y < 0.6) crossed++;
+    }
+    expect(crossed).toBe(3);
+    expect(backAt).toBeGreaterThan(leftAt);
+    expect(backAt - leftAt).toBeLessThanOrEqual(DAMAGE_TUNING.impactCooldownTicks);
+    expect(w.contacts.unscored.bounce).toBeGreaterThan(b0);
+    expect(calls).toHaveLength(2);
+    for (const [ww, joint, by] of calls) {
+      expect(ww).toBe(w);
+      expect(joint).toBe(5);
+      expect(by).toEqual({ kind: 'entity', id });
+    }
+  });
+
+  it('a creature crossing inside its contact grace doesn’t trip it, outside it does; a joint store without the method fails loudly', async () => {
+    const w = await make({ seed: 23 });
+    const p = w.player!;
+    run(w, 5);
+    const calls: Owner[] = [];
+    const sink = w.joints as unknown as TripwireSink;
+    sink.tripwire = (_w, _joint, by) => void calls.push(by);
+    ropeSensor(w, 7, 0.3, 4);
+    // Teleported onto the rope: its zones start against it inside the teleport's grace.
+    const g0 = w.contacts.unscored.grace;
+    w.teleport(p, 0, 4, 0);
+    run(w, 5);
+    expect(w.contacts.touching(zoneOf(p), { kind: 'rope', joint: 7 })).toBeGreaterThan(0);
+    expect(w.contacts.unscored.grace).toBeGreaterThan(g0);
+    expect(calls).toHaveLength(0);
+    // Away, then walking back across it: a new episode outside the grace.
+    w.teleport(p, 0, 1, 0);
+    run(w, 20);
+    expect(w.contacts.touching(zoneOf(p), { kind: 'rope', joint: 7 })).toBe(0);
+    for (let t = 0; t < 90 && calls.length === 0; t++) {
+      w.commands.push(moveCommand(w.tick + 1, 1, 0, 1));
+      w.step();
+    }
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ kind: 'fighter', id: p.id, part: 'zone' });
+    // Without the method the first crossing throws instead of silently never tripping.
+    Object.defineProperty(w.joints, 'tripwire', { value: undefined, configurable: true });
+    w.teleport(p, 0, 1, 0);
+    run(w, 20);
+    expect(() => {
+      for (let t = 0; t < 90; t++) {
+        w.commands.push(moveCommand(w.tick + 1, 1, 0, 1));
+        w.step();
+      }
+    }).toThrow(TypeError);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // The save record (RR-19)
 // ---------------------------------------------------------------------------
 
 describe('ContactSystem records', () => {
-  it('round-trip the touching counts, episode marks and graces, and a restored system scores the same next ticks', async () => {
+  it('round-trip the touching counts, episode marks and graces (sorted, plain JSON); a bad owner key throws', async () => {
     const w = await make({ seed: 16 });
     const p = w.player!;
     const a = addApe(w, 4, 0);
@@ -835,7 +1034,70 @@ describe('ContactSystem records', () => {
     expect(w.contacts.graceRecord()).toEqual(grace);
     expect(w.contacts.inGrace(a.id, w.tick + 6)).toBe(true);
     expect(w.contacts.inGrace(a.id, w.tick + 7)).toBe(false);
-    run(w, 20);
     expect(() => w.contacts.restoreRecord([{ creature: 1, owner: 'nonsense:x', touching: 1, episodeStart: 1, cooldownUntil: -1 }])).toThrow(/bad owner key/);
+  });
+
+  it('a world rebuilt from the records (P13’s load) goes on as the saved one: the re-raised starts rebuild the counts, score nothing, and a restored episode still ends and starts again', async () => {
+    const opts = { seed: 21, player: false } as const;
+    // The saved world: log L1 at rest on the terrain, L2 at rest across it, L3 still falling at the save.
+    const a = await make(opts);
+    const l1 = spawnLog(a, { p: { x: 0, y: 0.5, z: 0 }, length: 2.4, mass: 60 });
+    const l2 = spawnLog(a, { p: { x: 0, y: 1.2, z: 0 }, q: { x: Math.SQRT1_2, y: 0, z: 0, w: Math.SQRT1_2 }, length: 2.4, mass: 40 });
+    run(a, 120);
+    const l3 = spawnLog(a, { p: { x: 5, y: 2.5, z: 0 }, length: 2, mass: 40 });
+    run(a, 3);
+    const rec = a.contacts.toRecord();
+    expect(rec.find((r) => r.creature === -l1 && r.owner === 'terrain')?.touching).toBeGreaterThan(0);
+    expect(rec.find((r) => r.creature === -l1 && r.owner === `entity:${l2}`)?.touching).toBeGreaterThan(0);
+    expect(rec.find((r) => r.creature === -l3)).toBeUndefined(); // L3 hasn't landed
+    // The rebuilt world: fresh Rapier bodies from the entity records (an empty narrow phase), then the contact records.
+    const b = await make(opts);
+    b.combat.frame = a.tick;
+    b.entities.restoreRecord(JSON.parse(JSON.stringify(a.entities.toRecord())), []);
+    b.contacts.restoreRecord(JSON.parse(JSON.stringify(rec)));
+    expect(b.contacts.toRecord()).toEqual(rec);
+    const lands = (w: World) =>
+      w.events.filter((e): e is Extract<WorldEvent, { type: 'land' }> => e.type === 'land').map((e) => ({ tick: w.tick, entity: e.entity, energy: e.energy }));
+    const counts = (w: World) => w.contacts.toRecord().map((r) => [r.creature, r.owner, r.touching]);
+    const onGround = (w: World) => w.contacts.touching(ent(l1), { kind: 'terrain' });
+    const evA: { tick: number; entity: number | null; energy: number }[] = [];
+    const evB: typeof evA = [];
+    const cont0 = b.contacts.unscored.continuing;
+    const left = { a: false, b: false };
+    let liftTick = -1;
+    for (let t = 0; t < 120; t++) {
+      // 40 ticks after the load L1 is thrown up off the terrain: its restored episode with the terrain ends, and its
+      // landing is a new one, in both worlds.
+      if (t === 40) {
+        liftTick = a.tick + 1;
+        for (const w of [a, b]) w.entities.get(l1)!.body!.setLinvel({ x: 0, y: 4, z: 1.5 }, true);
+      }
+      a.step();
+      b.step();
+      evA.push(...lands(a));
+      evB.push(...lands(b));
+      if (t === 0) {
+        expect(b.contacts.unscored.continuing).toBeGreaterThan(cont0); // the re-raised starts, going on
+        expect(lands(b)).toHaveLength(0);
+      }
+      // Until the throw, the counts are the saved world's from the first step on (not the saved count plus every
+      // re-raised start), through L3's landing. (After it the two drift apart: a rebuilt world matches the saved one
+      // within SPEC:730's 1 cm, not bit for bit.)
+      if (t < 40) expect(counts(b), `tick ${b.tick}`).toEqual(counts(a));
+      if (t > 40 && onGround(a) === 0) left.a = true;
+      if (t > 40 && onGround(b) === 0) left.b = true;
+    }
+    expect(left).toEqual({ a: true, b: true });
+    // L3's first landing (after the load) scores the same in both, and so does L1's new one; nothing re-raised scored.
+    const l3A = evA.filter((e) => e.entity === l3);
+    const l3B = evB.filter((e) => e.entity === l3);
+    expect(l3A).toHaveLength(1);
+    expect(l3B.map((e) => e.tick)).toEqual(l3A.map((e) => e.tick));
+    expect(l3B[0].energy).toBeCloseTo(l3A[0].energy, 6);
+    const l1A = evA.filter((e) => e.entity === l1);
+    const l1B = evB.filter((e) => e.entity === l1);
+    expect(l1A.length).toBeGreaterThan(0);
+    expect(l1A[0].tick).toBeGreaterThan(liftTick);
+    expect(l1B[0]?.tick).toBe(l1A[0].tick);
   });
 });
