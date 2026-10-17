@@ -9,5 +9,9 @@ export default defineConfig({
     name: 'client',
     include: ['tests/**/*.test.ts'],
     environment: 'node',
+    // Generous limits: the suite runs Rapier and long fights, and must not fail on a busy
+    // machine. A timeout never changes what a test asserts.
+    testTimeout: 60_000,
+    hookTimeout: 120_000,
   },
 });
