@@ -379,8 +379,8 @@ export function tetherTo(proposal: Vector3, to: V3, maxH: number): void {
  * controller holds now (the pose the rig was made at) is carried onto the proposal, and the hand kept within
  * √(L² − dy²) horizontally of the far anchor. Hauling (the pull verb on, §5.12) the tether is one-sided: the hauler
  * stands braced, as the design's haul lab holds the hand still while the load swings [I-rev ran: swing_light.ts], so it
- * never draws him toward the anchor; with the hand beyond √(L² − dy²) it only stops a step that would take him farther
- * from the anchor than he stands now. (Two-sided, with the free length shortened to the hand's distance every taut
+ * never draws him toward the anchor; it only stops a step that would take him farther from the anchor than max(his
+ * horizontal distance now, the distance at which his hand is √(L² − dy²) from it). (Two-sided, with the free length shortened to the hand's distance every taut
  * tick, a hauler was drawn 2.9 m to a post he pulled on in 5 s, and 2.9-4.1 m toward a swinging log in 8 s: P16
  * review.) Only holding, he is drawn along when the rope's far end goes beyond its free length (§4.9: the hand only
  * holds).
@@ -413,13 +413,21 @@ export function tetherHands(w: World, f: Fighter, proposal: Vector3): void {
   const d = Math.hypot(hx, hz);
   if (!(d > maxH)) return;
   if (w.verbs.continuousOf(f)?.verb === 'pull') {
-    // Hauling, beyond reach: the body may come no farther from the anchor than it is now (measured at the body, so the
-    // arm's swing can't walk him outward), and is never drawn in.
-    const nx = now.x - a.x;
-    const nz = now.z - a.z;
+    // Hauling, the proposal's hand beyond reach: he may go as far out as max(where he stands now, where his hand meets
+    // √(L² − dy²)) and no farther, and is never drawn in. His distance now is the body's, not the hand's: measured at
+    // the hand, a walk cycle's arm swing ratchets him outward (each swing out raises the limit, each swing back lets the
+    // body step into it: 0.5 m in 5 s of backing off).
+    const k = maxH / d;
+    const cx = a.x + hx * k - ox;
+    const cz = a.z + hz * k - oz;
+    const dNow = Math.hypot(now.x - a.x, now.z - a.z);
+    if (Math.hypot(cx - a.x, cz - a.z) >= dNow) {
+      proposal.x = cx;
+      proposal.z = cz;
+      return;
+    }
     const px = proposal.x - a.x;
     const pz = proposal.z - a.z;
-    const dNow = Math.hypot(nx, nz);
     const dProp = Math.hypot(px, pz);
     if (!(dProp > dNow)) return;
     proposal.x = a.x + (px * dNow) / dProp;

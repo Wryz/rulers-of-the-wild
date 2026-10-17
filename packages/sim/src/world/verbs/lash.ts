@@ -17,7 +17,8 @@
 //   nearest `at` and `at2`. Snap assist first (see snapOnto): a light head aimed at a stick's end is moved flush onto it,
 //   and the anchors become that end's centre and the head's point nearest it. Anchors within lashTouchM → a fixed lashing
 //   (joints.lash); otherwise a taut rope joint of the anchor distance (joints.rope). One side may be what the hands hold
-//   (a flint lashed onto the stick in hand, rule 3): only by a lashing, and the other side then joins the held object.
+//   (a flint lashed onto the stick in hand, rule 3): only a light head, snapped onto the held side's end away from the
+//   hand, and it then joins the held object (planLash's DEVIATION).
 // - tie { target, at }: with a coil, a rope joint from the target anchor to the hand (the end held, length = the
 //   coil's), paid out as the player walks (the tether); with a rope end in hand, joints.tieHeldEnd at the distance of
 //   the tick the tie lands (a hauled end keeps its haul through the work action: pull.ts goes on setting it, §4.9).
@@ -262,15 +263,9 @@ export function surfacePoint(w: World, e: Entity, p: V3): V3 {
   const t = c.translation();
   const r = c.rotation();
   const cp: Pose3 = { p: { x: t.x, y: t.y, z: t.z }, q: { x: r.x, y: r.y, z: r.z, w: r.w } };
-  const proj = c.projectPoint(pointToWorld(cp, pointToLocal(e.pose, p)), false);
-  if (!proj) return copy3(p);
-  const q = proj.point;
-  return pointToWorld(e.pose, pointToLocal(cp, { x: q.x, y: q.y, z: q.z }));
-}
-
-/** A world point aimed at an entity, as an anchor in its frame on its surface (§5.0: the anchor is on the entity). */
-export function anchorOn(w: World, e: Entity, p: V3): Anchor {
-  return { entity: e.id, local: pointToLocal(e.pose, surfacePoint(w, e, p)) };
+  const proj = w.queries.projectPoint(e.id, pointToWorld(cp, pointToLocal(e.pose, p)));
+  if (!Number.isFinite(proj.dist)) return copy3(p);
+  return pointToWorld(e.pose, pointToLocal(cp, proj.point));
 }
 
 // ---------------------------------------------------------------------------
@@ -305,7 +300,7 @@ interface SplicePlan {
 
 /** A rope's point to reach for: the command's point, else its point nearest the chest. */
 function ropePoint(w: World, f: Fighter, e: Entity, at: readonly [number, number, number] | undefined): V3 {
-  if (at) return cmdPoint(at);
+  if (at) return surfacePoint(w, e, cmdPoint(at));
   if (e.state === 'tied') return ropeNearest(w, e.id, chestPoint(f))?.point ?? copy3(e.pose.p);
   return e.collider ? w.queries.projectPoint(e.id, chestPoint(f)).point : copy3(e.pose.p);
 }
@@ -415,17 +410,27 @@ type LashPlan =
  * a stick end to end; "flush" centres S across a lying partner's axis but keeps its height (a flint lying by a stick on
  * the ground stays on the ground beside its end, as the starter axe's does) and centres it fully on an upright one; a
  * move that would put S (shrunk by placeShrinkM) into the terrain or any other entity is no snap.
+ *
+ * `inHand` (P is what the hands hold, planLash): S goes onto that end of P whatever the distance and the end's direction
+ * (the player brings the head to the stick in his hands), flush and centred fully across the axis, with the same room
+ * test.
  */
-function snapOnto(w: World, S: Entity, P: Entity): { pose: Pose3; onP: Anchor; onS: Anchor } | null {
+function snapOnto(w: World, S: Entity, P: Entity, inHand?: 1 | -1): { pose: Pose3; onP: Anchor; onS: Anchor } | null {
   const t = VERB_TUNING;
   if (!(S.mass <= t.lashSnapMaxKg + GEOM_EPS) || S.state !== 'free' || !S.body?.isEnabled() || !S.body.isDynamic() || w.entities.isAnchored(S)) return null;
   if (!S.collider || S.joints.length > 0 || !isElongated(P) || isElongated(S)) return null;
   let best: { E: V3; n: V3; end: 1 | -1; d: number } | null = null;
   const ax = principalAxis(P.shape);
   for (const end of [1, -1] as const) {
+    if (inHand !== undefined && end !== inHand) continue;
     const n = unit(rotate(P.pose.q, scale(ax.dir, end)));
-    if (n.y < ROPE_TUNING.snapEndMinY) continue;
     const E = pointToWorld(P.pose, endCentre(P.shape, end));
+    if (inHand !== undefined) {
+      // P in the hands: the player brings S to its end himself, wherever S lies in reach and however the end points.
+      best = { E, n, end, d: 0 };
+      continue;
+    }
+    if (n.y < ROPE_TUNING.snapEndMinY) continue;
     const d = len(sub(surfacePoint(w, S, E), E));
     if (d <= t.lashSnapM && (!best || d < best.d)) best = { E, n, end, d };
   }
@@ -439,7 +444,8 @@ function snapOnto(w: World, S: Entity, P: Entity): { pose: Pose3; onP: Anchor; o
   const off = sub(S.pose.p, E);
   const lateral = sub(off, scale(n, dot(off, n)));
   const upAcross = sub(UP, scale(n, n.y));
-  const across = sub(lateral, scale(upAcross, dot(lateral, upAcross)));
+  // (In the hands nothing holds the head's height: centred fully.)
+  const across = inHand !== undefined ? lateral : sub(lateral, scale(upAcross, dot(lateral, upAcross)));
   const delta = sub(scale(n, -nearest), across);
   const pose: Pose3 = { p: add(S.pose.p, delta), q: { ...S.pose.q } };
   // Room for it there (as place.ts's clearance): nothing but S itself, the ground included.
@@ -480,8 +486,13 @@ function joinsTheHands(w: World, f: Fighter, other: Entity, held: readonly numbe
  * probe (no second target yet) found nothing against it.
  *
  * DEVIATION (P16 review, rule 3; §5.8 doesn't forbid it): one side may be what the hands hold (a flint lashed onto the
- * stick in hand). It is lashed only, never roped (a rope's Rapier joint to a held body would hang from where that body
- * was picked up: refused 'handsFull'), and the other side joins the held object (joinsTheHands).
+ * stick in hand), and the other side joins the held object (joinsTheHands). It is lashed only, never roped (a rope's
+ * Rapier joint to a held body would hang from where that body was picked up), and only a light head the snap assist can
+ * move (the free side ≤ lashSnapMaxKg, not elongated) onto the held side's end away from the hand; anything else is
+ * refused 'handsFull'. Why not by aim, as on the ground: the held object follows the hand, and the work action's pose
+ * (workLow) carries it 0.7 m down and forward between the command and the land, so a plan made from the aimed points at
+ * the command could never be the plan at the land (RF-15); the head's placement relative to the held end is the same at
+ * both.
  */
 function planLash(w: World, f: Fighter, cmd: VerbCommand, stage: VerbStage): LashPlan | RefuseReason | null {
   if (!f.inventory) return 'cantAct';
@@ -513,14 +524,15 @@ function planLash(w: World, f: Fighter, cmd: VerbCommand, stage: VerbStage): Las
   if (!cmd.at || !cmd.at2) return 'badAnchor';
   const src = ropeSource(w, f);
   if (!src) return 'noRope';
-  const pa = cmdPoint(cmd.at);
-  const pb = cmdPoint(cmd.at2);
+  // The anchors: the aimed points projected onto the two surfaces (§5.0: an anchor is on its entity).
+  const pa = surfacePoint(w, A, cmdPoint(cmd.at));
+  const pb = surfacePoint(w, B!, cmdPoint(cmd.at2));
   const faceAt = scale(add(pa, pb), 0.5);
   if (!inWorkReach(f, [pa, pb], faceAt, stage)) return 'outOfReach';
   // Snap assist, when the player aimed the two points together: the second onto the target first, else the target onto
   // the second.
   let snap: Snap | null = null;
-  if (dist(pa, pb) <= VERB_TUNING.lashSnapM + GEOM_EPS) {
+  if (!aHeld && !bHeld && dist(cmdPoint(cmd.at), cmdPoint(cmd.at2)) <= VERB_TUNING.lashSnapM + GEOM_EPS) {
     const sb = snapOnto(w, B!, A);
     if (sb) snap = { moved: B!.id, pose: sb.pose, a: sb.onP, b: sb.onS };
     else {
@@ -528,14 +540,25 @@ function planLash(w: World, f: Fighter, cmd: VerbCommand, stage: VerbStage): Las
       if (sa) snap = { moved: A.id, pose: sa.pose, a: sa.onS, b: sa.onP };
     }
   }
-  const a = snap ? snap.a : anchorOn(w, A, pa);
-  const b = snap ? snap.b : anchorOn(w, B!, pb);
+  const held = aHeld ? 'a' : bHeld ? 'b' : null;
+  if (held) {
+    // A head lashed onto what the hands hold: snapped onto the held side's end away from the hand (see the DEVIATION).
+    const P = held === 'a' ? A : B!;
+    const O = held === 'a' ? B! : A;
+    const ax = principalAxis(P.shape);
+    const hand = handPoint(f);
+    const far = (end: 1 | -1): number => dist(pointToWorld(P.pose, endCentre(P.shape, end)), hand);
+    const s = isElongated(P) ? snapOnto(w, O, P, far(1) >= far(-1) || ax.max === ax.min ? 1 : -1) : null;
+    if (!s) return 'handsFull';
+    snap = held === 'a' ? { moved: O.id, pose: s.pose, a: s.onP, b: s.onS } : { moved: O.id, pose: s.pose, a: s.onS, b: s.onP };
+  }
+  const a = snap ? snap.a : { entity: A.id, local: pointToLocal(A.pose, pa) };
+  const b = snap ? snap.b : { entity: B!.id, local: pointToLocal(B!.pose, pb) };
   const poseOf = (e: Entity): Pose3 => (snap && snap.moved === e.id ? snap.pose : e.pose);
   const wa = pointToWorld(poseOf(A), a.local);
   const wb = pointToWorld(poseOf(B!), b.local);
   const d = dist(wa, wb);
   const touching = d <= VERB_TUNING.lashTouchM + GEOM_EPS;
-  const held = aHeld ? 'a' : bHeld ? 'b' : null;
   if (held) {
     if (!touching) return 'handsFull';
     const r = joinsTheHands(w, f, held === 'a' ? B! : A, hands);
@@ -640,9 +663,10 @@ function planTie(w: World, f: Fighter, cmd: VerbCommand, stage: VerbStage): TieP
   }
   if (ownedBy(w, f, T.id)) return 'handsFull';
   if (!cmd.at) return stage === 'probe' ? null : 'badAnchor';
-  const at = cmdPoint(cmd.at);
+  // The anchor: the aimed point projected onto the target's surface (§5.0).
+  const at = surfacePoint(w, T, cmdPoint(cmd.at));
   if (!inWorkReach(f, [at], at, stage)) return 'outOfReach';
-  const anchor = anchorOn(w, T, at);
+  const anchor: Anchor = { entity: T.id, local: pointToLocal(T.pose, at) };
   if (held) {
     // Tied at the distance the tie lands at (§4.9): the rope must reach from its other end to the anchor.
     const other = held.end === 'a' ? held.joint.b : held.joint.a;

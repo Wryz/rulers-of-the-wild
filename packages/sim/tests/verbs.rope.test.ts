@@ -20,7 +20,7 @@ import { MATERIALS } from '../src/world/materials';
 import { physicsReady } from '../src/world/physics';
 import { principalAxis, shapeVolume } from '../src/world/shapes';
 import type { Entity, JointRecord, Quat, V3, WorldEvent } from '../src/world/types';
-import { ROPE_TUNING } from '../src/world/verbs/lash';
+import { ROPE_TUNING, shapeVerts } from '../src/world/verbs/lash';
 import { pullForce } from '../src/world/verbs/pull';
 import { chestPoint, handPoint, verbsFor } from '../src/world/verbs/targets';
 import { toolClass, verbGeom } from '../src/world/verbs/tools';
@@ -220,6 +220,43 @@ describe('lash (§5.8): a fixed lashing or a taut rope, cut from the coil', () =
     expect(ent(w, coil).mass).toBeCloseTo((m0 * (5 - piece.rope!.lengthM)) / 5, 6);
   });
 
+  it('anchors are projected onto the surfaces: a lash aimed 10 cm short of two faces 1 m apart is still a 1.00 m rope, and a tie aimed off a stake is knotted on it', async () => {
+    const w = await make();
+    holdCoil(w, 8);
+    const [a, b] = facingSticks(w);
+    const post = stake(w, 0.9, 0.3);
+    run(w, 2);
+    const onSurface = (e: number, local: V3): number => w.queries.projectPoint(e, verbGeom.pointToWorld(ent(w, e).pose, local)).dist;
+    const firstJoint = w.ids.joint.next;
+    verb(w, { verb: 'lash', target: a, second: b, at: toCm({ x: -0.4, y: 0.03, z: 1.1 }), at2: toCm({ x: 0.4, y: 0.03, z: 1.1 }) });
+    expect(verbs(untilFree(w), 'lash')[0]).toMatchObject({ ok: true });
+    const [j] = newJoints(w, firstJoint);
+    expect(j.kind).toBe('rope');
+    expect(j.rope!.lengthM).toBeCloseTo(1.0, 3);
+    expect(onSurface(a, j.a.local)).toBeLessThan(1e-3);
+    expect(onSurface(b, j.b.local)).toBeLessThan(1e-3);
+    // A tie aimed 12 cm in front of the stake's face: knotted on the face, not in the air.
+    verb(w, { verb: 'tie', target: post, at: toCm({ x: 0.9, y: 0.5, z: 0.3 - 0.05 - 0.12 }) });
+    expect(verbs(untilFree(w), 'tie')[0]).toMatchObject({ ok: true, entity: post });
+    const t = heldJoint(w)!;
+    const tied = t.a.entity === post ? t.a : t.b;
+    expect(onSurface(post, tied.local)).toBeLessThan(1e-3);
+    expect(Math.hypot(tied.local.x, tied.local.z)).toBeGreaterThan(0.04);
+    // A bend's anchor aimed 15 cm off the stake's face is on the face too (bend.ts shares the projection).
+    const w2 = await make();
+    holdCoil(w2, 3);
+    const sap = spawnSapling(w2, { at: { x: 0, z: 2.5 }, diameter: 0.06, height: 2 });
+    const st = stake(w2, 0, 1.0);
+    run(w2, 2);
+    const first2 = w2.ids.joint.next;
+    verb(w2, { verb: 'bend', target: sap, second: st, at2: toCm({ x: 0, y: 0.6, z: 1.2 }) });
+    expect(verbs(untilFree(w2), 'bend')[0]).toMatchObject({ ok: true });
+    const hold = newJoints(w2, first2).find((x) => x.kind === 'rope')!;
+    expect(hold.b.entity).toBe(st);
+    expect(w2.queries.projectPoint(st, verbGeom.pointToWorld(ent(w2, st).pose, hold.b.local)).dist).toBeLessThan(1e-3);
+    expect(Math.hypot(hold.b.local.x, hold.b.local.z)).toBeGreaterThan(0.04);
+  });
+
   it('a coil with less than coilMinM left goes into the piece whole, out of the hands', async () => {
     const w = await make();
     const p = w.player!;
@@ -323,10 +360,82 @@ describe('snap assist (§5.8): a light head moved flush to a stick’s end', () 
       const off = verbGeom.sub(F.pose.p, E);
       const lateral = verbGeom.sub(off, verbGeom.scale(axis, verbGeom.dot(off, axis)));
       expect(Math.hypot(lateral.x, lateral.z), want).toBeLessThan(0.01);
+      // Flush: the flint's nearest point along the axis lies on the end plane (touching it, not short of it nor inside).
+      const along = shapeVerts(F.shape).map((v) => verbGeom.dot(verbGeom.sub(verbGeom.pointToWorld(F.pose, v), E), axis));
+      expect(Math.abs(Math.min(...along)), want).toBeLessThan(0.005);
       expect(dist(w.joints.anchorPoint(j.a)!, w.joints.anchorPoint(j.b)!), want).toBeLessThan(VERB_TUNING.lashTouchM);
       // No recipe: the held object's properties make it a tool.
       expect(toolClass(w, s), want).toBe(want);
       expect(toolClass(w, fl), want).toBe(want);
+    }
+  });
+
+  it('one side may be what the hands hold: a flint lying in reach is lashed flush onto the far end of the stick in hand and comes up into the hands', async () => {
+    const w = await make();
+    const p = w.player!;
+    // The coil on the belt (the hands are for the stick), then the stick in the hands; a flint on the ground in front.
+    holdCoil(w, 3);
+    verb(w, { verb: 'stow', target: 0, slot: 0 });
+    untilFree(w);
+    expect(p.inventory!.belt[0]).not.toBeNull();
+    const s = stick(w, 0.55, 0.02, 3, 3);
+    expect(w.verbs.putInHands(p, s)).toBe(true);
+    const fl = flint(w, 0.25, 0.9, Math.PI / 2);
+    run(w, 30);
+    const S0 = ent(w, s);
+    const ax = principalAxis(S0.shape);
+    const firstJoint = w.ids.joint.next;
+    verb(w, { verb: 'lash', target: s, second: fl, at: toCm(verbGeom.pointToWorld(S0.pose, verbGeom.scale(ax.dir, ax.max))), at2: toCm(ent(w, fl).pose.p) });
+    const ev = untilFree(w);
+    expect(verbs(ev, 'lash')[0]).toMatchObject({ ok: true, entity: s });
+    const [j] = newJoints(w, firstJoint);
+    expect(j.kind).toBe('lash');
+    expect([j.a.entity, j.b.entity]).toEqual([s, fl]);
+    // Up in the hands with the stick, flush on the stick's end away from the grip.
+    const F = ent(w, fl);
+    const S = ent(w, s);
+    expect(F.state).toBe('held');
+    const grip = p.inventory!.hands!.grip;
+    const farEnd = Math.abs(ax.max - grip.y) >= Math.abs(ax.min - grip.y) ? ax.max : ax.min;
+    expect(j.a.local.y).toBeCloseTo(farEnd, 6);
+    const axis = verbGeom.dirToWorld(S.pose, { x: 0, y: Math.sign(farEnd), z: 0 });
+    const E = verbGeom.pointToWorld(S.pose, { x: 0, y: farEnd, z: 0 });
+    const along = shapeVerts(F.shape).map((v) => verbGeom.dot(verbGeom.sub(verbGeom.pointToWorld(F.pose, v), E), axis));
+    expect(Math.abs(Math.min(...along))).toBeLessThan(0.005);
+    expect(dist(w.joints.anchorPoint(j.a)!, w.joints.anchorPoint(j.b)!)).toBeLessThan(VERB_TUNING.lashTouchM);
+    expect(p.inventory!.hands).toMatchObject({ entity: s, mode: toolClass(w, s) ? 'wield' : 'carry' });
+    // A second stick is not a head: lashing it to the one in hand is refused, and nothing changes.
+    const other = stick(w, 0.8, 0.02, 0.3, 0.9);
+    run(w, 2);
+    verb(w, { verb: 'lash', target: s, second: other, at: toCm(E), at2: toCm(ent(w, other).pose.p) });
+    expect(verbs(run(w, 1), 'lash')[0]).toMatchObject({ ok: false, reason: 'handsFull' });
+    expect(ent(w, other).joints).toEqual([]);
+  });
+
+  it('no snap off a prop’s foot: bait 0.3 m from it, the anchors aimed 0.45 m apart, is roped where it lies; aimed together at the foot, it still doesn’t move', async () => {
+    for (const [aimY, want] of [
+      [0.35, 'rope'],
+      [0.06, 'any'],
+    ] as const) {
+      const w = await make();
+      holdCoil(w, 5);
+      // A 1.2 m prop standing on its foot at (0, 0, 1.2), and the bait (a 0.6 kg flint) lying 0.3 m beyond its foot.
+      const prop = spawnLog(w, { p: { x: 0, y: 0.6, z: 1.2 }, q: UPRIGHT, length: 1.2, r: 0.03, state: 'fixed' });
+      const bait = flint(w, 0.33, 1.2, 0);
+      run(w, 30);
+      const before = { ...ent(w, bait).pose.p };
+      const at = { x: 0.03, y: aimY, z: 1.2 };
+      const at2 = ent(w, bait).pose.p;
+      if (want === 'rope') expect(dist(at, at2)).toBeGreaterThan(VERB_TUNING.lashSnapM);
+      else expect(dist(at, at2)).toBeLessThanOrEqual(VERB_TUNING.lashSnapM);
+      const firstJoint = w.ids.joint.next;
+      verb(w, { verb: 'lash', target: prop, second: bait, at: toCm(at), at2: toCm(at2) });
+      const ev = untilFree(w);
+      expect(verbs(ev, 'lash')[0], `aim ${aimY}`).toMatchObject({ ok: true });
+      const [j] = newJoints(w, firstJoint);
+      if (want === 'rope') expect(j.kind).toBe('rope');
+      // The bait was never moved onto the prop: it lies where it lay.
+      expect(dist(ent(w, bait).pose.p, before), `aim ${aimY}`).toBeLessThan(0.005);
     }
   });
 });
@@ -532,6 +641,8 @@ describe('bend (§5.9): a sapling pulled over and held by a short rope', () => {
       const [bend, hold] = made;
       expect(hold.holdsBend).toBe(bend.id);
       expect([hold.a.entity, hold.b.entity]).toEqual([sap, anchor]);
+      // The anchor (aimed at the stake's face) is projected onto its surface.
+      expect(w.queries.projectPoint(anchor, verbGeom.pointToWorld(ent(w, anchor).pose, hold.b.local)).dist).toBeLessThan(1e-3);
       const s = ent(w, sap);
       expect(s.plant!.phase).toBe('bent');
       expect(s.body!.isDynamic()).toBe(true);
@@ -653,9 +764,11 @@ describe('pull (§5.12): reel in, then the yank, then the steady haul', () => {
     const anchor = w.joints.anchorPoint(joint(w, j).a)!;
     const bodyDist = (): number => Math.hypot(p.pos.x - anchor.x, p.pos.z - anchor.z);
     const d0 = bodyDist();
-    // Backing off (allowed, braced, at pullWalkMul of the walk) against the taut rope: held where he is.
+    // Backing off for 5 s (allowed, braced, at pullWalkMul of the walk) against the taut rope: held where he is. (The
+    // one-sided tether checks the hand against the rope's reach but limits the body to where it stands: measured at the
+    // hand, turning and the arm's swing would ratchet him outward.)
     let far = 0;
-    run(w, 120, () => {
+    run(w, 300, () => {
       w.commands.push(moveCommand(w.tick + 1, 1, 0, -1));
       far = Math.max(far, bodyDist());
     });
@@ -692,7 +805,11 @@ describe('pull (§5.12): reel in, then the yank, then the steady haul', () => {
     expect(pullForce(ape, 50)).toBeCloseTo(VERB_TUNING.pullForceN * VERB_TUNING.creaturePullMul * ape.scale * ape.scale, 6);
   });
 
-  it('a hauled 30 kg log tied off to a stake mid-haul stays at the angle reached (§11.2(c)): one yank, the hauler braced, nothing snaps or pulls loose', async () => {
+  /**
+   * The gate's swing (§11.2(c)) up to the haul: a 30 kg log hung on two vines, the tie stake 9 m back, a 10 m vine tied to
+   * the log's back face and its end in the hands of the player standing at x −8.4 (not yet pulling).
+   */
+  async function hungLog(): Promise<{ w: World; log: number; tieStake: number; j: number }> {
     const w = await make();
     const p = w.player!;
     // The gate's swing (§11.2(c) steps 1-4, staged): a 30 kg dry hex log 4 m along z, its centre 0.47 m up, hung by its
@@ -710,14 +827,21 @@ describe('pull (§5.12): reel in, then the yank, then the steady haul', () => {
     w.teleport(p, -1.0, 0, Math.PI / 2);
     holdCoil(w, 10);
     run(w, 30);
-    // A 10 m vine coil tied to the log's back face, walked out in front of the stake 9 m back, and pulled for 5 s. (The gate
-    // pulls 8 s, but at pullStaminaPerS with no rest regen a fresh hauler is spent at 6.7 s and then pulls 300 N: the log
-    // sags to 27° by 8 s, and a tie made while he is spent lands mid-swing. Tied off while he can still pull, it holds.)
+    // A 10 m vine coil tied to the log's back face and walked out in front of the stake 9 m back.
     verb(w, { verb: 'tie', target: log, at: toCm({ x: -0.065, y: 0.47, z: 0 }) });
     expect(verbs(untilFree(w), 'tie')[0]).toMatchObject({ ok: true, entity: log });
     const j = heldJoint(w)!.id;
     w.teleport(p, -8.4, 0, Math.PI / 2);
     run(w, 30);
+    return { w, log, tieStake, j };
+  }
+
+  it('a hauled 30 kg log tied off to a stake mid-haul stays at the angle reached (§11.2(c)): one yank, the hauler braced, nothing snaps or pulls loose', async () => {
+    const { w, log, tieStake, j } = await hungLog();
+    const p = w.player!;
+    // Pulled for 5 s. (The gate pulls 8 s, but at pullStaminaPerS with no rest regen a fresh hauler is spent at 6.7 s and
+    // then pulls 300 N: the log sags to 27° by 8 s, and a tie made while he is spent lands mid-swing. Tied off while he can
+    // still pull, it holds.)
     verb(w, { verb: 'pull', target: 0, charge: 255 });
     let peak = 0;
     let yanks = 0;
@@ -727,7 +851,8 @@ describe('pull (§5.12): reel in, then the yank, then the steady haul', () => {
       moved = Math.max(moved, Math.abs(p.pos.x - -8.4));
       if (joint(w, j).pullN === VERB_TUNING.pullYankN) yanks++;
     });
-    // Hauled back (the lab: 28-45° after 8 s, peaks 38-52° [I-rev ran: swing_light.out]), with one yank of 9 ticks in all.
+    // Hauled back with the real tether (the lab: 28-45° after 8 s, peaks 38-52° [I-rev ran: swing_light.out]), with one
+    // yank of 9 ticks in all.
     expect(peak).toBeGreaterThanOrEqual(38);
     expect(yanks).toBe(VERB_TUNING.pullYankTicks);
     // Braced: the swinging log never drew him to it (P16 review: from −8.40 to −4.31 m, his stake left out of range).
@@ -754,6 +879,37 @@ describe('pull (§5.12): reel in, then the yank, then the steady haul', () => {
     expect(Math.max(...joint(w, j).tension)).toBeLessThan(1000);
   });
 
+  it('one yank per pull: the hauled log swung back at him mid-pull leaves the rope slack, and taut again it is not yanked (9 ticks at 1,200 N in all)', async () => {
+    const { w, log, j } = await hungLog();
+    const p = w.player!;
+    verb(w, { verb: 'pull', target: 0, charge: 255 });
+    const taut = (): number => w.verbs.continuousOf(p)?.data.taut ?? 0;
+    let yanks = 0;
+    let slack = 0;
+    let tautAfterSlack = 0;
+    let kicked = false;
+    let last = 0;
+    run(w, 480, () => {
+      // Once the yank is spent and the haul under way, the log is shoved toward him at 5 m/s (a second player's shove): it
+      // comes in faster than the hand reels in (1.5 m/s, and the haul's haulTautM tolerance: 4.5 m/s), so the rope goes
+      // slack, and swung out and back it comes taut again.
+      if (!kicked && taut() > VERB_TUNING.pullYankTicks + 20) {
+        w.entities.queueImpulse(log, { x: -5 * ent(w, log).mass, y: 0, z: 0 }, null);
+        kicked = true;
+      }
+      const now = taut();
+      if (kicked && now === last) slack++;
+      if (kicked && slack > 0 && now > last) tautAfterSlack++;
+      last = now;
+      if (joint(w, j).pullN === VERB_TUNING.pullYankN) yanks++;
+    });
+    expect(kicked).toBe(true);
+    expect(slack).toBeGreaterThan(0);
+    expect(tautAfterSlack).toBeGreaterThan(VERB_TUNING.pullYankTicks);
+    expect(yanks).toBe(VERB_TUNING.pullYankTicks);
+    expect(w.verbs.continuousOf(p)?.verb).toBe('pull');
+  });
+
   it('a pull saved mid-yank goes on as it would have: the loaded world matches the original tick for tick (§8.3, AC-7)', async () => {
     const { w, j } = await postRope(5);
     const p = w.player!;
@@ -778,6 +934,26 @@ describe('pull (§5.12): reel in, then the yank, then the steady haul', () => {
     expect(a.slice(0, 7)).toEqual([...new Array(6).fill(VERB_TUNING.pullYankN), VERB_TUNING.pullForceN]);
     expect(b).toEqual(a);
     const text = (u: Uint8Array): string => new TextDecoder().decode(u);
+    expect(text(serializeWorld(loaded))).toBe(text(serializeWorld(w)));
+  });
+
+  it('a haul on the swinging log saved mid-yank goes on as it would have: pull, tension and the log tick for tick (§8.3, AC-7)', async () => {
+    const { w, log, j } = await hungLog();
+    const p = w.player!;
+    verb(w, { verb: 'pull', target: 0, charge: 255 });
+    for (let t = 0; t < 400 && (w.verbs.continuousOf(p)?.data.taut ?? 0) < 4; t++) w.step();
+    expect(w.verbs.continuousOf(p)!.data.taut).toBe(4);
+    const loaded = await loadWorld(serializeWorld(w), { nav: 'off' });
+    live.push(loaded);
+    const text = (u: Uint8Array): string => new TextDecoder().decode(u);
+    for (let t = 0; t < 120; t++) {
+      w.step();
+      loaded.step();
+      expect(joint(loaded, j).pullN, `tick ${t}`).toBe(joint(w, j).pullN);
+      expect(joint(loaded, j).tension, `tick ${t}`).toEqual(joint(w, j).tension);
+      expect(ent(loaded, log).pose, `tick ${t}`).toEqual(ent(w, log).pose);
+      expect(loaded.player!.pos.toArray(), `tick ${t}`).toEqual(p.pos.toArray());
+    }
     expect(text(serializeWorld(loaded))).toBe(text(serializeWorld(w)));
   });
 

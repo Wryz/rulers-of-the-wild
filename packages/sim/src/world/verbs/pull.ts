@@ -20,8 +20,9 @@
 // this tick. The yank count lives in the continuous verb's `data.taut` (taut ticks since the pull went on), so it is
 // saved with the fighter's verb state.
 //
-// The hauler stands braced: while the pull is on, the rope-end tether (hands.ts tetherHands) only stops him walking the
-// hand beyond the rope's reach and never draws him to the load, and he gets no rest regen (CombatSim's tickTimers).
+// The hauler stands braced: while the pull is on, the rope-end tether (hands.ts tetherHands) never draws him to the load
+// and only stops a step taking him farther than max(where he stands, where his hand meets the rope's reach), and he gets
+// no rest regen (CombatSim's tickTimers).
 //
 // TODO "creature hand speed": §5.12 reels a creature's slack in at creatureHandSpeedMps (0.8 m/s); the joint store's
 // reel-in (joints.ts reelIn) reads pullHandSpeedMps for every hand.
