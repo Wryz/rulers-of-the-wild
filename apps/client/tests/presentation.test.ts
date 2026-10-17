@@ -244,6 +244,16 @@ describe('downed bodies follow the sim (§10.5)', () => {
       expect(a.y - spun[i].y, b).toBeCloseTo(w0.y, 4);
       expect(a.z - spun[i].z, b).toBeCloseTo(w0.z, 4);
     });
+    // About the body's own centre of mass (no slab given), a launch leaves the body moving at exactly `vel`.
+    rd.launch({ x: 1, y: 0.5, z: -2 }, { x: 0, y: 3, z: 1 });
+    const again = new Vector3();
+    for (const b of BONES) {
+      const v = rd.bodies[b].linvel();
+      again.addScaledVector(new Vector3(v.x, v.y, v.z), rd.bodies[b].mass() / m);
+    }
+    expect(again.x).toBeCloseTo(1, 4);
+    expect(again.y).toBeCloseTo(0.5, 4);
+    expect(again.z).toBeCloseTo(-2, 4);
     // A second hit event of a knockdown (no launch) throws nothing: the presentation has no throw of its own.
     for (const e of r.world) if (e.type !== 'launch') pw.handle(e, w);
     const before = BONES.map((b) => rd.bodies[b].linvel());

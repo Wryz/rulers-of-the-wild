@@ -158,6 +158,7 @@ const _pcom = new Vector3();
 const _jp = new Vector3();
 const _mean = new Vector3();
 const _c = new Vector3();
+const _bc = new Vector3();
 
 function toV(v: { x: number; y: number; z: number }, out = new Vector3()) {
   return out.set(v.x, v.y, v.z);
@@ -329,7 +330,7 @@ export class Ragdoll {
       if (this.loose.has(name)) continue;
       const b = this.bodies[name];
       const bm = b.mass();
-      out.addScaledVector(toV(b.worldCom(), _c), bm);
+      out.addScaledVector(toV(b.worldCom(), _bc), bm);
       m += bm;
     }
     return m > 0 ? out.divideScalar(m) : this.pelvisPos(out);
