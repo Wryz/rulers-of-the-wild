@@ -32,6 +32,14 @@ export const RENDER_TUNING = defineTuning(
     ropeThinMax: 0.3,
     ropeFrayFrac: 0.8,
     fallenCrownPadM: 0.15,
+    // Not §9.1 rows: the stub's sky and ground looks (P31), so none is a bare constant; P32 sets the real ones.
+    groundColor: '#5f7d3c',
+    skyColor: '#a9c3cf',
+    hemiSkyColor: '#d6e6f0',
+    hemiGroundColor: '#4b5a33',
+    hemiIntensity: 1.15,
+    sunColor: '#fff1d8',
+    sunIntensity: 2.1,
   },
   {
     nearTileM: { unit: 'm', source: 'NEW (§10.4)', min: 0, max: 200, step: 1 },
@@ -61,12 +69,19 @@ export const RENDER_TUNING = defineTuning(
       max: 1,
       step: 0.01,
     },
+    groundColor: { unit: 'colour', source: 'NEW (P31 stub: the plain ground until P32 colours it)' },
+    skyColor: { unit: 'colour', source: 'NEW (P31 stub: background and fog)' },
+    hemiSkyColor: { unit: 'colour', source: 'NEW (P31 stub)' },
+    hemiGroundColor: { unit: 'colour', source: 'NEW (P31 stub)' },
+    hemiIntensity: { unit: '×', source: 'NEW (P31 stub)', min: 0, max: 5, step: 0.05 },
+    sunColor: { unit: 'colour', source: 'NEW (P31 stub)' },
+    sunIntensity: { unit: '×', source: 'NEW (P31 stub)', min: 0, max: 10, step: 0.05 },
   },
 );
 
 export class TerrainView {
   readonly group = new Group();
-  private readonly material = new MeshStandardMaterial({ color: '#5f7d3c', flatShading: true, roughness: 0.95, metalness: 0 });
+  private readonly material = new MeshStandardMaterial({ color: RENDER_TUNING.groundColor, flatShading: true, roughness: 0.95, metalness: 0 });
   private readonly meshes: (Mesh | null)[] = [];
   private versions = new Uint32Array(0);
 
@@ -77,6 +92,7 @@ export class TerrainView {
 
   /** Rebuilds every tile whose terrain version changed (all of them the first time). */
   sync(world: World, _cam?: Vector3): void {
+    this.material.color.set(RENDER_TUNING.groundColor);
     const t = world.terrain;
     if (this.versions.length !== t.tileCount) this.versions = new Uint32Array(t.tileCount).fill(0xffffffff);
     for (let i = 0; i < t.tileCount; i++) {

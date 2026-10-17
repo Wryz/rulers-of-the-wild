@@ -2,7 +2,7 @@
 // to texels, ±RENDER_TUNING.shadowExtentM, far shadowFarM); fog from fogNear to fogFar.
 //
 // STUB (P31; P32 fills it): the final exported name; a hemisphere light, a sun whose shadow follows the focus point, and
-// the fog (P32: texel snapping, colours, the far planes).
+// the fog, all read live from RENDER_TUNING (P32: texel snapping, the real colours, the far planes).
 import { Color, DirectionalLight, Fog, HemisphereLight, type Scene, Vector3 } from 'three';
 import type { World } from '@wild/sim';
 import { RENDER_TUNING } from './terrainView';
@@ -11,23 +11,26 @@ import { RENDER_TUNING } from './terrainView';
 const SUN_DIR = new Vector3(-6, 14, 7).normalize();
 
 export class Sky {
-  readonly background = new Color('#a9c3cf');
-  readonly hemi = new HemisphereLight('#d6e6f0', '#4b5a33', 1.15);
-  readonly sun = new DirectionalLight('#fff1d8', 2.1);
+  readonly background = new Color();
+  readonly hemi = new HemisphereLight();
+  readonly sun = new DirectionalLight();
+  private readonly fog: Fog;
 
   constructor(private readonly scene: Scene) {
     const T = RENDER_TUNING;
+    this.fog = new Fog(this.background, T.fogNear, T.fogFar);
     scene.background = this.background;
-    scene.fog = new Fog(this.background, T.fogNear, T.fogFar);
+    scene.fog = this.fog;
     const s = this.sun;
     s.castShadow = true;
     s.shadow.mapSize.set(T.shadowMap, T.shadowMap);
     s.shadow.bias = -0.0005;
     s.shadow.normalBias = 0.02;
     scene.add(this.hemi, s, s.target);
+    this.look();
   }
 
-  /** Puts the sun's shadow over `focus` (the player) and applies the live fog and shadow values. */
+  /** Puts the sun's shadow over `focus` (the player) and applies the live sky, fog and shadow values. */
   sync(_world: World, focus: Vector3): void {
     const T = RENDER_TUNING;
     const s = this.sun;
@@ -44,16 +47,25 @@ export class Sky {
     }
     s.target.position.copy(focus);
     s.position.copy(focus).addScaledVector(SUN_DIR, T.shadowFarM / 2);
-    const fog = this.scene.fog;
-    if (fog instanceof Fog) {
-      fog.near = T.fogNear;
-      fog.far = T.fogFar;
-    }
+    this.look();
   }
 
   dispose(): void {
     this.scene.remove(this.hemi, this.sun, this.sun.target);
     this.sun.dispose();
     this.hemi.dispose();
+  }
+
+  private look(): void {
+    const T = RENDER_TUNING;
+    this.background.set(T.skyColor);
+    this.fog.color.copy(this.background);
+    this.fog.near = T.fogNear;
+    this.fog.far = T.fogFar;
+    this.hemi.color.set(T.hemiSkyColor);
+    this.hemi.groundColor.set(T.hemiGroundColor);
+    this.hemi.intensity = T.hemiIntensity;
+    this.sun.color.set(T.sunColor);
+    this.sun.intensity = T.sunIntensity;
   }
 }
