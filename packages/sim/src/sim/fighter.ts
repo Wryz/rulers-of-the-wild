@@ -27,6 +27,7 @@ import type {
   GroundQuery,
   Inventory,
   KnockRecord,
+  MaterialId,
   Posture,
   RulerState,
   SpeciesId,
@@ -131,6 +132,33 @@ export interface Counter {
 
 export const GETUP_FRAMES = 40;
 export const KNOCKDOWN_FRAMES = 70;
+
+/**
+ * A worn item as the armour rule reads it (docs/M1-DESIGN.md §4.4, SPEC:417, 885): what it is made of and the zones
+ * it covers. Wearing is not an M1 verb; this is the data path the verb that adds it will fill.
+ */
+export interface WornItem {
+  material: MaterialId;
+  zones: readonly HurtZone[];
+}
+
+/**
+ * `Fighter.armour` from what is worn (§4.4, RR-3): per zone, the sum of the covering items' materials' `armourJ`. It
+ * reads a property, never a material's id (SPEC:192), so a new armour material is a new row of the table, not new code.
+ * `materials` is MATERIALS (world/materials.ts), passed in so the fighter doesn't import a world module; derive again
+ * whenever the worn items or the table change.
+ */
+export function armourFrom(
+  worn: readonly WornItem[],
+  materials: Readonly<Record<MaterialId, { readonly armourJ: number }>>,
+): Partial<Record<HurtZone, number>> {
+  const out: Partial<Record<HurtZone, number>> = {};
+  for (const item of worn) {
+    const j = materials[item.material].armourJ;
+    for (const z of item.zones) out[z] = (out[z] ?? 0) + j;
+  }
+  return out;
+}
 
 /**
  * Where fighter ids come from (docs/M1-DESIGN.md §1.5.3, §8.1). A world owns one and passes it to every fighter it
@@ -290,7 +318,7 @@ export class Fighter {
   playerId: string | null = null;
   /** The last time something knocked this fighter about, and by whom (environmental kills, §4.4). */
   lastKnock: KnockRecord | null = null;
-  /** J added per zone by worn items (Σ of their materials' armourJ), derived when the worn items change (RR-3). */
+  /** J added per zone by worn items (Σ of their materials' armourJ), derived when the worn items change (armourFrom, RR-3). */
   armour: Partial<Record<HurtZone, number>> = {};
   ruler: RulerState | null = null;
   /** The ground under this fighter (footwork plants the feet on it); set by CombatSim when not flat. */

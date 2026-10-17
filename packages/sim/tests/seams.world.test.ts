@@ -6,16 +6,17 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { bonePoint, type BoneName } from '../src/body/skeleton';
 import { blowDamage, type CombatEvent, CombatSim, FACING, type HurtZone } from '../src/sim/combat';
 import { type Command, COMMAND_STEPS, MOVE_CROUCH, MOVE_SPRINT, moveCommand } from '../src/sim/commands';
-import { Fighter, IdCounter } from '../src/sim/fighter';
+import { armourFrom, Fighter, IdCounter } from '../src/sim/fighter';
 import { angleDelta, DT } from '../src/sim/math';
 import { ENEMY_MOVES, PLAYER_MOVES, type MoveDef } from '../src/sim/moves';
 import type { Projectile } from '../src/sim/projectiles';
 import { createBrawler, createPlayer } from '../src/sim/roster';
 import { RULER_TUNING } from '../src/sim/ruler';
-import { boneMass, DAMAGE_TUNING, hpFromEnergy, impactEnergy, launchSpeed, MOVE_TUNING, reducedMass } from '../src/sim/rules';
+import { boneMass, DAMAGE_TUNING, hpFromEnergy, impactEnergy, launchSpeed, MOVE_TUNING, reducedMass, zoneToughness } from '../src/sim/rules';
 import { sampleOffsets, WEAPON_MOVES, WEAPONS, type WeaponDef } from '../src/sim/weapons';
 import { defineTuning, resetTuning, setTuningValue, TUNING } from '../src/tuning/registry';
 import type { Walkable } from '../src/world/collision';
+import { MATERIAL_IDS, MATERIALS } from '../src/world/materials';
 import type { ProjectileWorldHit, RulerState, Work, WorldPort, WorldStrike } from '../src/world/types';
 
 // The verb system (P14, world/verbs/tuning.ts) registers VERB_TUNING; until a world module is imported here, these
@@ -33,6 +34,7 @@ if (!TUNING.some((e) => e.name === 'VERB_TUNING')) {
 }
 
 afterEach(() => {
+  resetTuning('MATERIALS');
   resetTuning('MOVE_TUNING');
   resetTuning('RULER_TUNING');
   resetTuning('DAMAGE_TUNING');
@@ -529,6 +531,33 @@ describe("DungeonStyle's instant kills go through the rule (RR-12)", () => {
     expect(sever(40)).toBeNull();
     expect(sever(20)).toBe('foreArmL');
     expect(sever(0)).toBe('foreArmL');
+  });
+});
+
+describe('armour by material property (§4.4, RR-3)', () => {
+  it("a worn item adds its material's armourJ to the zones it covers; changing only the material changes zoneToughness", () => {
+    const { sim, player, enemy } = duel(1);
+    const worn = [
+      { material: 'hide', zones: ['chest', 'abdomen'] },
+      { material: 'bone', zones: ['chest'] },
+      { material: 'leaves', zones: ['head'] },
+    ] as const;
+    enemy.armour = armourFrom(worn, MATERIALS);
+    expect(zoneToughness(enemy, 'chest')).toBe(60);
+    expect(zoneToughness(enemy, 'abdomen')).toBe(20);
+    expect(zoneToughness(enemy, 'head')).toBe(0);
+    expect(zoneToughness(enemy, 'legs')).toBe(0);
+    // A tougher hide, the same items: more armour, and a blow on the chest meets it.
+    setTuningValue('MATERIALS', 'hide.armourJ', 35);
+    enemy.armour = armourFrom(worn, MATERIALS);
+    expect(zoneToughness(enemy, 'chest')).toBe(75);
+    priv(sim).hit(player, enemy, PLAYER_MOVES.cross, enemy.rig.chest.pos.clone(), new Vector3(1, 0, 0), 'chest', 'chest');
+    expect(hitsOn(sim.events, enemy)[0].toughness).toBe(75);
+  });
+
+  it('no armour code names a material', () => {
+    const src = armourFrom.toString();
+    for (const id of MATERIAL_IDS) expect(src, id).not.toMatch(new RegExp(`['"\`]${id}['"\`]`));
   });
 });
 
