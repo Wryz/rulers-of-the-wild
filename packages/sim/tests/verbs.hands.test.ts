@@ -18,7 +18,7 @@ import { groundRestY, logPrism, LYING_ALONG_X, prismRForMass, spawnBox, spawnLog
 import { PHYSICS_TUNING, physicsReady } from '../src/world/physics';
 import type { Anchor, JointRecord, RefuseReason, V3, WorldEvent } from '../src/world/types';
 import { type VerbStateRecord } from '../src/world/verbs/index';
-import { validateVerb, type VerbHandler, verbsFor, withVerbHandler } from '../src/world/verbs/targets';
+import { chestPoint, validateVerb, type VerbHandler, verbsFor, withVerbHandler } from '../src/world/verbs/targets';
 import { heldMembers, verbGeom } from '../src/world/verbs/tools';
 import { VERB_TUNING } from '../src/world/verbs/tuning';
 import { createWorld, type World } from '../src/world/world';
@@ -267,17 +267,27 @@ describe('take (§5.1): wield, carry, drag, or refused', () => {
     expect(e.credit).toEqual([]);
     expect(e.releasedBy).toBeFalsy();
 
-    // Above the reach of a standing player's hands (a stick on a fixed 2.6 m block in front): refused the same way.
+    // Above the reach of a standing player's hands (a stick laid across two fixed 2.6 m posts in front, either side of
+    // the way): refused the same way. The posts stand clear of the bend on purpose: under a block, the take's step-in
+    // and bend swing the head into the block's face at ~6.2 m/s, past a human's 6 m/s v_safe, and that self-motion
+    // contact is a real hit (§4.3, SPEC:284) whose hitstun cancels the take before actAt with no event (§4.4, §5.0).
     const w2 = await make(23);
     const p2 = w2.player!;
-    spawnBox(w2, { p: { x: 0, y: 1.3, z: 1.0 }, size: [1.2, 2.6, 0.5], material: 'dryWood', state: 'fixed', look: 'box' });
-    const high = spawnStick(w2, { p: { x: 0, y: 2.63, z: 1.0 }, length: 1, r: 0.02 });
+    for (const x of [-0.7, 0.7]) spawnBox(w2, { p: { x, y: 1.3, z: 1.0 }, size: [0.2, 2.6, 0.3], material: 'dryWood', state: 'fixed', look: 'box' });
+    const high = spawnStick(w2, { p: { x: 0, y: 2.63, z: 1.0 }, length: 1.8, r: 0.02 });
     run(w2, 10);
     expect(ent(w2, high).pose.p.y).toBeGreaterThan(2.5);
     expect(validateVerb(w2, p2, { tick: 0, player: 1, kind: 'verb', verb: 'take', target: high })).toEqual({ ok: true });
     verb(w2, { verb: 'take', target: high });
     const evs2 = untilFree(w2);
     expect(verbs(evs2, 'take')).toEqual([expect.objectContaining({ ok: false, reason: 'outOfReach' })]);
+    // Nothing touched the player on the way in, and it was the height that refused it: where the player stood at actAt
+    // (it doesn't step after), the stick was within the feet's reach but above the hands'.
+    expect(evs2.filter((e) => e.type === 'impact' && e.defender === p2)).toEqual([]);
+    expect(p2.hp).toBe(100);
+    const reachedFor = w2.queries.projectPoint(high, chestPoint(p2)).point;
+    expect(hdist(p2.pos, reachedFor)).toBeLessThanOrEqual(VERB_TUNING.takeReachM);
+    expect(reachedFor.y - chestPoint(p2).y).toBeGreaterThan(VERB_TUNING.handReachM);
     expect(p2.inventory!.hands).toBeNull();
     expect(ent(w2, high).state).toBe('free');
     expect(ent(w2, high).credit).toEqual([]);
