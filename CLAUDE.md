@@ -62,7 +62,8 @@ Run everything from the repository root:
 - `npm run build`: typecheck the sim, then typecheck and build the client into
   `apps/client/dist`.
 - `npm run dev`: the dev server at http://localhost:5173 (developer mode is on: L opens the
-  tuning panel). DungeonStyle's training ring is at http://localhost:5173/?mode=training.
+  tuning panel). `?seed=N` picks the world seed; `?mode=training` adds a sparring ape next to
+  the player (dev mode only).
   To pick a port, pass it through both npm hops: `npm run dev -- -- --port 5180` (or
   `npm run dev -w apps/client -- --port 5180`); with a single `--`, Vite takes the number
   as its root folder.
