@@ -232,10 +232,12 @@ export class Input {
     win.addEventListener('blur', () => this.clearHeld());
     win.addEventListener('mousemove', (e: MouseEvent) => this.mouseMove(e));
     win.addEventListener('mouseup', (e: MouseEvent) => this.mouseButton(e.button, false));
+    // The canvas's own events (a test's page has no canvas: they come from its window then).
+    const surface = target ?? win;
+    surface.addEventListener('mousedown', (e: MouseEvent) => this.mouseDown(e));
+    surface.addEventListener('contextmenu', (e: MouseEvent) => e.preventDefault());
+    surface.addEventListener('wheel', (e: WheelEvent) => this.wheelMoved(e), { passive: false });
     if (target) {
-      target.addEventListener('mousedown', (e) => this.mouseDown(e));
-      target.addEventListener('contextmenu', (e) => e.preventDefault());
-      target.addEventListener('wheel', (e) => this.wheelMoved(e), { passive: false });
       if (!DEV) {
         // Crouch is Ctrl: Ctrl+W closes the tab and a page can't stop it, so the page asks first (§5.14). (Not in
         // developer mode, whose rebuild reloads the page.)

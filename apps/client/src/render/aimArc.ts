@@ -22,10 +22,10 @@ import { VERB_UI_TUNING } from '../input/verbInput';
 
 /** The arc's and the landing ring's colour (presentation, not tuning). */
 const ARC_COLOUR = 0xfff1c4;
-/** s: the landing search's step (then bisected). */
+/** s: the landing search's step (then bisected): a numerical device, not a starting value. */
 const SEARCH_STEP_S = 1 / 120;
-/** m: the landing ring's radii and its lift off the ground. */
-const RING = { inner: 0.25, outer: 0.33, lift: 0.03 } as const;
+/** The landing ring: its inner radius as a fraction of VERB_UI_TUNING.landingRingM, and its lift off the ground (m). */
+const RING = { innerFrac: 0.75, lift: 0.03 } as const;
 
 /**
  * The flight from `from` at velocity `vel` under gravity `g` (m/s², down) until it meets `ground` or `maxS` runs out,
@@ -69,7 +69,7 @@ export class AimArc {
   constructor(private readonly scene: Scene) {
     this.line = new Line(new BufferGeometry(), new LineBasicMaterial({ color: ARC_COLOUR, transparent: true, opacity: 0.85, depthWrite: false }));
     this.line.frustumCulled = false;
-    this.ring = new Mesh(new RingGeometry(RING.inner, RING.outer, 28), new MeshBasicMaterial({ color: ARC_COLOUR, side: DoubleSide, transparent: true, opacity: 0.8, depthWrite: false }));
+    this.ring = new Mesh(new RingGeometry(RING.innerFrac, 1, 28), new MeshBasicMaterial({ color: ARC_COLOUR, side: DoubleSide, transparent: true, opacity: 0.8, depthWrite: false }));
     this.ring.rotation.x = -Math.PI / 2;
     this.group.add(this.line, this.ring);
     this.group.visible = false;
@@ -101,6 +101,7 @@ export class AimArc {
     this.line.geometry.setDrawRange(0, n);
     const end = arc.points[n - 1];
     this.ring.visible = arc.landed;
+    this.ring.scale.setScalar(VERB_UI_TUNING.landingRingM);
     this.ring.position.set(end.x, end.y + RING.lift, end.z);
     this.group.visible = true;
   }

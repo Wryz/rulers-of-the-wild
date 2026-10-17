@@ -7,6 +7,7 @@
 // Presentation only (rule 6): it reads records and writes nothing in the world.
 import { type BufferGeometry, Group, Mesh, MeshBasicMaterial, type Scene } from 'three';
 import { heldMembers, type Pose3, type Shape, verbGeom, type World } from '@wild/sim';
+import { VERB_UI_TUNING } from '../input/verbInput';
 import { shapeGeometry } from './entityViews';
 
 /** How a placed thing is set down (§5.7: pitch 0 lying, 64 upright, anything between sloped). */
@@ -15,11 +16,10 @@ export type PlaceOrientation = 'lying' | 'upright' | 'sloped';
 /** The ghost's colours: fits, doesn't (presentation, not tuning). */
 const FITS = 0x6fe07a;
 const BLOCKED = 0xff5a4a;
-const OPACITY = 0.38;
 
 export class Ghost {
   private readonly group = new Group();
-  private readonly mat = new MeshBasicMaterial({ color: FITS, transparent: true, opacity: OPACITY, depthWrite: false });
+  private readonly mat = new MeshBasicMaterial({ color: FITS, transparent: true, opacity: VERB_UI_TUNING.ghostOpacity, depthWrite: false });
   private readonly meshes: Mesh[] = [];
   private readonly geos = new WeakMap<Shape, BufferGeometry>();
   private readonly owned: BufferGeometry[] = [];
@@ -49,6 +49,7 @@ export class Ghost {
     }
     this.fits = fits;
     this.mat.color.setHex(fits ? FITS : BLOCKED);
+    this.mat.opacity = VERB_UI_TUNING.ghostOpacity;
     const ids = heldMembers(world, main.id);
     let i = 0;
     for (const id of ids) {

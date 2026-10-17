@@ -103,6 +103,12 @@ export const VERB_UI_TUNING = defineTuning(
     aimRangeM: 60,
     aimConvergeM: 30,
     arcMaxS: 4,
+    leanSampleM: 0.05,
+    ropeShellRadiusM: 0.045,
+    groundRingM: 0.3,
+    landingRingM: 0.33,
+    promptLiftM: 0.35,
+    ghostOpacity: 0.38,
     wheelPxPerNotch: 100,
     wheelLinesPerNotch: 3,
   },
@@ -135,6 +141,12 @@ export const VERB_UI_TUNING = defineTuning(
     aimRangeM: { unit: 'm', source: 'NEW (P35): how far the crosshair looks for what a throw converges on', min: 5, max: 200, step: 1, label: 'aim range' },
     aimConvergeM: { unit: 'm', source: 'NEW (P35): a throw converges on the crosshair this far out when it rests on nothing', min: 2, max: 200, step: 1, label: 'aim converge' },
     arcMaxS: { unit: 's', source: 'NEW (P35): the throw arc is drawn for at most this long a flight', min: 0.5, max: 10, step: 0.1, label: 'arc length' },
+    leanSampleM: { unit: 'm', source: 'NEW (P35): a sloped ghost looks for what it leans on with a downward ray this often along it', min: 0.01, max: 0.5, step: 0.01, label: 'lean sample' },
+    ropeShellRadiusM: { unit: 'm', source: 'NEW (P35): a highlighted rope is drawn this thick (ropes are thin; the outline must read at a few metres)', min: 0.01, max: 0.2, step: 0.005, label: 'rope outline' },
+    groundRingM: { unit: 'm', source: 'NEW (P35): the ring marking a ground target (dig, place)', min: 0.05, max: 1, step: 0.01, label: 'ground ring' },
+    landingRingM: { unit: 'm', source: 'NEW (P35): the ring where the throw arc lands', min: 0.05, max: 1, step: 0.01, label: 'landing ring' },
+    promptLiftM: { unit: 'm', source: 'NEW (P35): the prompt floats this far over what is outlined', min: 0, max: 2, step: 0.05, label: 'prompt lift' },
+    ghostOpacity: { unit: '0-1', source: 'NEW (P35): the placement ghost', min: 0.05, max: 1, step: 0.01, label: 'ghost opacity' },
     wheelPxPerNotch: { unit: 'px', source: 'NEW (P35): a pixel-mode wheel event (Chrome: 100 px a notch)', min: 1, max: 400, step: 1, label: 'wheel px / notch' },
     wheelLinesPerNotch: { unit: 'lines', source: 'NEW (P35): a line-mode wheel event (Firefox: 3 lines a notch)', min: 1, max: 20, step: 1, label: 'wheel lines / notch' },
   },
@@ -738,9 +750,37 @@ export class VerbInput implements VerbInputPort {
   }
 
   /**
+   * Leaning from `from` along `hor` (unit, horizontal): the pitch (rad) at which an object of length L, its lower end at
+   * `from`, comes down onto the highest support under its upper half (§10.7): downward rays every leanSampleM along
+   * `hor` find the supports (terrain included: a bank or a pit's rim), and of those beyond the middle of its length and
+   * within it, the one that stops it steepest. Null: nothing to lean on.
+   */
+  private leanPitch(world: World, from: Vector3, hor: Vector3, L: number, held: number): number | null {
+    const exclude = heldMembers(world, held);
+    const top = from.y + L + VERB_TUNING.placeSupportM;
+    const depth = top - (from.y - VERB_TUNING.placeSupportM);
+    const n = Math.max(2, Math.ceil(L / Math.max(1e-3, VERB_UI_TUNING.leanSampleM)));
+    let best: number | null = null;
+    for (let i = 1; i <= n; i++) {
+      const s = (L * i) / n;
+      const x = from.x + hor.x * s;
+      const z = from.z + hor.z * s;
+      const hit = world.queries.castRay({ x, y: top, z }, { x: 0, y: -1, z: 0 }, depth, { terrain: true, entities: 'all', exclude: { entities: exclude } });
+      if (!hit) continue;
+      const dy = hit.point.y - from.y;
+      if (!(dy > 0)) continue;
+      const d = Math.hypot(s, dy);
+      if (d <= L / 2 || d > L) continue;
+      const th = Math.atan2(dy, s);
+      if (best === null || th > best) best = th;
+    }
+    return best;
+  }
+
+  /**
    * The place command the preview would send, and what the sim's placement rule makes of it (planPlace, read-only):
-   * lying with its near end at the aim point, upright on it, or sloped from it at the pitch the rule's cast finds onto
-   * the highest support under the upper half (the command then carries that pitch, and the resting centre as `at`).
+   * lying with its near end at the aim point, upright on it, or sloped from it onto the highest support under its upper
+   * half (leanPitch); a sloped command then carries the pitch the rule's own cast gives, and the resting centre as `at`.
    */
   placePreview(tick: number, world: World, me: Fighter): PlacePreview | null {
     const held = this.holding(me);
@@ -752,9 +792,13 @@ export class VerbInput implements VerbInputPort {
     const aim = this.placeAim(world, me, held);
     const yaw = this.placing.yawDeg * DEG;
     const o = this.placing.orientation;
-    const pitchSteps = o === 'lying' ? 0 : o === 'upright' ? QUARTER : PITCH_SLOPED_PROBE;
-    const pitch = (pitchSteps / COMMAND_STEPS) * 2 * Math.PI;
     const hor = new Vector3(Math.sin(yaw), 0, Math.cos(yaw));
+    let pitchSteps = o === 'lying' ? 0 : o === 'upright' ? QUARTER : PITCH_SLOPED_PROBE;
+    if (o === 'sloped') {
+      const lean = this.leanPitch(world, aim, hor, L, held);
+      if (lean !== null) pitchSteps = Math.max(1, Math.min(QUARTER - 1, Math.round((lean / (2 * Math.PI)) * COMMAND_STEPS)));
+    }
+    const pitch = (pitchSteps / COMMAND_STEPS) * 2 * Math.PI;
     const along = hor.clone().multiplyScalar(Math.cos(pitch)).add(new Vector3(0, Math.sin(pitch), 0));
     // The side that faces up, square to the axis in its vertical plane.
     const upSide = hor.clone().multiplyScalar(-Math.sin(pitch)).add(new Vector3(0, Math.cos(pitch), 0));

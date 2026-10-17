@@ -27,12 +27,8 @@ import { shapeGeometry } from './entityViews';
 /** The focused target's shell, the first target's (lash, bend) and the prompt's colours (presentation, not tuning). */
 const FOCUS_COLOUR = 0xffd27a;
 const FIRST_COLOUR = 0x7fd4ff;
-/** m: a highlighted rope's drawn radius (ropes are thin; the shell must read at a few metres). */
-const ROPE_SHELL_R = 0.045;
-/** m: a ground target's ring. */
-const GROUND_RING = { inner: 0.22, outer: 0.3, lift: 0.02 } as const;
-/** m: the prompt floats this far over the target's highlighted point. */
-const PROMPT_LIFT_M = 0.35;
+/** A ground target's ring: its inner radius as a fraction of VERB_UI_TUNING.groundRingM, and its lift off the ground (m). */
+const GROUND_RING = { innerFrac: 0.75, lift: 0.02 } as const;
 
 /** A shell's geometry: the shape's own surface, centred on its bounding box so it scales about its middle. */
 interface ShellGeo {
@@ -60,7 +56,7 @@ class Outline {
     this.mat = new MeshBasicMaterial({ color: colour, side: BackSide, transparent: true, opacity: 0.6, depthWrite: false });
     this.flatMat = new MeshBasicMaterial({ color: colour, side: DoubleSide, transparent: true, opacity: 0.7, depthWrite: false });
     this.shell = new Mesh(undefined, this.mat);
-    this.ring = new Mesh(new RingGeometry(GROUND_RING.inner, GROUND_RING.outer, 28), this.flatMat);
+    this.ring = new Mesh(new RingGeometry(GROUND_RING.innerFrac, 1, 28), this.flatMat);
     this.ring.rotation.x = -Math.PI / 2;
     this.group.add(this.shell, this.ring);
     this.group.visible = false;
@@ -75,6 +71,7 @@ class Outline {
     if (!t) return null;
     if (t.kind === 'ground') {
       this.ring.visible = true;
+      this.ring.scale.setScalar(VERB_UI_TUNING.groundRingM);
       this.ring.position.set(t.at.x, world.terrain.heightAt(t.at.x, t.at.z) + GROUND_RING.lift, t.at.z);
       return this.ring.position.clone();
     }
@@ -118,7 +115,8 @@ class Outline {
       if (!(len > 1e-6)) continue;
       m.position.copy(_p).addScaledVector(_d, 0.5);
       m.quaternion.setFromUnitVectors(_up, _d.divideScalar(len));
-      m.scale.set(ROPE_SHELL_R, len, ROPE_SHELL_R);
+      const rr = VERB_UI_TUNING.ropeShellRadiusM;
+      m.scale.set(rr, len, rr);
       m.visible = true;
       const hi = v.a.y > v.b.y ? v.a : v.b;
       if (!top || hi.y > top.y) top = new Vector3(hi.x, hi.y, hi.z);
@@ -195,7 +193,7 @@ export class Highlight {
       return;
     }
     _p.copy(at);
-    if (!prompt.at) _p.y += PROMPT_LIFT_M;
+    if (!prompt.at) _p.y += VERB_UI_TUNING.promptLiftM;
     _p.project(camera);
     if (_p.z > 1 || _p.z < -1 || Math.abs(_p.x) > 1.1 || Math.abs(_p.y) > 1.1) {
       p.style.display = 'none';
@@ -220,7 +218,7 @@ export class Highlight {
     if (!g) {
       const box = shapeBox(s);
       const centre = box.min.clone().add(box.max).multiplyScalar(0.5);
-      const geo = shapeGeometry(s).clone();
+      const geo = shapeGeometry(s);
       geo.translate(-centre.x, -centre.y, -centre.z);
       geo.computeBoundingSphere();
       g = { geo, centre };
