@@ -28,6 +28,8 @@ import { WEAPON_MOVES, WEAPONS } from '../src/sim/weapons';
 import { resetTuning, setTuningValue, TUNING, tuningLeaves } from '../src/tuning/registry';
 import type { BoneName } from '../src/body/skeleton';
 import type { Finish, FighterMover, GroundQuery, Work, WorldPort } from '../src/world/types';
+// (Registers CHARACTER_TUNING, whose hip drop the footwork reads on a slope.)
+import { CHARACTER_TUNING } from '../src/world/characters';
 
 afterEach(() => {
   resetTuning('DAMAGE_TUNING');
@@ -387,6 +389,42 @@ describe('the seams', () => {
       // The feet stand where they would on flat ground (only y differs), and each leg reaches its foot as it would.
       expect(slope.out.length).toBe(flat.out.length);
       for (let i = 0; i < flat.out.length; i++) expect(Math.abs(slope.out[i] - flat.out[i])).toBeLessThan(1e-9);
+    }
+  });
+
+  it('lowers the hips for the downhill leg on a 0.3 grade: a planted ankle sits on its plant as on flat ground, walking or standing (core-fix)', () => {
+    /** The worst planted ankle's height above its plant less ANKLE_HEIGHT (floating > 0), walking `dir` then standing. */
+    const miss = (ground: GroundQuery | null, dir: [number, number]) => {
+      const sim = new CombatSim(5);
+      sim.walkable = { resolve: () => {}, isWalkable: () => true };
+      if (ground) sim.ground = ground;
+      const f = new Fighter('player', 'Walker', PLAYER_MOVES, { walkSpeed: 2.6 }, undefined, { ids: new IdCounter() });
+      sim.add(f);
+      const at = new Vector3();
+      let walking = 0;
+      let standing = 0;
+      for (let i = 0; i < 240; i++) {
+        if (i < 150) sim.commands.push(moveCommand(sim.frame + 1, f.id, dir[0], dir[1]));
+        sim.step();
+        if (i < 30 || (i >= 150 && i < 200)) continue;
+        for (const foot of [f.footwork.L, f.footwork.R]) {
+          if (foot.stepping) continue;
+          const shin = foot.side === 'L' ? 'shinL' : 'shinR';
+          const off = Math.abs(bonePoint(f.rig, shin, SKELETON[shin].length, at).y - foot.pos.y - ANKLE_HEIGHT);
+          if (i < 150) walking = Math.max(walking, off);
+          else standing = Math.max(standing, off);
+        }
+      }
+      return { walking, standing };
+    };
+    // (A 0.3 grade needs about 0.11 m of drop: inside the cap.)
+    expect(CHARACTER_TUNING.maxHipDropM).toBeGreaterThan(0.12);
+    for (const dir of [[0, 1], [0, -1], [1, 0]] as [number, number][]) {
+      const flat = miss(null, dir);
+      const grade = miss({ heightAt: (_x, z) => 0.3 * z }, dir);
+      // (Before: up to 0.108 m walking and 0.054 m more standing; the flat walk's stepping arc misses about 0.02 m.)
+      expect(grade.walking, `walking ${dir}`).toBeLessThan(flat.walking + 0.02);
+      expect(grade.standing, `standing ${dir}`).toBeLessThan(flat.standing + 0.01);
     }
   });
 });

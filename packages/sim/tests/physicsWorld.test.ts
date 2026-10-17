@@ -558,6 +558,67 @@ describe('determinism and lifetime', () => {
     }
   });
 
+  it('refreshQueries (core-fix): colliders made since the last step are found by queries after it, nothing moves, and its pairs are the overlaps re-raised', () => {
+    const p = makeWorld();
+    const { body } = groundAndBox(p, 0.5);
+    for (let t = 0; t < 120; t++) {
+      p.storePreStep();
+      p.step();
+      p.drain();
+    }
+    // At rest on the ground; a rope sensor made through it (a restored overlap) and a ball far away.
+    const rest = { t: { ...body.translation() }, v: { ...body.linvel() } };
+    const rope = p.rapier.createCollider(
+      RAPIER.ColliderDesc.capsule(1, 0.02)
+        .setSensor(true)
+        .setActiveCollisionTypes(RAPIER.ActiveCollisionTypes.ALL)
+        .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS)
+        .setTranslation(0, 0.5, 0)
+        .setCollisionGroups(collisionGroups('ROPE')),
+    );
+    p.register(rope, { kind: 'rope', joint: 3 });
+    const far = p.rapier.createCollider(RAPIER.ColliderDesc.ball(0.2).setTranslation(8, 3, 8).setCollisionGroups(collisionGroups('ENTITY')));
+    p.register(far, entity(4));
+    const seen = () => p.rapier.intersectionWithShape({ x: 8, y: 3, z: 8 }, { x: 0, y: 0, z: 0, w: 1 }, new RAPIER.Ball(0.1));
+    expect(seen()).toBeNull();
+    const forces = p.forceEventCount;
+    const pairs = p.refreshQueries();
+    expect(seen()?.handle).toBe(far.handle);
+    // Nothing moved or changed speed, the new overlap was re-raised as a start, and the dev counter is phase 8's.
+    expect(body.translation()).toEqual(rest.t);
+    expect(body.linvel()).toEqual(rest.v);
+    expect(pairs.some((q) => q.started && ownerKey(q.a) === 'entity:2' && ownerKey(q.b) === 'rope:3')).toBe(true);
+    expect(p.forceEventCount).toBe(forces);
+    // A second one, with nothing new, raises nothing (the overlap is already in the narrow phase) and moves nothing.
+    expect(p.refreshQueries().filter((q) => q.started)).toEqual([]);
+    expect(body.translation()).toEqual(rest.t);
+  });
+
+  it('a pair filter (core-fix) leaves the chosen pairs of bodies out of the step: no contact, no impulse, no event', () => {
+    const run = (filtered: boolean): { y: number; events: number } => {
+      const p = makeWorld();
+      const { box, body } = groundAndBox(p, 2);
+      const groundBody = p.rapier.getCollider([...p.rapier.colliders.getAll()].find((c) => c.handle !== box.handle)!.handle).parent()!;
+      if (filtered) {
+        p.addPairFilter((b1, b2) => (b1 === body.handle && b2 === groundBody.handle) || (b2 === body.handle && b1 === groundBody.handle));
+        box.setActiveHooks(RAPIER.ActiveHooks.FILTER_CONTACT_PAIRS);
+      }
+      let events = 0;
+      for (let t = 0; t < 90; t++) {
+        p.storePreStep();
+        p.step();
+        events += p.drain().length;
+      }
+      return { y: body.translation().y, events };
+    };
+    const solid = run(false);
+    const ghost = run(true);
+    expect(solid.y).toBeCloseTo(0.5, 2);
+    expect(solid.events).toBeGreaterThan(0);
+    expect(ghost.y).toBeLessThan(-1);
+    expect(ghost.events).toBe(0);
+  });
+
   it('primeQueries is refused once a body exists; free() is idempotent and ends the world', () => {
     const p = makeWorld();
     groundAndBox(p, 1);

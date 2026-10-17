@@ -23,11 +23,13 @@ import { makeProfile, type MotionMods, type MotionProfile, smoothProfile, target
 import { getPose, GUARD, POSE_SPECS, type PoseName } from '../body/poses';
 import {
   BONES,
+  bonePoint,
   forwardKinematics,
   blendPose,
   copyPose,
   makePose,
   makeRig,
+  type Pose,
   type PoseSpec,
   resolvePose,
   type Rig,
@@ -60,6 +62,7 @@ import { bladeFrame, gripSlide, heft, sampleOffsets, SECOND_HAND, WEAPON_MOVES, 
 import { bodyCapsules, type Capsule, closestOnSegment } from './bodyShapes';
 import type { Drop, HurtZone } from './combat';
 import { cloneCommand, type VerbCommand, type VerbId } from './commands';
+import { getTuningValue } from '../tuning/registry';
 
 export interface FighterStyle {
   footwork: FootworkStyle;
@@ -80,7 +83,7 @@ export const OUTFIGHTER_STYLE: FighterStyle = {
     shoulderRoll: 0,
   },
 };
-import { angleDelta, clamp, type Ease, Rng } from './math';
+import { angleDelta, clamp, DT, type Ease, Rng } from './math';
 import { type Aim, DEFENSES, type DefenseDef, type DefenseKind, ENEMY_MOVES, type Height, markerFrame, type MoveDef, PLAYER_MOVES } from './moves';
 
 export type FighterState =
@@ -352,8 +355,25 @@ export class Fighter {
   load: { massKg: number; mode: 'carry' | 'drag' | 'rope' } | null = null;
   /** Locomotion written by a mind instead of moveInput (the giant, scripted charges). */
   drive: Drive | null = null;
-  /** An upper-body pose blended over the animation. */
+  /**
+   * An upper-body pose blended over the animation (§1.5.3): world mode's locomotion shows it by its weight (see
+   * postureShown), its spine, hip height and hands over the walking legs.
+   */
   posture: Posture | null = null;
+  /**
+   * The posture as the body shows it (world mode: a fighter on a world's ground): `posture` ramped in, or the last one
+   * ramped out first, by 1/CHARACTER_TUNING.postureRampFrames of full weight a tick, so a posture set or cleared at once
+   * (the hands' carry and drag, a mind's sniff) never jumps the pose: a jump moves the head up to 0.2 m in one tick, a
+   * 12 m/s self-motion contact (§4.3). Saved (FighterRecord.postureShown). DEVIATION (§1.5.3 and §8.3's FighterRecV1
+   * list no such field): the ramp has to survive a load.
+   */
+  private postureShown: Posture | null = null;
+  /**
+   * A world point the near hand reaches for over the posture, as far as the arm allows: the grip of a dragged load.
+   * Written by the world in every phase 3 before updatePose (CharacterControllers.resolve); null without one. Not
+   * saved: written before it is read. DEVIATION (§1.5.3 lists no such field): the sim's fighter sees no entity.
+   */
+  reachAt: WorldV3 | null = null;
   /** A committed work action (state 'pickup'); see startWork. */
   work: Work | null = null;
   /** A buffered verb, re-tried until it starts or its frames run out (§5.0). */
@@ -920,6 +940,23 @@ export class Fighter {
     this.anim.procedural(fade);
   }
 
+  /**
+   * The cross-fade (frames, at least DS's 6) that takes the body from the pose it shows now back to its stance with the
+   * head moving at no more than CHARACTER_TUNING.workHeadSpeedMps (world mode, core-fix): the end of a work action whose
+   * bend the head limit held back (limitWorkBend) rose from it in 6 frames at up to 5.6 m/s. The animator's fade is a
+   * smoothstep, whose peak speed is 1.5 × its mean; the way is the head's to DS's guard × workRiseMargin (the walking
+   * stance stands a little above and behind the guard).
+   */
+  workFadeFrames(): number {
+    const half = SKELETON.head.length / 2;
+    forwardKinematics(this.pose, _limRig);
+    const from = bonePoint(_limRig, 'head', half, _limFrom);
+    forwardKinematics(getPose('guard'), _limRig);
+    const d = bonePoint(_limRig, 'head', half, _limTo).distanceTo(from);
+    const perTick = (characterTuning('workHeadSpeedMps') * DT) / this.scale;
+    return perTick > 0 ? Math.max(6, Math.ceil((1.5 * characterTuning('workRiseMargin') * d) / perTick)) : 6;
+  }
+
   // ---------------------------------------------------------------------------
   // Animation
   // ---------------------------------------------------------------------------
@@ -938,6 +975,9 @@ export class Fighter {
     }
     this.breath += 1 / 60;
     this.turnRate = turnRate;
+    // World mode (a fighter on a world's ground): the posture ramps toward what is asked (rampPosture).
+    const world = this.ground !== null;
+    if (world) this.rampPosture();
     const speedFrac = clamp(speed / Math.max(0.1, this.stats.walkSpeed), 0, 1);
     const want = clamp((speed + Math.abs(turnRate) * 20) / Math.max(0.1, this.stats.walkSpeed * 0.6), 0, 1);
     this.moveBlend += (want - this.moveBlend) * 0.25;
@@ -959,10 +999,14 @@ export class Fighter {
     const driven = this.anim.isProcedural || (handStrike && this.moveBlend > 0.25) || legsUnder;
     const [offX, offZ] = this.anim.isProcedural ? this.idle.stanceOffset() : [0, 0];
     if (driven) this.footwork.update(this, offX, offZ, localDirX, localDirZ, speedFrac);
+    // On a world's slope the hips go down for a downhill foot (Footwork.updateHipDrop; 0 on level ground).
+    if (world) this.footwork.updateHipDrop(this);
 
     let proc;
     if (this.anim.isProcedural) proc = this.locomotionPose(localDirX, localDirZ, offX, offZ);
     this.anim.update(this.stateFrame, proc);
+    // A work action's bend never swings the head faster than workHeadSpeedMps (world mode, core-fix).
+    if (world && this.work) this.limitWorkBend(this.anim.out);
     copyPose(this.anim.out, this.pose);
 
     // Hand strikes thrown on the move: keep the legs stepping under the punching torso.
@@ -974,6 +1018,8 @@ export class Fighter {
         L.root.x = this.anim.out.root.x + wx * 0.5;
         L.root.z = this.anim.out.root.z + wz * 0.5;
       }
+      // On a slope the hips go down for a downhill foot the leg wouldn't reach (Footwork.hipDrop; 0 on level ground).
+      L.root.y -= this.footwork.hipDrop;
       solveLegs(L, { at: this.footwork.localTarget('L', this, 0), hint: KNEE_HINT.L }, { at: this.footwork.localTarget('R', this, 0), hint: KNEE_HINT.R });
       if (legsUnder) copyPose(L, this.pose);
       else blendPose(this.anim.out, L, this.moveBlend, this.pose);
@@ -1007,6 +1053,93 @@ export class Fighter {
     P.root.sub(_com).applyQuaternion(_flipQ).add(_com);
     P.rot.pelvis.premultiply(_flipQ);
     P.blade.applyQuaternion(_flipQ);
+  }
+
+  /**
+   * The shown posture one tick on (world mode): toward `posture` at 1/postureRampFrames of full weight a tick; a
+   * different posture shown now is ramped out to nothing first, then the asked one in. Fresh objects (`posture` is the
+   * setters' to replace).
+   */
+  private rampPosture(): void {
+    const want = this.posture && this.posture.weight > 0 ? this.posture : null;
+    const shown = this.postureShown;
+    if (!want && !shown) return;
+    const step = 1 / Math.max(1, characterTuning('postureRampFrames'));
+    if (shown && shown.id !== want?.id) {
+      const w = shown.weight - step;
+      this.postureShown = w > 0 ? { id: shown.id, weight: w } : null;
+      return;
+    }
+    const cur = shown?.weight ?? 0;
+    const to = want!.weight;
+    this.postureShown = { id: want!.id, weight: to > cur ? Math.min(to, cur + step) : Math.max(to, cur - step) };
+  }
+
+  /**
+   * The shown posture over a locomotion pose spec (§1.5.3), by its weight k: the spine's angles and the hands' targets
+   * toward the posture's, the hips raised or lowered (and shifted) by the posture's root against the guard's, the feet
+   * left to the footwork (so the legs keep walking under it). With a reach point (a dragged grip), the hand on its side
+   * reaches for it by k: the arm's IK stops at full stretch, so it gets as near as the arm allows.
+   */
+  private applyPosture(spec: PoseSpec): void {
+    const shown = this.postureShown;
+    if (!shown || !(shown.weight > 0)) return;
+    const k = Math.min(1, shown.weight);
+    const P: PoseSpec = POSE_SPECS[shown.id];
+    const mix = (a: V3, b: V3): V3 => [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k];
+    const r = spec.root ?? [0, GUARD.root![1], 0];
+    const pr = P.root ?? GUARD.root!;
+    const gr = GUARD.root!;
+    spec.root = [r[0] + (pr[0] - gr[0]) * k, r[1] + (pr[1] - gr[1]) * k, r[2] + (pr[2] - gr[2]) * k];
+    for (const b of ['pelvis', 'abdomen', 'chest', 'head'] as const) spec[b] = mix(spec[b] ?? [0, 0, 0], P[b] ?? [0, 0, 0]);
+    for (const h of ['handL', 'handR'] as const) {
+      const a = spec[h];
+      const t = P[h];
+      if (!a || !t) continue;
+      const side = h === 'handL' ? 1 : -1;
+      const hint: V3 = [side * 0.35, -1, 0];
+      spec[h] = { at: mix(a.at, t.at), hint: mix(a.hint ?? hint, t.hint ?? hint) };
+    }
+    const reach = this.reachAt;
+    if (reach) {
+      // Fighter-local, unscaled: (reach − pos) turned by −yaw, ÷ scale (+x is the left).
+      const dx = reach.x - this.pos.x;
+      const dz = reach.z - this.pos.z;
+      const c = Math.cos(this.yaw);
+      const sn = Math.sin(this.yaw);
+      const local: V3 = [(dx * c - dz * sn) / this.scale, (reach.y - this.pos.y) / this.scale, (dx * sn + dz * c) / this.scale];
+      const h = local[0] >= 0 ? 'handL' : 'handR';
+      const a = spec[h];
+      if (a) spec[h] = { at: mix(a.at, local), hint: a.hint };
+    }
+  }
+
+  /**
+   * A work action's bend at no more than CHARACTER_TUNING.workHeadSpeedMps at the head (world mode, core-fix): when the
+   * track would move the head (the middle of its bone, relative to the feet) further than that in one tick from the pose
+   * shown last tick, the pose goes only that far toward it. DungeonStyle's pickup squat, which a take plays over its
+   * first half (9 frames for a stick), swung the head 0.53 m at up to 4.7 m/s, plus the step-in's 2.7 m/s: a 6.2 m/s
+   * self-motion hit on a block in front, past a human's 6 m/s v_safe, whose hitstun cancelled the take. The pose catches
+   * up within the track's hold. DEVIATION (§5.0 plays a work action's pose track as the verb gives it): the verb's
+   * timing (its actAt) is unchanged; only the pose may trail its keys.
+   */
+  private limitWorkBend(target: Pose): void {
+    const max = (characterTuning('workHeadSpeedMps') * DT) / this.scale;
+    const half = SKELETON.head.length / 2;
+    forwardKinematics(this.pose, _limRig);
+    const from = bonePoint(_limRig, 'head', half, _limFrom);
+    forwardKinematics(target, _limRig);
+    let d = bonePoint(_limRig, 'head', half, _limTo).distanceTo(from);
+    if (!(d > max)) return;
+    let u = max / d;
+    for (let i = 0; i < 3; i++) {
+      blendPose(this.pose, target, u, _limPose);
+      forwardKinematics(_limPose, _limRig);
+      d = bonePoint(_limRig, 'head', half, _limTo).distanceTo(from);
+      if (d <= max * 1.001) break;
+      u *= max / d;
+    }
+    copyPose(_limPose, target);
   }
 
   /** Chest rising and falling: slow and shallow when fresh, fast and heaving when gassed. */
@@ -1249,6 +1382,10 @@ export class Fighter {
       slide: (G.slide ?? 0) * f + 1 * g,
     };
     this.idle.apply(spec, (1 - m * 0.7) * f);
+    this.applyPosture(spec);
+    // On a slope the hips go down for a downhill foot the leg wouldn't reach (Footwork.hipDrop; 0 on level ground).
+    const drop = this.footwork.hipDrop;
+    if (drop > 0 && spec.root) spec.root = [spec.root[0], spec.root[1] - drop, spec.root[2]];
     return resolvePose(spec, this.locoPose);
   }
 
@@ -1377,6 +1514,7 @@ export class Fighter {
       load: this.load ? { massKg: this.load.massKg, mode: this.load.mode } : null,
       drive: this.drive ? { heading: this.drive.heading, speed: this.drive.speed, accel: this.drive.accel, climb: this.drive.climb } : null,
       posture: this.posture ? { id: this.posture.id, weight: this.posture.weight } : null,
+      postureShown: this.postureShown ? { id: this.postureShown.id, weight: this.postureShown.weight } : null,
       work: w
         ? { kind: w.kind, frames: w.frames, actAt: w.actAt, faceAt: v3Record(w.faceAt), keys: w.keys.map(trackKeyToRecord), cmd: w.cmd ? cloneCommand(w.cmd) : null }
         : null,
@@ -1467,13 +1605,13 @@ export class Fighter {
       const drop = pt.drop === null ? undefined : ctx.drops.find((x) => x.id === pt.drop);
       this.pickupTarget = {
         pos: drop ? drop.pos : readV3(pt.pos, new Vector3(), 'pickupTarget.pos'),
-        weapon: drop ? drop.weapon : weaponFromRecord(pt.weapon),
+        weapon: drop ? drop.weapon : weaponFromRecord(pt.weapon, 'pickupTarget.weapon'),
         grabAt: n(pt.grabAt, 'pickupTarget.grabAt'),
       };
     } else this.pickupTarget = null;
-    this.ammo = r.ammo ? { weapon: weaponFromRecord(r.ammo.weapon), count: n(r.ammo.count, 'ammo.count') } : null;
+    this.ammo = r.ammo ? { weapon: weaponFromRecord(r.ammo.weapon, 'ammo.weapon'), count: n(r.ammo.count, 'ammo.count') } : null;
     readV3(r.airStep, this.airStep, 'airStep');
-    this.weapon = r.weapon ? weaponFromRecord(r.weapon) : null;
+    this.weapon = r.weapon ? weaponFromRecord(r.weapon, 'weapon') : null;
     this.wounds.length = 0;
     for (const wr of r.wounds) this.wounds.push(woundFromRecord(wr));
     this.severed.clear();
@@ -1524,6 +1662,9 @@ export class Fighter {
     const dr = r.drive;
     this.drive = dr ? { heading: n(dr.heading, 'drive.heading'), speed: n(dr.speed, 'drive.speed'), accel: n(dr.accel, 'drive.accel'), climb: b(dr.climb, 'drive.climb') } : null;
     this.posture = r.posture ? { id: enumFromRecord(r.posture.id, POSTURES, 'posture.id'), weight: n(r.posture.weight, 'posture.weight') } : null;
+    this.postureShown = r.postureShown
+      ? { id: enumFromRecord(r.postureShown.id, POSTURES, 'postureShown.id'), weight: n(r.postureShown.weight, 'postureShown.weight') }
+      : null;
     this.work = r.work ? workFromRecord(r.work) : null;
     // (A command is checked by the verb system when it is used, as every command is: §5.0.)
     this.verbRequest = r.verbRequest ? { cmd: cloneCommand(r.verbRequest.cmd), frames: n(r.verbRequest.frames, 'verbRequest.frames') } : null;
@@ -1632,11 +1773,25 @@ export function timed(m: MoveDef, tempo: number): MoveDef {
 }
 
 const _localRig = makeRig();
+const _limRig = makeRig();
+const _limPose = makePose();
+const _limFrom = new Vector3();
+const _limTo = new Vector3();
 const _flipQ = new Quaternion();
 const _xAxis = new Vector3(1, 0, 0);
 const _com = new Vector3();
 /** m/s². */
 export const GRAVITY = 9.81;
+
+/**
+ * A CHARACTER_TUNING value (world/characters.ts, P08), read through the registry by name at use time: the body's
+ * posture ramp and work-bend limit are world mode's (a fighter on a world's ground), and the sim imports no world module.
+ */
+function characterTuning(key: 'postureRampFrames' | 'workHeadSpeedMps' | 'workRiseMargin'): number {
+  const v = getTuningValue('CHARACTER_TUNING', key);
+  if (typeof v !== 'number') throw new Error(`CHARACTER_TUNING.${key} is not a number`);
+  return v;
+}
 const _grip = new Vector3();
 const _dir = new Vector3();
 const _push = new Vector3();
@@ -1943,6 +2098,8 @@ export type FighterRecord = {
   load: { massKg: number; mode: 'carry' | 'drag' | 'rope' } | null;
   drive: Drive | null;
   posture: Posture | null;
+  /** The posture as shown (ramped toward `posture`, §1.5.3). */
+  postureShown: Posture | null;
   work: { kind: Work['kind']; frames: number; actAt: number; faceAt: WorldV3; keys: TrackKeyRecord[]; cmd: VerbCommand | null } | null;
   verbRequest: { cmd: VerbCommand; frames: number } | null;
   verbAim: WorldV3 | null;
@@ -1983,8 +2140,11 @@ function fighterById(fighters: readonly Fighter[], id: number, of: number): Figh
   return f;
 }
 
-/** A deep copy of plain data (numbers, strings, booleans, arrays, plain objects); undefined fields are left out. */
-function clonePlain<T>(v: T): T {
+/**
+ * A deep copy of plain data (numbers, strings, booleans, arrays, plain objects) in its key order; undefined fields are
+ * left out. (CombatSim's records use it too.)
+ */
+export function clonePlain<T>(v: T): T {
   if (Array.isArray(v)) return v.map((x) => clonePlain(x)) as T;
   if (v !== null && typeof v === 'object') {
     const o: Record<string, unknown> = {};
@@ -1997,19 +2157,35 @@ function clonePlain<T>(v: T): T {
   return v;
 }
 
-function weaponRecord(w: WeaponDef): WeaponRecord {
+/** A weapon as a record: null `def` for the shared WEAPONS entry, else its definition by value (the one shape in a save). */
+export function weaponRecord(w: WeaponDef): WeaponRecord {
   return { id: w.id, def: own(WEAPONS, w.id) === w ? null : clonePlain(w) };
 }
 
 /**
- * A WEAPONS entry by id, or a synthesised tool's definition by value. (The definition by value is copied as it is:
- * its fields are the WeaponDef type's, checked by P13's schema validation of the save, docs/M1-DESIGN.md §8.3.)
+ * A weapon record read back: a WEAPONS entry by id, or a synthesised tool's definition by value, whose id must be the
+ * record's (fighters' and CombatSim's records alike). Anything else (not an object, an unknown id, a definition of
+ * another id) is a broken record and throws a `save record:` error naming `field`. The definition by value is copied as
+ * it is: its fields are the WeaponDef type's, checked by P13's schema validation of the save (docs/M1-DESIGN.md §8.3).
  */
-function weaponFromRecord(r: WeaponRecord): WeaponDef {
-  if (r.def) return clonePlain(r.def);
-  const w = own(WEAPONS, strFromRecord(r.id, 'weapon.id'));
-  if (!w) throw new Error(`save record: no weapon ${r.id}`);
+export function weaponFromRecord(v: unknown, field: string): WeaponDef {
+  if (v === null || typeof v !== 'object' || Array.isArray(v)) throw brokenRecord(field, v, 'an object');
+  const r = v as Readonly<Record<string, unknown>>;
+  const id = strFromRecord(r.id, `${field}.id`);
+  if (r.def !== null) {
+    const def = r.def;
+    if (def === null || typeof def !== 'object' || Array.isArray(def)) throw brokenRecord(`${field}.def`, def, 'an object');
+    const did = (def as Readonly<Record<string, unknown>>).id;
+    if (did !== id) throw brokenRecord(`${field}.def.id`, did, `the record's weapon id ${JSON.stringify(id)}`);
+    return clonePlain(def) as unknown as WeaponDef;
+  }
+  const w = own(WEAPONS, id);
+  if (!w) throw new Error(`save record: ${field} is weapon ${JSON.stringify(id)}, which doesn't exist`);
   return w;
+}
+
+function brokenRecord(field: string, v: unknown, what: string): Error {
+  return new Error(`save record: ${field} is ${v === undefined ? 'missing' : JSON.stringify(v)}, not ${what}`);
 }
 
 function woundRecord(w: Wound): FighterRecord['wounds'][number] {

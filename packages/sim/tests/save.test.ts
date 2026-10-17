@@ -56,7 +56,8 @@ import { RulerMind } from '../src/world/creatures/rulerMind';
 import { spawnBox, spawnGrass, spawnLog, spawnRopeCoil, spawnSapling, spawnStick, spawnStone, spawnTree } from '../src/world/factory';
 import { physicsReady } from '../src/world/physics';
 import type { Quat, RulerState, V3 } from '../src/world/types';
-import { createWorld, type World, type WorldOptions } from '../src/world/world';
+import { NavSystem } from '../src/world/nav';
+import { createWorld, World, type WorldOptions } from '../src/world/world';
 import { WORLD_TUNING } from '../src/world/worldTuning';
 
 /** Rapier worlds and a few hundred ticks: explicit time limits (§11's convention), generous for a loaded machine. */
@@ -491,6 +492,8 @@ const INVENTORY: Record<string, Record<string, string>> = {
     resets: 'not saved: pending history resets (a load resets every history)',
     gravityY: 'not saved: WORLD_TUNING.gravityY (tuningOverrides)',
     freed: 'not saved: false for a live world',
+    pairFilters: 'not saved: code (the pair filters systems register when the world is built)',
+    hooks: "not saved: code (Rapier's contact-pair hook, calling the pair filters)",
   },
   WorldQueries: { physics: 'not saved: a link', entities: 'not saved: links to the entity store' },
   Terrain: {
@@ -645,7 +648,11 @@ const INVENTORY: Record<string, Record<string, string>> = {
     enabled: 'not saved: off exactly while the slab is active or just handed back; the loader sets it from bodies[].slab',
     jump: 'not saved: a load resets the pose history, which sets it',
   },
-  DownedBodies: { world: 'not saved: a link', byId: 'saved: bodies (each Slab as bodies[].slab)' },
+  DownedBodies: {
+    world: 'not saved: a link',
+    byId: 'saved: bodies (each Slab as bodies[].slab)',
+    ghosts: 'not saved: the active slabs with bodies they are not clear of, an index of Slab.clearOf (set again with it)',
+  },
   Slab: {
     f: 'not saved: the fighter (a link)',
     body: 'not saved: the slab body, rebuilt (bodies[].slab.pose, lin, ang)',
@@ -656,6 +663,7 @@ const INVENTORY: Record<string, Record<string, string>> = {
     hold: 'saved: bodies[].slab.hold',
     handedBack: 'saved: bodies[].slab.handedBack',
     dv: 'saved: bodies[].slab.dv',
+    clearOf: 'not saved: the dynamic bodies its core overlaps, derived from the poses in every phase 4a (a load derives it from the restored poses)',
   },
   RulerBodies: {
     world: 'not saved: a link',
@@ -1446,6 +1454,51 @@ function angleDeg(a: Quat, b: Quat): number {
   return (2 * Math.acos(d) * 180) / Math.PI;
 }
 const dist = (a: V3, b: V3): number => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+
+describe('the loader (core-fix)', () => {
+  it('builds into a world made for a load: no player, no creatures, no navmesh until it builds one, once', async () => {
+    const empty = track(new World({ seed: 7, scene: 'empty', size: 50, nav: 'full', player: true, sparringApe: false, load: true }));
+    expect(empty.combat.fighters).toHaveLength(0);
+    expect(empty.player).toBeNull();
+    expect(empty.nav!.built).toBe(false);
+    // The options still say what the saved world was built with (they are saved again as they are).
+    expect(empty.options).toMatchObject({ player: true, sparringApe: false, nav: 'full' });
+    expect('load' in empty.options).toBe(false);
+    const w = await make({ nav: 'full' });
+    populate(w);
+    run(w, 20, new Rng(5));
+    const bytes = serializeWorld(w);
+    const build = vi.spyOn(NavSystem.prototype, 'build');
+    try {
+      const l = await load(bytes, { nav: 'full' });
+      expect(build).toHaveBeenCalledTimes(1);
+      expect(l.nav!.built).toBe(true);
+      expect(l.combat.fighters.map((f) => f.id)).toEqual(w.combat.fighters.map((f) => f.id));
+    } finally {
+      build.mockRestore();
+    }
+  });
+
+  it('keeps the saved contact graces and opens the load grace, and nothing else: no grace from making the fighters', async () => {
+    const w = await make();
+    const g = w.spawnCreature('giantApe', { x: 12, z: 12 }, 0);
+    // (AC-5's "AI paused": the giant's mind only senses, so the test needs none of P20's decisions.)
+    (w.minds.get(g) as CreatureMind).paused = true;
+    run(w, 30, new Rng(6));
+    const p = w.player!;
+    w.contacts.grace(p.id, w.tick + 40);
+    const bytes = serializeWorld(w);
+    const s = parsed(bytes) as unknown as SaveV1;
+    expect(s.contactGrace).toEqual([[p.id, w.tick + 40]]);
+    const l = await load(bytes);
+    // The player's saved grace (later than the load's); the giant's teleport while the loader made it (a grace to tick
+    // 3) is not the save's and is gone; a ruler's load opens none here (its body's history reset is its own).
+    expect(l.contacts.graceRecord()).toEqual([[p.id, w.tick + 40]]);
+    expect(l.contacts.graceRecord().some(([id]) => id === g.id)).toBe(false);
+    // And a save of the loaded world holds the same graces.
+    expect((parsed(serializeWorld(l)) as unknown as SaveV1).contactGrace).toEqual(s.contactGrace);
+  });
+});
 
 describe('a world at rest', () => {
   it("saved and loaded, matches the original within 1 cm and 1° over 10 s, and its contacts carry on as the original's", async () => {

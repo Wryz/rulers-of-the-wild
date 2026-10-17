@@ -1,8 +1,9 @@
 import { Vector3 } from 'three';
 import { MOVE_TUNING } from '../sim/rules';
+import { getTuningValue } from '../tuning/registry';
 import type { GroundQuery, V3 } from '../world/types';
 import { boolFromRecord, enumFromRecord, numFromRecord, readV3, v3Record } from './animator';
-import { ANKLE_HEIGHT, bonePoint, type Rig, SKELETON, type Side } from './skeleton';
+import { ANKLE_HEIGHT, bonePoint, type Rig, SKELETON, type Side, STAND_HEIGHT } from './skeleton';
 
 export interface FootworkStyle {
   /** Scales the stance (distance between the feet). */
@@ -74,6 +75,19 @@ const STEP_LEAD = 0.05;
 
 const _home = new Vector3();
 const _v = new Vector3();
+const _hip = new Vector3();
+/** A ground offset under a foot smaller than this (m, fighter-local) is level ground: f32 heights, no lowering. */
+const LEVEL_EPS = 1e-6;
+
+/**
+ * A CHARACTER_TUNING value (world/characters.ts), read through the registry by name when a foot is below the body's
+ * ground (a world's slope): the body module imports no world module.
+ */
+function hipTuning(key: 'maxHipDropM' | 'hipDropSpeedMps'): number {
+  const v = getTuningValue('CHARACTER_TUNING', key);
+  if (typeof v !== 'number') throw new Error(`CHARACTER_TUNING.${key} is not a number`);
+  return v;
+}
 
 function makeFoot(side: Side): Foot {
   return { side, pos: new Vector3(), from: new Vector3(), to: new Vector3(), stepping: false, t: 0, dur: 1, height: 0, lead: 0, gait: false };
@@ -131,6 +145,12 @@ export class Footwork {
   /** Last frame's gait swing length / landing lead (a step in flight adapts to them). */
   private gaitDur = 30;
   private gaitLead = 0;
+  /**
+   * m, fighter-local (unscaled): how far the hips are lowered for a downhill foot (updateHipDrop; core-fix). 0 on level
+   * ground, and always outside a world. Saved. DEVIATION (MAP gap-7 §3.5's footwork Save list has no such field): the
+   * drop is rate-limited, so it is state.
+   */
+  hipDrop = 0;
 
   constructor(public style: FootworkStyle) {}
 
@@ -417,20 +437,60 @@ export class Footwork {
 
   /**
    * Ankle IK target in fighter-local space, including step lift and an extra raise (toes), and the height of the
-   * ground under the foot above the body's own feet (0 on a flat floor).
-   *
-   * TODO(P08 character controller / P32 rendering, or the AC-9 playtest): on a slope the pelvis stays at the body's
-   * own ground height, so a foot planted further downhill than the leg can reach doesn't get there (rule 3: it
-   * floats or sinks). The target is right (on a 0.05 grade the rig's ankles sit exactly as on flat ground), but
-   * walking a 0.15 grade an ankle misses its planted height by up to 0.063 m and on 0.3 by 0.108 m (0.019 m on flat
-   * ground, the stepping arc), and standing on a 0.3 grade by up to 0.054 m more than on flat ground. Lower the
-   * pelvis for the downhill leg, or clamp the plant to the leg's reach.
+   * ground under the foot above the body's own feet (0 on a flat floor). On a slope a foot planted further downhill than
+   * the leg reaches from the hips is reached by lowering the hips (hipDrop; core-fix): walking a 0.3 grade an ankle
+   * missed its planted height by up to 0.108 m with the hips at the body's own ground height.
    */
   localTarget(side: Side, body: Body, raise: number): [number, number, number] {
     const f = this.foot(side);
     toLocal(f.pos, body, _v);
     const lift = f.stepping ? Math.sin(Math.PI * f.t) * f.height : 0;
     return [_v.x, ANKLE_HEIGHT + lift + raise + _v.y, _v.z];
+  }
+
+  /**
+   * The hips' drop one tick on (world ground; core-fix: rule 3, a planted foot neither floats nor sinks on a slope):
+   * toward hipDropTarget at no more than CHARACTER_TUNING.hipDropSpeedMps (× scale), so the hips never jump (the zones
+   * ride on them). The poses lower their root by `hipDrop` (sim/fighter.ts). Read once a tick, after `update`.
+   */
+  updateHipDrop(body: Body): void {
+    const target = this.hipDropTarget(body);
+    if (target === 0 && this.hipDrop === 0) return;
+    const step = (hipTuning('hipDropSpeedMps') * (1 / 60)) / (body.scale ?? 1);
+    this.hipDrop = target > this.hipDrop ? Math.min(target, this.hipDrop + step) : Math.max(target, this.hipDrop - step);
+  }
+
+  /**
+   * How far (fighter-local, unscaled) a standing body's hips (DS's stance: the root STAND_HEIGHT up, square) must go
+   * down so that each foot the ground puts below the body's own feet reaches its planted ankle target: per downhill foot,
+   * the drop that brings it within the leg's reach from its hip, less the drop the same foot would need on level ground
+   * (the stance's and the stepping arc's own, which DungeonStyle's poses keep), so on level ground it is exactly 0. The
+   * deeper foot's wins (the uphill leg just bends more), at most CHARACTER_TUNING.maxHipDropM. A foot whose ground is
+   * further below the body's than that is no slope (a foot planted in a hole for a tick, the pit under a cover a
+   * teleport stood the body on): it is left to the leg's reach, never chased with the whole body.
+   */
+  private hipDropTarget(body: Body): number {
+    let drop = 0;
+    let max = -1;
+    for (const side of ['L', 'R'] as const) {
+      const g = toLocal(this.foot(side).pos, body, _v).y;
+      if (!(g < -LEVEL_EPS)) continue;
+      if (max < 0) max = hipTuning('maxHipDropM');
+      if (g < -max) continue;
+      const [tx, ty, tz] = this.localTarget(side, body, 0);
+      const thigh = SKELETON[side === 'L' ? 'thighL' : 'thighR'];
+      const shin = SKELETON[side === 'L' ? 'shinL' : 'shinR'];
+      _hip.set(thigh.offset[0], STAND_HEIGHT + thigh.offset[1], thigh.offset[2]);
+      // Just inside the IK's full stretch (skeleton.ts solveTwoBone: a + b − 0.001).
+      const reach = thigh.length + shin.length - 0.002;
+      const horiz = Math.hypot(tx - _hip.x, tz - _hip.z);
+      const need = (y: number): number => {
+        const below = _hip.y - y;
+        return horiz >= reach ? Math.max(0, below) : Math.max(0, below - Math.sqrt(reach * reach - horiz * horiz));
+      };
+      drop = Math.max(drop, need(ty) - need(ty - g));
+    }
+    return drop > 0 ? Math.min(drop, max) : 0;
   }
 
   /**
@@ -490,6 +550,7 @@ export class Footwork {
       gaitDur: this.gaitDur,
       gaitLead: this.gaitLead,
       limp: limp ? { side: limp.side, amount: limp.amount } : null,
+      hipDrop: this.hipDrop,
     };
   }
 
@@ -513,6 +574,7 @@ export class Footwork {
     this.gaitLead = numFromRecord(r.gaitLead, 'footwork.gaitLead');
     if (r.limp) this.style.limp = { side: enumFromRecord(r.limp.side, SIDES, 'footwork.limp.side'), amount: numFromRecord(r.limp.amount, 'footwork.limp.amount') };
     else delete this.style.limp;
+    this.hipDrop = numFromRecord(r.hipDrop, 'footwork.hipDrop');
   }
 }
 
@@ -545,6 +607,8 @@ export type FootworkRecord = {
   gaitDur: number;
   gaitLead: number;
   limp: { side: Side; amount: number } | null;
+  /** The hips' drop for a downhill foot (core-fix). */
+  hipDrop: number;
 };
 
 function footToRecord(f: Foot): FootRecord {

@@ -361,6 +361,10 @@ describe('a log on a standing player', () => {
     expect(before).toBeLessThan(6.22);
     expect(rows[i + 1].post!.y).toBeLessThan(0); // still falling
     expect(after).toBeGreaterThanOrEqual(0.8 * before);
+    // The real rig's pins at 3.75 m: 5.89 m/s, Δv 4.74 down (hitstun), 85.9 % of the speed kept.
+    expect(before).toBeCloseTo(5.89, 2);
+    expect(rows[i].hit!.dv.y).toBeCloseTo(-4.74, 2);
+    expect(after / before).toBeCloseTo(0.859, 3);
     const hit = rows[i].hit!;
     expect(hit.damage).toBeGreaterThan(0);
     expect(hit.cause).toMatchObject({ kind: 'entity', entityId: id, held: false });
@@ -397,12 +401,11 @@ describe('a log on a standing player', () => {
     expect(slab).toHaveBeenCalledWith(p, hit.dv);
   });
 
-  // TODO(P08-fix, reported): AC-6 part 2 at the design's 4 m. The press puts the player down, and in the next phase 4a
-  // DownedBodies.launch enables the slab upright where the player stood, inside the falling log; Rapier's depenetration
-  // throws the 300 kg log up (+4.95 m/s at N + 1, measured) and it lands on the lying slab before it rolls off. Expected
-  // to fail until the slab is never enabled overlapping a dynamic body (start it lying when the queued Δv is a press, or
-  // a collision grace without ENTITY until clear); then `it.fails` fails and this becomes a plain `it` (P27's gate).
-  it.fails('AC-6 part 2 from 4 m in the press branch: the log keeps ≥ 80 % of its speed over the measured tick and rests on the terrain', async () => {
+  // AC-6 part 2 at the design's 4 m (core-fix, was `it.fails` until P08-fix). The press puts the player down, and in the
+  // next phase 4a DownedBodies.launch used to enable the slab upright where the player stood, inside the falling log:
+  // Rapier's depenetration threw the 300 kg log up (+4.95 m/s at N + 1, measured) and it landed on the lying slab. The
+  // slab is now never enabled overlapping a dynamic body: a press starts it lying (DownedBodies.startPose).
+  it('AC-6 part 2 from 4 m in the press branch: the log keeps ≥ 80 % of its speed over the measured tick and rests on the terrain', async () => {
     const w = await make({ seed: 3 });
     const p = w.player!;
     run(w, 10);
@@ -413,6 +416,11 @@ describe('a log on a standing player', () => {
     const before = speed(rows[i].pre);
     const after = speed(rows[i + 1].post);
     expect(rows[i].hit!.damage).toBeGreaterThan(0);
+    // The real rig's numbers at 4 m (§11.6's pins for the lab rig were 6.21 m/s and Δv 4.99): 6.38 m/s, Δv 5.09 down,
+    // the press branch by name (RF-27).
+    expect(before).toBeCloseTo(6.38, 2);
+    expect(rows[i].hit!.dv.y).toBeCloseTo(-5.09, 2);
+    expect(rows[i].hit!).toMatchObject({ knockdown: true, launched: false });
     expect(rows[i + 1].post!.y).toBeLessThan(0); // still falling
     expect(after).toBeGreaterThanOrEqual(0.8 * before);
     // It lands on the terrain, never on the body: no rest above 0.5 m on the way.
@@ -1072,6 +1080,28 @@ describe('ContactSystem records', () => {
     expect(w.contacts.inGrace(a.id, w.tick + 6)).toBe(true);
     expect(w.contacts.inGrace(a.id, w.tick + 7)).toBe(false);
     expect(() => w.contacts.restoreRecord([{ creature: 1, owner: 'nonsense:x', touching: 1, episodeStart: 1, cooldownUntil: -1 }])).toThrow(/bad owner key/);
+  });
+
+  it('restoreRecord replaces every runtime map, the graces included (core-fix): a grace the record doesn’t hold is gone', async () => {
+    const w = await make({ seed: 22 });
+    const p = w.player!;
+    const a = addApe(w, 4, 0);
+    run(w, 5);
+    spawnLog(w, { p: { x: 0, y: 3, z: 0 }, length: 2, mass: 40 });
+    run(w, 40);
+    const rec = w.contacts.toRecord();
+    expect(rec.length).toBeGreaterThan(0);
+    // Graces the saving world didn't have (as World construction or the loader's making of fighters opens them).
+    w.contacts.grace(p.id, w.tick + 30);
+    w.contacts.grace(a.id, w.tick + 40);
+    w.contacts.restoreRecord(JSON.parse(JSON.stringify(rec)));
+    expect(w.contacts.graceRecord()).toEqual([]);
+    expect(w.contacts.inGrace(p.id, w.tick + 1)).toBe(false);
+    expect(w.contacts.toRecord()).toEqual(rec);
+    // With the record's graces: exactly those.
+    w.contacts.grace(p.id, w.tick + 30);
+    w.contacts.restoreRecord(JSON.parse(JSON.stringify(rec)), [[a.id, w.tick + 9]]);
+    expect(w.contacts.graceRecord()).toEqual([[a.id, w.tick + 9]]);
   });
 
   it('a world rebuilt from the records (P13’s load) goes on as the saved one: the re-raised starts rebuild the counts, score nothing, and a restored episode still ends and starts again', async () => {

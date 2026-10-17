@@ -562,6 +562,8 @@ const FIGHTER_KEYS = [
   'load',
   'drive',
   'posture',
+  // core-fix: the posture as the body shows it (ramped toward `posture`, so it never jumps the pose).
+  'postureShown',
   'work',
   'verbRequest',
   'verbAim',
@@ -588,12 +590,14 @@ const FIGHTER_NOT_SAVED: Record<string, string> = {
   rng: "the save's rng table, through rngState (§8.3)",
   ruler: "the save's rulers (§8.3)",
   ground: 'the world, set again when the fighter joins a sim',
+  reachAt: "written by the world's controller in every phase 3 before updatePose reads it (core-fix: a dragged grip)",
 };
 
 const ANIMATOR_KEYS = ['snapshot', 'keys', 'mode', 'fadeLen', 'procT'];
 const ANIMATOR_NOT_SAVED: Record<string, string> = { out: 'rewritten by every update before it is read', source: "the fighter's pose, linked at construction" };
 
-const FOOTWORK_KEYS = ['L', 'R', 'steps', 'firstStepper', 'lastStepper', 'shift', 'shiftTarget', 'run', 'phase', 'wasGait', 'initialized', 'gaitDur', 'gaitLead', 'limp'];
+// (hipDrop: core-fix, the hips lowered for a downhill foot.)
+const FOOTWORK_KEYS = ['L', 'R', 'steps', 'firstStepper', 'lastStepper', 'shift', 'shiftTarget', 'run', 'phase', 'wasGait', 'initialized', 'gaitDur', 'gaitLead', 'limp', 'hipDrop'];
 const FOOT_KEYS = ['pos', 'from', 'to', 'stepping', 't', 'dur', 'height', 'lead', 'gait'];
 const FOOTWORK_NOT_SAVED: Record<string, string> = {
   style: 'given at construction (its `limp`, set by wounds at run time, is the record\'s `limp`)',
@@ -1045,6 +1049,10 @@ describe('records round-trip', () => {
       ['an unknown verb', (r) => (r.work = { ...(DONOR.work as Rec), kind: 'juggle' }), /work\.kind/],
       ['an unknown cause', (r) => (r.lastKnock = { tick: 1, cause: { ...((DONOR.lastKnock as Rec).cause as Rec), feature: 'magic' }, by: null }), /cause\.feature/],
       ['an unknown weapon', (r) => (r.weapon = { id: 'lightsaber', def: null }), /lightsaber/],
+      // One weapon reader for fighters and CombatSim (fighter.ts weaponFromRecord, core-fix): a definition by value of
+      // another weapon, or a weapon that is no record, is refused by name.
+      ['a definition by value of another weapon', (r) => (r.weapon = { id: 'katana', def: { ...WEAPONS.katana, id: 'kunai' } }), /weapon\.def\.id/],
+      ['a weapon that is no record', (r) => (r.ammo = { weapon: 'kunai', count: 3 }), /ammo\.weapon is "kunai", not an object/],
       ['a move from no table', (r) => (r.move = { source: 'pocket', id: 'jab', tempoKey: null }), /move\.source/],
       ['a move its table lacks', (r) => (r.move = { source: 'own', id: 'moonPunch', tempoKey: null }), /moonPunch/],
       ['a tempo bucket as a number', (r) => (r.move = { source: 'own', id: Object.keys(PLAYER_MOVES)[0], tempoKey: 1.1 }), /move\.tempoKey/],
