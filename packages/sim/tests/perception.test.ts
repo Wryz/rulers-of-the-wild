@@ -45,11 +45,15 @@ afterEach(() => {
 const DEG = Math.PI / 180;
 const LYING_X: Quat = { x: Math.sin(Math.PI / 4), y: 0, z: 0, w: Math.cos(Math.PI / 4) }; // local +Y along world −z
 
-/** A mind that only records what reaches it: the senses are driven by the tests, the body stands still. */
+/**
+ * A mind that only records what reaches it: the senses are driven by the tests, the body stands still. Its phase 2 does
+ * nothing (MindRegistry.sense runs each mind's own sight there, §6.1), so only the tests' calls move its awareness.
+ */
 class TestMind extends CreatureMind {
   readonly hurts: { cause: ImpactCause | null; attacker: Fighter | null; at: V3 }[] = [];
   readonly wounds: WoundRecord[] = [];
   onHurtHook: (() => void) | null = null;
+  sense(): void {}
   decide(): void {}
   think(): void {}
   onHurt(cause: ImpactCause | null, attacker: Fighter | null, at: V3): void {
