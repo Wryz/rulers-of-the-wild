@@ -391,6 +391,14 @@ describe('anchoring', () => {
     // A free entity already clear of the ground isn't moved.
     const log = w.entities.create(prism('dryWood', { length: 2, r: 0.1, sides: 6, p: { x: 0, y: 0.5, z: -3 }, q: LYING_Z }));
     expect(w.entities.unanchor(log)).toBe(0);
+    // Only a driven (anchored) entity is lifted: a fixed one turned free (a felled trunk on its hinge, a bent sapling on
+    // its root) keeps its pose, even partly in the ground.
+    const rooted = w.entities.create(prism('greenWood', { length: 2, r: 0.04, sides: 8, p: { x: 3, y: 0.8, z: -3 }, state: 'fixed', look: 'sapling' }));
+    expect(w.entities.depthBelowGround(rooted.shape, rooted.pose)).toBeGreaterThan(0.1);
+    const at = structuredClone(rooted.pose);
+    expect(w.entities.unanchor(rooted)).toBe(0);
+    expect(rooted.state).toBe('free');
+    expect(rooted.pose).toEqual(at);
     for (let t = 0; t < 240; t++) w.step();
     // Every stake fell over onto the ground and lies on it: none pushed through the heightfield.
     for (const s of stakes) {
