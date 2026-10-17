@@ -5,8 +5,9 @@
 //   ground; 0 on DS's flat floor, so the DS framing is unchanged there);
 // - the arena containment (`inside`, the side switch and the wall squeeze) is gone: the camera stays at least
 //   CAMERA_TUNING.groundClearanceM above the terrain, and trunks between it and the fight dissolve (render/cutout.ts);
-// - far plane RENDER_TUNING.cameraFar (600 m); CAMERA_TUNING is a registered live table.
-// Shake (trauma) is shared with the director through applyShake, which shakes whatever camera the frame is seen through.
+// - far plane RENDER_TUNING.cameraFar (600 m); CAMERA_TUNING is a registered live table;
+// - shake, the zoom punch and the slow-motion zoom moved to the director (render/cameraDirector.ts), which applies them
+//   to whichever camera the frame is seen through, so the rig no longer has its own.
 import { PerspectiveCamera, Vector3 } from 'three';
 import { defineTuning } from '@wild/sim';
 import { RENDER_TUNING } from './terrainView';
@@ -40,7 +41,16 @@ export const CAMERA_TUNING = defineTuning(
     focusMix: 0.55,
     /** The fight camera stays this far above the terrain under it (m): replaces DS's arena containment. */
     groundClearanceM: 0.3,
-    // Not §9.1 rows (P34 DEVIATIONS): DS values the changed camera code reads, so none is a bare constant.
+    // Not §9.1 rows (P34 DEVIATIONS): the DS values the changed and new camera code reads. (The framing arithmetic
+    // inside CameraRig.place — gap × 0.85, a giant's 2.2 m and 1.4 m per scale, chest heights — stays as DS wrote it.)
+    /** How fast the shake dies away (trauma per second; DS cameraRig). */
+    traumaDecay: 1.6,
+    /** The shake's reach at full trauma: across the screen (m) and in roll (rad) (DS cameraRig). */
+    shakeAmpM: 0.12,
+    shakeRollRad: 0.025,
+    /** How fast a zoom punch dies away (per second), and how much it narrows the view per unit (DS cameraRig). */
+    punchDecay: 4,
+    punchFov: 0.05,
     /** A camera cut never goes lower than this over the ground under it (m; DS cinematics.ts floor, over y = 0). */
     cutFloorM: 0.15,
     /** The view tightens by this while slow motion runs (fov divisor; DS game.ts camRig.zoom). */
@@ -51,6 +61,8 @@ export const CAMERA_TUNING = defineTuning(
     cutoutRadius: 0.3,
     cutoutSpreadPerM: 0.06,
     cutoutSpreadMax: 0.25,
+    /** A big opponent counts as this much more spread per unit of scale over 1 (m; DS game.ts updateCutout call). */
+    cutoutSpreadPerScale: 2.2,
     /** A big body or a heavy thing landing shakes the camera (DS bodyLanding, now from the sim's `land` event). */
     landShakePerHuman: 0.08,
     landShakeMax: 0.6,
@@ -72,12 +84,18 @@ export const CAMERA_TUNING = defineTuning(
     shakeMul: { unit: '×', source: 'DS', min: 0, max: 3, step: 0.05, label: 'shake ×' },
     focusMix: { unit: 'fraction', source: 'DS', min: 0, max: 1, step: 0.01, label: 'focus mix' },
     groundClearanceM: { unit: 'm', source: 'NEW: replaces arena containment (§10.6)', min: 0, max: 2, step: 0.05, label: 'ground clearance' },
+    traumaDecay: { unit: 'trauma/s', source: 'DS (cameraRig.ts update: 1.6/s)', min: 0.1, max: 10, step: 0.1, label: 'shake decay' },
+    shakeAmpM: { unit: 'm', source: 'DS (cameraRig.ts update: ±0.12 m)', min: 0, max: 1, step: 0.01, label: 'shake reach' },
+    shakeRollRad: { unit: 'rad', source: 'DS (cameraRig.ts update: ±0.025 rad)', min: 0, max: 0.2, step: 0.005, label: 'shake roll' },
+    punchDecay: { unit: '1/s', source: 'DS (cameraRig.ts update: 4/s)', min: 0.1, max: 20, step: 0.1, label: 'punch decay' },
+    punchFov: { unit: 'fov fraction per punch', source: 'DS (cameraRig.ts update: fov × (1 − 0.05·punch))', min: 0, max: 0.3, step: 0.005, label: 'punch narrows' },
     cutFloorM: { unit: 'm', source: 'DS (cinematics.ts place: 0.15 over y = 0); §10.6', min: 0, max: 2, step: 0.05, label: 'cut floor' },
     slowmoZoom: { unit: '× (fov divisor)', source: 'DS (game.ts: camRig.zoom = 1.12 in slow motion)', min: 1, max: 2, step: 0.01, label: 'slow-mo zoom' },
     cutoutHeightM: { unit: 'm', source: 'DS (game.ts cutFocus.y = 1), over the ground (§10.6)', min: 0, max: 3, step: 0.05, label: 'cutout height' },
     cutoutRadius: { unit: 'NDC', source: 'DS (game.ts updateCutout: 0.3)', min: 0.05, max: 1, step: 0.01, label: 'cutout radius' },
     cutoutSpreadPerM: { unit: 'NDC per m', source: 'DS (game.ts updateCutout: spread × 0.06)', min: 0, max: 0.5, step: 0.005, label: 'cutout per m' },
     cutoutSpreadMax: { unit: 'NDC', source: 'DS (game.ts updateCutout: ≤ 0.25)', min: 0, max: 1, step: 0.01, label: 'cutout spread max' },
+    cutoutSpreadPerScale: { unit: 'm per scale over 1', source: 'DS (game.ts updateCutout: (scale − 1) × 2.2)', min: 0, max: 10, step: 0.1, label: 'cutout per scale' },
     landShakePerHuman: { unit: 'trauma per human mass', source: 'DS (game.ts bodyLanding: 0.08·mass·hard)', min: 0, max: 1, step: 0.01, label: 'landing shake' },
     landShakeMax: { unit: 'trauma', source: 'DS (game.ts bodyLanding: ≤ 0.6)', min: 0, max: 1, step: 0.05, label: 'landing shake max' },
     landMinHumans: { unit: 'human masses', source: 'DS (game.ts bodyLanding: mass > 1.5)', min: 0, max: 20, step: 0.1, label: 'landing felt over' },
@@ -100,25 +118,10 @@ const FLAT: GroundFn = () => 0;
 
 const wrap = (a: number) => Math.atan2(Math.sin(a), Math.cos(a));
 
-/**
- * DS's camera shake: trauma² of two-sine noise, ±0.12 m across the screen and ±0.025 rad of roll, applied after the
- * camera has been aimed. `t` is a running clock (s).
- */
-export function applyShake(cam: PerspectiveCamera, trauma: number, t: number): void {
-  const s = trauma * trauma;
-  if (!(s > 0)) return;
-  const n = (fq: number, o: number) => Math.sin(t * fq + o) * 0.6 + Math.sin(t * fq * 2.3 + o * 1.7) * 0.4;
-  cam.updateMatrixWorld();
-  const right = _right.setFromMatrixColumn(cam.matrixWorld, 0);
-  const up = _upv.setFromMatrixColumn(cam.matrixWorld, 1);
-  cam.position.addScaledVector(right, n(47, 0) * s * 0.12).addScaledVector(up, n(53, 2) * s * 0.12);
-  cam.rotateZ(n(31, 5) * s * 0.025);
-}
-
 /** Keeps the camera's projection in step with the live tables (fov, far plane): reprojects only on a change. */
 export function setLens(cam: PerspectiveCamera, fov: number): void {
   const far = RENDER_TUNING.cameraFar;
-  if (Math.abs(cam.fov - fov) > 1e-3 || cam.far !== far) {
+  if (cam.fov !== fov || cam.far !== far) {
     cam.fov = fov;
     cam.far = far;
     cam.updateProjectionMatrix();
@@ -130,7 +133,7 @@ export function setLens(cam: PerspectiveCamera, fov: number): void {
  * between you and your opponent, high enough to look down over your shoulder — so both of
  * you are always in shot and they're never hidden behind you. It pulls back as you
  * separate (and for a giant) and swings round on a spring as you circle. Out of a fight
- * it sits behind you. Trauma-based shake on top.
+ * it sits behind you. (Its shake and zoom punch are the director's now.)
  */
 export class CameraRig {
   readonly camera: PerspectiveCamera;
@@ -143,11 +146,7 @@ export class CameraRig {
   /** Where the camera is (eased toward where it should be). */
   private readonly spot = new Vector3();
   private readonly look = new Vector3();
-  private trauma = 0;
-  private punch = 0;
-  private t = 0;
   private ready = false;
-  zoom = 1;
   /** The ground under a point (the director sets the terrain's; DS's flat floor by default). */
   ground: GroundFn = FLAT;
 
@@ -172,14 +171,6 @@ export class CameraRig {
   resize(w: number, h: number) {
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
-  }
-
-  addTrauma(amount: number) {
-    this.trauma = Math.min(1, this.trauma + amount * CAMERA_TUNING.shakeMul);
-  }
-
-  zoomPunch(amount: number) {
-    this.punch = Math.max(this.punch, amount);
   }
 
   /**
@@ -214,7 +205,6 @@ export class CameraRig {
   }
 
   update(dt: number, f: Followed, target: Followed | null) {
-    this.t += dt;
     if (!this.ready) this.snap(f, target);
     // Swing round to the heading: a critically damped spring, so a turn starts slowly,
     // carries, and settles without overshooting.
@@ -223,12 +213,7 @@ export class CameraRig {
     this.yawVel += (w * w * diff - 2 * w * this.yawVel) * dt;
     this.yaw = wrap(this.yaw + this.yawVel * dt);
     this.place(f, target, 1 - Math.exp(-dt * CAMERA_TUNING.follow));
-
-    this.trauma = Math.max(0, this.trauma - dt * 1.6);
-    this.punch = Math.max(0, this.punch - dt * 4);
     this.aim();
-    // Shake in screen space.
-    applyShake(this.camera, this.trauma, this.t);
   }
 
   /** The camera at the rig's position, looking at its look point, with its lens. */
@@ -237,7 +222,7 @@ export class CameraRig {
     cam.position.copy(this.spot);
     cam.up.set(0, 1, 0);
     cam.lookAt(this.look);
-    setLens(cam, (CAMERA_TUNING.fov * (1 - this.punch * 0.05)) / this.zoom);
+    setLens(cam, CAMERA_TUNING.fov);
   }
 
   /** Move toward where the camera should be (k = 1: there at once). */
@@ -284,5 +269,3 @@ export class CameraRig {
 const _want = new Vector3();
 const _aim = new Vector3();
 const _lookWant = new Vector3();
-const _right = new Vector3();
-const _upv = new Vector3();
