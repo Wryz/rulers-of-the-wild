@@ -367,7 +367,7 @@ describe('SfxAdapter', () => {
     // The last chops before it goes creak (RENDER_TUNING.creakBelowRemaining, where the look creaks too).
     a.handle(ev({ type: 'chop', tree: 5, point: { x: 40, y: 1, z: 0 }, remaining: RENDER_TUNING.creakBelowRemaining / 2 }), w);
     expect(calls.slice(-2).map((c) => c[0])).toEqual(['chop', 'creak']);
-    a.handle(ev({ type: 'joint', joint: 3, what: 'snap' }), w);
+    a.handle(ev({ type: 'joint', joint: 3, what: 'snap', point: { x: 0, y: 1, z: 0 } }), w);
     expect(calls.at(-1)).toEqual(['snap']);
     a.handle(ev({ type: 'dig', point: { x: 1, y: 0, z: 1 }, volumeM3: 0.04, pile: null }), w);
     expect(calls.at(-1)).toEqual(['dig']);

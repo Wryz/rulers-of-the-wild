@@ -27,6 +27,7 @@ export const DAMAGE_TUNING = defineTuning(
     minImpactJ: 5,
     hardLandingBluntOnly: true,
     zoneGraceTicks: 2,
+    integrityPointMass: true,
   },
   {
     kS: { unit: '—', source: 'SPEC:281' },
@@ -46,6 +47,11 @@ export const DAMAGE_TUNING = defineTuning(
       source: 'NEW: contacts starting this soon after a pose jump are never scored (RF-1)',
       min: 0,
       step: 1,
+    },
+    integrityPointMass: {
+      unit: '—',
+      source:
+        "NEW: orchestrator decision (P10's design conflict): an entity's integrity reads its effective mass at the contact point, 1/(1/m + (r×n)ᵀI⁻¹(r×n)), not its whole mass (departs from §4.3's m_eff table and SPEC:278 for integrity only; off = the table)",
     },
   },
 );

@@ -365,6 +365,40 @@ describe('anchoring', () => {
     expect(stake.touched).toBe(true);
   });
 
+  it('unanchor lifts a driven stake clear of the terrain (the lift returned), so it never starts dynamic inside the heightfield and stays in the world', async () => {
+    const w = await make();
+    // Stakes 1.4 m × r 0.05 m driven 0.15-0.3 m into the ground, upright and leaning up to 20°.
+    const stakes: Entity[] = [];
+    for (let i = 0; i < 8; i++) {
+      const lean = axisAngle({ x: Math.cos(i), y: 0, z: Math.sin(i) }, ((i % 3) * 10 * Math.PI) / 180);
+      const driven = 0.15 + (0.15 * i) / 7;
+      const p = { x: -6 + 1.7 * i, y: 0.7 - driven, z: 3 };
+      stakes.push(w.entities.create(prism('dryWood', { length: 1.4, r: 0.05, sides: 8, p, q: lean, state: 'anchored', look: 'stake' })));
+    }
+    w.step();
+    for (const s of stakes) {
+      const depth = w.entities.depthBelowGround(s.shape, s.pose);
+      expect(depth).toBeGreaterThan(0.1);
+      const y0 = s.pose.p.y;
+      const lift = w.entities.unanchor(s);
+      expect(lift).toBeCloseTo(depth, 6);
+      expect(s.pose.p.y - y0).toBeCloseTo(lift, 5);
+      // No vertex below the ground (f32 poses).
+      expect(w.entities.depthBelowGround(s.shape, s.pose)).toBeLessThan(1e-5);
+      expect(s.state).toBe('free');
+      expect(s.body!.isDynamic()).toBe(true);
+    }
+    // A free entity already clear of the ground isn't moved.
+    const log = w.entities.create(prism('dryWood', { length: 2, r: 0.1, sides: 6, p: { x: 0, y: 0.5, z: -3 }, q: LYING_Z }));
+    expect(w.entities.unanchor(log)).toBe(0);
+    for (let t = 0; t < 240; t++) w.step();
+    // Every stake fell over onto the ground and lies on it: none pushed through the heightfield.
+    for (const s of stakes) {
+      expect(s.pose.p.y).toBeGreaterThan(w.terrain.heightAt(s.pose.p.x, s.pose.p.z));
+      expect(w.entities.depthBelowGround(s.shape, s.pose)).toBeLessThan(0.02);
+    }
+  });
+
   it('anchor() drives a free stake: fixed body, depth × anchorHoldNPerM, velocities zero', async () => {
     const w = await make();
     const stake = w.entities.create(prism('greenWood', { length: 1, r: 0.04, sides: 8, p: { x: 0, y: 0.8, z: 0 } }));

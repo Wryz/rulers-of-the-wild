@@ -286,6 +286,39 @@ describe('solid pairs read the contact manifolds (A lab normals.mjs (2))', () =>
   });
 });
 
+describe("an entity's integrity at its effective mass at the contact point (DAMAGE_TUNING.integrityPointMass)", () => {
+  /** The energy of a 300 kg × 4.4 m log's first landing on flat terrain, dropped from 2 m tilted `deg` about z. */
+  async function firstLanding(deg: number, pointMass: boolean): Promise<number> {
+    DAMAGE_TUNING.integrityPointMass = pointMass;
+    const w = await make({ seed: 2, player: false });
+    const a = (deg * Math.PI) / 180;
+    // Local +y (the axis) along world x, then tilted about z: the +x end down by `deg`.
+    const q = { x: 0, y: 0, z: Math.sin((-Math.PI / 2 - a) / 2), w: Math.cos((-Math.PI / 2 - a) / 2) };
+    const id = spawnLog(w, { p: { x: 0, y: 2 + 2.2 * Math.sin(a), z: 0 }, q, length: 4.4, mass: 300 });
+    for (let t = 0; t < 120; t++) {
+      w.step();
+      const land = w.events.find((e): e is Extract<WorldEvent, { type: 'land' }> => e.type === 'land' && e.entity === id);
+      if (land) return land.energy;
+    }
+    throw new Error('the log never landed');
+  }
+
+  it('a log landing flat scores its whole mass; landing on its end, about a third (the rod end met at 30°: m/3.25); the lever off, the whole mass', async () => {
+    const flatOn = await firstLanding(0, true);
+    const flatOff = await firstLanding(0, false);
+    const endOn = await firstLanding(30, true);
+    const endOff = await firstLanding(30, false);
+    // Same drop, same physics up to the first contact: only m_eff differs. The log lies across the seams of four 25 m
+    // terrain tiles (x = 0, z = 0): one contact for all of them, at the middle of its length (groundHit).
+    expect(flatOff).toBeGreaterThan(1000);
+    expect(flatOn / flatOff).toBeGreaterThan(0.95);
+    expect(flatOn / flatOff).toBeLessThanOrEqual(1 + 1e-9);
+    // The end 2.2 m from the centre of mass, 1.91 m of it across the ground's normal: 1/(1 + 1.91² × 12 / 4.4²) ≈ 0.31.
+    expect(endOn / endOff).toBeGreaterThan(0.25);
+    expect(endOn / endOff).toBeLessThan(0.4);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Logs on players: the AC-6 measured tick, episodes, bounces
 // ---------------------------------------------------------------------------

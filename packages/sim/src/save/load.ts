@@ -79,6 +79,7 @@ import {
   type JointRecV1,
   type KccRecV1,
   type MindRecV1,
+  type RulerBodyRecV1,
   SAVE_FORMAT,
   SAVE_FORMAT_VERSION,
   SAVE_V1_KEYS,
@@ -484,6 +485,17 @@ function crossCheck(s: SaveV1): void {
     if (q && !(q.creature < c.creature || (q.creature === c.creature && q.owner < c.owner))) {
       throw new Error(`save record: contacts are not sorted by (creature, owner) without repeats at ${p}`);
     }
+  });
+  // A ruler body's mover memory (rulerBody()): the entities it names below the counter (a support or a deflecting
+  // obstacle outlives its entity, a vanished cover is the point, but an id the world hasn't given yet would latch onto the
+  // next entity made).
+  s.bodies.forEach((b, i) => {
+    const r = b.ruler;
+    if (!r) return;
+    const p = `bodies[${i}].ruler`;
+    if (r.deflect) counted('entity', r.deflect.entity, `${p}.deflect.entity`);
+    r.supports.forEach((x, k) => counted('entity', x.entity, `${p}.supports[${k}].entity`));
+    if (r.coverBreak?.cause.entityId != null) counted('entity', r.coverBreak.cause.entityId, `${p}.coverBreak.cause.entityId`);
   });
   s.contactGrace.forEach(([id], i) => {
     counted('fighter', id, `contactGrace[${i}]`);
@@ -1170,8 +1182,58 @@ function bodies(v: unknown, p: string): BodiesRecV1 {
         dv: nullable(s.dv, `${q}.dv`, v3),
       };
     }),
-    // TODO(P11): RulerBodyRecV1's exact fields; P11's RulerBodies.restoreRecord reads them.
-    ruler: nullable(o.ruler, `${p}.ruler`, (x, q) => obj(x, q) as NonNullable<BodiesRecV1['ruler']>),
+    ruler: nullable(o.ruler, `${p}.ruler`, rulerBody),
+  };
+}
+
+/**
+ * A ruler's body (P11's RulerBodies.toRecord, world/rulerBody.ts), every field checked: the frozen pose is the 12 bones
+ * in BONES order while dynamic and empty standing, the history 0 or 6 numbers a bone, the supports in increasing entity
+ * order. The entity ids it names are checked against the counter in crossCheck.
+ */
+function rulerBody(v: unknown, p: string): RulerBodyRecV1 {
+  const o = exactKeys(
+    obj(v, p),
+    ['dynamic', 'pose', 'lin', 'ang', 'local', 'history', 'sleeping', 'jump', 'climbFloor', 'deflect', 'supports', 'coverBreak'],
+    p,
+  );
+  const dynamic = bool(o.dynamic, `${p}.dynamic`);
+  const local = arr(o.local, `${p}.local`).map((x, i) => {
+    const q = `${p}.local[${i}]`;
+    const l = exactKeys(obj(x, q), ['bone', 'p', 'q'], q);
+    if (l.bone !== BONES[i]) fail(`${q}.bone`, l.bone, `the bone ${BONES[i] ?? 'none'} (BONES order)`);
+    return { bone: BONES[i], p: v3(l.p, `${q}.p`), q: quat(l.q, `${q}.q`) };
+  });
+  if (local.length !== (dynamic ? BONES.length : 0)) fail(`${p}.local`, local.length, `${dynamic ? BONES.length : 0} bones (dynamic ${dynamic})`);
+  const history = arr(o.history, `${p}.history`).map((x, i) => fin(x, `${p}.history[${i}]`));
+  if (history.length !== 0 && history.length !== 6 * BONES.length) fail(`${p}.history`, history.length, `0 or ${6 * BONES.length} numbers`);
+  const supports = arr(o.supports, `${p}.supports`).map((x, i) => {
+    const q = `${p}.supports[${i}]`;
+    const s = exactKeys(obj(x, q), ['entity', 'tick', 'credit'], q);
+    return { entity: pos(s.entity, `${q}.entity`), tick: int(s.tick, `${q}.tick`), credit: strs(s.credit, `${q}.credit`) };
+  });
+  supports.forEach((s, i) => {
+    if (i > 0 && !(s.entity > supports[i - 1].entity)) fail(`${p}.supports[${i}].entity`, s.entity, 'an entity after the one before it (increasing, no repeats)');
+  });
+  return {
+    dynamic,
+    pose: pose3(o.pose, `${p}.pose`),
+    lin: v3(o.lin, `${p}.lin`),
+    ang: v3(o.ang, `${p}.ang`),
+    local,
+    history,
+    sleeping: bool(o.sleeping, `${p}.sleeping`),
+    jump: bool(o.jump, `${p}.jump`),
+    climbFloor: nullable(o.climbFloor, `${p}.climbFloor`, fin),
+    deflect: nullable(o.deflect, `${p}.deflect`, (x, q) => {
+      const d = exactKeys(obj(x, q), ['entity', 'tick'], q);
+      return { entity: pos(d.entity, `${q}.entity`), tick: int(d.tick, `${q}.tick`) };
+    }),
+    supports,
+    coverBreak: nullable(o.coverBreak, `${p}.coverBreak`, (x, q) => {
+      const c = exactKeys(obj(x, q), ['tick', 'cause'], q);
+      return { tick: int(c.tick, `${q}.tick`), cause: cause(c.cause, `${q}.cause`) };
+    }),
   };
 }
 

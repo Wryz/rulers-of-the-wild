@@ -18,7 +18,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { moveCommand } from '../src/sim/commands';
 import type { Fighter } from '../src/sim/fighter';
 import { createPlayer } from '../src/sim/roster';
-import { resetTuning } from '../src/tuning/registry';
+import { resetTuning, setTuningValue } from '../src/tuning/registry';
 import { spawnBox, spawnLog, spawnRopeCoil, spawnSapling, spawnStarterAxe, spawnStick, spawnTree } from '../src/world/factory';
 import { bendAngle, JOINT_TUNING, nnls, revoluteAngle } from '../src/world/joints';
 import { MATERIALS } from '../src/world/materials';
@@ -291,6 +291,10 @@ describe('tripwires (§4.9)', () => {
     w.events.length = 0;
     ape.vel.set(0, 0, 0);
     ape.walkVel.set(0, 0, 4);
+    // RF-2 is about the queue, so this crossing gives the prop the uncapped half of p (195 N·s, which the fit read as
+    // 11.7 kN when it saw the shares): the end-speed cap (tripwireEndSpeedMul, SIM-fix) would give it 72 N·s and hide a
+    // fit that reads shares. With the cap, the prop's share is checked below.
+    setTuningValue('JOINT_TUNING', 'tripwireEndSpeedMul', Infinity);
     w.joints.tripwire(w, vine, { kind: 'fighter', id: ape.id, part: 'zone' });
     const [t] = tripwires(w.events);
     expect(t).toMatchObject({ joint: vine, snapped: false, loosed: [] });
@@ -308,6 +312,24 @@ describe('tripwires (§4.9)', () => {
     expect(snaps(ev)).toEqual([]);
     expect(w.joints.get(vine)).toBeDefined();
     expect(peak).toBeLessThan(6000);
+    // With the cap (the default), the same crossing gives the 18 kg prop its mass × the ape's 4 m/s across the rope.
+    resetTuning('JOINT_TUNING');
+    run(w, 30);
+    w.events.length = 0;
+    newCrossings(w);
+    ape.vel.set(0, 0, 0);
+    ape.walkVel.set(0, 0, 4);
+    w.joints.tripwire(w, vine, { kind: 'fighter', id: ape.id, part: 'zone' });
+    // (The prop has moved since, so the rope's line, and the speed across it, are new: read from the load.)
+    const [t2] = tripwires(w.events);
+    expect(t2.snapped).toBe(false);
+    const across = (t2.loadN * JOINT_TUNING.tripwireWindowS) / 97.56;
+    expect(across).toBeGreaterThan(1);
+    const q2 = w.entities.pendingImpulses().filter((x) => x.id === prop);
+    expect(q2).toHaveLength(1);
+    const share2 = Math.hypot(q2[0].j.x, q2[0].j.y, q2[0].j.z);
+    expect(share2).toBeCloseTo(ent(w, prop).mass * across, 6);
+    expect(share2).toBeLessThan((97.56 * across) / 2);
   });
 
   it('a fighter working on a rope or the entity at its end is no tripwire (RT-5); standing still in it carries nothing across', async () => {
@@ -345,7 +367,7 @@ describe('tripwires (§4.9)', () => {
     expect(tripwires(w.events)).toEqual([]);
   });
 
-  it('a crossing whose load beats an anchored stake’s capacity pulls it loose (an ape’s 3,902 N against 1,200 N): `loosed`, free, dynamic, its half of p queued; a player’s 1,099 N leaves it driven', async () => {
+  it('a crossing whose load beats an anchored stake’s capacity pulls it loose (an ape’s 3,902 N against 1,200 N): `loosed`, free, dynamic, its capped share queued, and it leaves no faster than the ape crossed; a player’s 1,099 N leaves it driven', async () => {
     const w = await make();
     const postId = spawnBox(w, { p: { x: -2.2, y: 0.3, z: 0 }, size: [0.4, 0.6, 0.4], material: 'dryWood', state: 'fixed', look: 'post' });
     const stakeAt = (z: number): number => spawnLog(w, { p: { x: 2.2, y: 0.2, z }, q: { x: 0, y: 0, z: 0, w: 1 }, length: 1, r: 0.04, state: 'anchored' });
@@ -376,19 +398,37 @@ describe('tripwires (§4.9)', () => {
     expect(s.state).toBe('free');
     expect(s.anchor).toBeNull();
     expect(s.body!.isDynamic()).toBe(true);
-    // Its share: half of p, along the rope toward the crossing point (−x), queued for the next 4d.
+    // Its share, along the rope toward the crossing point (−x), queued for the next 4d: half of p (195 N·s) capped at
+    // the stake's mass × the ape's 4 m/s across the rope × tripwireEndSpeedMul (≈ 9.2 N·s for this 2.3 kg stake).
+    // (Before the cap it was the whole half of p, which sent the stake off at ≈ 85 m/s to shatter on the post.)
     const q = w.entities.pendingImpulses().filter((x) => x.id === stake);
     expect(q).toHaveLength(1);
-    expect(Math.hypot(q[0].j.x, q[0].j.y, q[0].j.z)).toBeCloseTo((97.56 * 4) / 2, 6);
+    const share = Math.hypot(q[0].j.x, q[0].j.y, q[0].j.z);
+    expect(share).toBeCloseTo(s.mass * 4 * JOINT_TUNING.tripwireEndSpeedMul, 6);
+    expect(share).toBeLessThan((97.56 * 4) / 2);
     expect(q[0].j.x).toBeLessThan(0);
     expect(w.entities.pendingImpulses().filter((x) => x.id === stake2)).toEqual([]);
     // Lifted clear of the ground (knockLoose: its driven end out of the heightfield).
     expect(s.pose.p.y - 0.5).toBeGreaterThanOrEqual(w.terrain.heightAt(s.pose.p.x, s.pose.p.z) - 1e-6);
-    // The vine holds (3,902 N < 6 kN). Not asserted past the next 4d: §4.9's share (half of p, 195 N·s) sends this
-    // 2.3 kg stake off at ≈ 85 m/s and it shatters on the post (reported to the design as a risk, not a rule of P10's).
-    const ev = run(w, 1);
+    // The vine holds (3,902 N < 6 kN); the stake leaves at the ape's speed across the rope (its centre: the share over
+    // its mass; one tick of gravity on top), and stays whole.
+    // The share alone sends its centre off at the ape's 4 m/s across the rope (its body's mass is the record's).
+    expect(share / s.body!.mass()).toBeCloseTo(4 * JOINT_TUNING.tripwireEndSpeedMul, 5);
+    // Then physics: applied at its top, the share spins it, and its foot sliding on the ground adds a little (4.7 m/s
+    // measured), an order of magnitude under the uncapped 85 m/s; it doesn't shatter.
+    let fastest = 0;
+    const ev = run(w, 30, () => {
+      const e = w.entities.get(stake);
+      if (e) fastest = Math.max(fastest, Math.hypot(e.vel.lin.x, e.vel.lin.y, e.vel.lin.z));
+    });
+    const e = ent(w, stake);
+    fastest = Math.max(fastest, Math.hypot(e.vel.lin.x, e.vel.lin.y, e.vel.lin.z));
     expect(snaps(ev)).toEqual([]);
     expect(w.joints.get(vine)).toBeDefined();
+    expect(fastest).toBeGreaterThan(2);
+    expect(fastest).toBeLessThan(2 * 4 * JOINT_TUNING.tripwireEndSpeedMul);
+    expect(ev.filter((x) => x.type === 'break' && x.entity === stake)).toEqual([]);
+    expect(e.integrity).toBe(1);
   });
 
   it('a fighter attacking the entity it has focused is no tripwire for a rope tied to it (RT-5); idle, or attacking something else, it is', async () => {
