@@ -1,4 +1,3 @@
-import type { PerkId } from './perks';
 import { Quaternion, Vector3 } from 'three';
 import { Animator, type TrackKey } from '../body/animator';
 import { Footwork, type FootworkStyle } from '../body/footwork';
@@ -169,9 +168,6 @@ export class Fighter {
   counter: Counter | null = null;
   lastDefendedSerial = -1;
   defenseCooldown: Record<DefenseKind, number> = { block: 0, duck: 0, weave: 0, slide: 0 };
-  /** Skills (from the shop) and the once-a-round ones already spent this round. */
-  perks = new Set<PerkId>();
-  perksUsed = new Set<PerkId>();
   /** The current defence was yours (Q / E met a strike), not the automatic guard. */
   defenseManual = false;
   /** The strike your parry / dodge was timed perfectly to (-1: none). */
@@ -443,7 +439,7 @@ export class Fighter {
     // Timing fits the body and the tool: big bodies move their limbs slower (like a
     // longer pendulum), small ones quicker; heavy weapons take longer to bring round.
     // Tired arms are slow arms.
-    let tempo = Math.sqrt(this.scale) * (move.weapon && this.weapon ? weaponTempo(this.weapon, this.scale) : 1) * (1 + (1 - this.stamina) * 0.6) * (this.perks.has('quickHands') ? 0.9 : 1);
+    let tempo = Math.sqrt(this.scale) * (move.weapon && this.weapon ? weaponTempo(this.weapon, this.scale) : 1) * (1 + (1 - this.stamina) * 0.6);
     // An opponent's strike always gives you a fair look at it: never less than a
     // quarter-second of wind-up (anything quicker is slowed — recovery and all).
     if (this.team === 'enemy') tempo = Math.max(tempo, ENEMY_MIN_STARTUP / move.startup);

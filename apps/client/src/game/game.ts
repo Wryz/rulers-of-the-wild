@@ -298,7 +298,6 @@ export class Game {
 
   private resetPlayer(x: number, z: number, yaw: number) {
     const p = this.player;
-    p.perksUsed.clear();
     p.pos.set(x, 0, z);
     p.yaw = yaw;
     p.vel.set(0, 0, 0);
@@ -905,17 +904,6 @@ export class Game {
       case 'defend':
         if (e.kind === 'slide') this.effects.dust(e.f.pos, 10, 0.4);
         break;
-      case 'perk': {
-        const label = e.perk === 'secondWind' ? 'SECOND WIND' : e.perk === 'lastStand' ? 'LAST STAND' : '';
-        if (label) {
-          this.marker(label, e.point, e.f === this.player ? 'parry big' : 'hurt');
-          if (e.f === this.player) {
-            this.sfx.counterReady();
-            this.slowmo = Math.max(this.slowmo, 0.4);
-          }
-        }
-        break;
-      }
       case 'swing':
         this.sfx.whoosh(e.move.weight);
         this.sfx.exhale(e.move.weight !== 'light', e.f.scale);

@@ -15,7 +15,6 @@ export * from './sim/enemies';
 export * from './sim/fighter';
 export * from './sim/math';
 export * from './sim/moves';
-export * from './sim/perks';
 export * from './sim/projectiles';
 export * from './sim/roster';
 export * from './sim/select';
