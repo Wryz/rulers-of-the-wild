@@ -548,8 +548,8 @@ describe('contact grace after a pose jump (RF-1)', () => {
       g.setState('idle');
       const g0 = w.contacts.unscored.grace;
       const ev = run(w, 10);
-      expect(w.contacts.touching(ent(id), { kind: 'fighter', id: g.id, part: 'ruler' }), label).toBeGreaterThan(0);
       if (grace) {
+        expect(w.contacts.touching(ent(id), { kind: 'fighter', id: g.id, part: 'ruler' }), label).toBeGreaterThan(0);
         expect(impactsOn(ev, g), label).toHaveLength(0);
         expect(ruler.rulerDamage, label).not.toHaveBeenCalled();
         expect(w.contacts.unscored.grace, label).toBeGreaterThan(g0);
@@ -560,6 +560,8 @@ describe('contact grace after a pose jump (RF-1)', () => {
         expect(hits[0].energy, label).toBeGreaterThan(1e6);
         expect(ruler.rulerDamage, label).toHaveBeenCalledTimes(1);
         expect(w.contacts.unscored.grace, label).toBe(g0);
+        // A million joules on a stake breaks it (§4.10, P10): the stake is gone, so nothing is left touching.
+        expect(ev.some((e) => e.type === 'break' && e.entity === id), label).toBe(true);
       }
     }
   });
@@ -828,13 +830,15 @@ describe('momentum (RF-4)', () => {
     const mat = w.addEntity({ material: 'leaves', shape: { kind: 'box', hx: 1, hy: 0.165, hz: 0.5 }, p: { x: 0, y: 0.165, z: 0 }, look: 'mat' });
     expect(w.entities.get(mat)!.mass).toBeCloseTo(66, 6);
     run(w, 30);
-    const body = w.physics.rapier.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(0, 2, 0));
+    // The shin comes down slowly (0.6 m/s): at 6 m/s it would score ≈ 1.2 kJ on a mat whose E_b is 66 J and break it
+    // (§4.10, P10), which isn't what this test is about.
+    const body = w.physics.rapier.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(0, 0.9, 0));
     rulerCollider(w, g, 'shinL', body, sensorDesc(RAPIER.ColliderDesc.cuboid(0.4, 0.3, 0.4)));
     const queue = vi.spyOn(w.entities, 'queueImpulse');
     const dv = vi.spyOn(w.downed, 'queueDv');
-    let y = 2;
-    const ev = run(w, 40, () => {
-      y = Math.max(0.5, y - 0.1);
+    let y = 0.9;
+    const ev = run(w, 50, () => {
+      y = Math.max(0.5, y - 0.01);
       body.setNextKinematicTranslation({ x: 0, y, z: 0 });
     });
     expect(w.contacts.touching(ent(mat), { kind: 'fighter', id: g.id, part: 'ruler' })).toBeGreaterThan(0);
