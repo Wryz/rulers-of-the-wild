@@ -4,7 +4,12 @@
 // 6 m of the route; the rim steeper than 45° all round; every route leg pathable on the ruler layer and every ape loop
 // on the human layer; the starter axe classifies as `stoneAxe` and the digging stick as `sharpStick` that digs; at
 // least 4 hanging vines ≥ 17.96 m (AC-3); the 6 m ledge. Also the rest of §6.7's layout rules, the cover's formula and
-// its edits through a save, and the definition of done: createWorld({ scene: 'clearing' }) builds in < 300 ms plus nav.
+// its edits through a save, and the definition of done: createWorld({ scene: 'clearing' }) builds in < 300 ms plus nav,
+// read as a warm build (the median CPU time of builds after two warm-ups; a cold first build also compiles the code
+// it runs, and is only logged).
+//
+// No placement may fall back to a spot that breaks a hard rule (ClearingSpawnData.hardFallbacks is 0): checked on the
+// three seeds below, and with the hard rules on ten more (no navmesh); the navmesh checks run on the three.
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { bodyStateBytes } from '../src/save/bodyState';
 import { loadWorld } from '../src/save/load';
@@ -101,7 +106,7 @@ function kinds(w: World) {
     rotten: by((e) => e.material === 'rottenWood'),
     grass: by((e) => e.look === 'grass'),
     snags: by((e) => e.look === 'snag'),
-    walls: by((e) => e.look === 'rock'),
+    walls: by((e) => e.look === 'boundary'),
     axe: lashes.map((j) => ({ stick: j.a.entity!, head: j.b.entity!, rope: j.rope!.entity, joint: j.id })),
   };
 }
@@ -162,14 +167,110 @@ function dump(w: World): string {
   return JSON.stringify({ ents, joints, heights, cover, spawn: w.spawnData, ids: w.ids.entity.next });
 }
 
+/**
+ * The route legs that run through a corridor: trunks on both sides of the leg's middle 90 % (within a grove's reach),
+ * none inside the route's lane, the free width between the nearest trunks on either side 12-16 m.
+ */
+function corridorLegs(w: World): { leg: number; left: number; right: number; nl: number; nr: number }[] {
+  const { trees } = kinds(w);
+  const route = w.spawnData!.route;
+  const out: { leg: number; left: number; right: number; nl: number; nr: number }[] = [];
+  for (let k = 0; k < route.length; k++) {
+    const a = route[k];
+    const b = route[(k + 1) % route.length];
+    const len = dist(a, b);
+    const ux = (b.x - a.x) / len;
+    const uz = (b.z - a.z) / len;
+    let left = Infinity;
+    let right = Infinity;
+    let nl = 0;
+    let nr = 0;
+    for (const t of trees) {
+      const rx = t.pose.p.x - a.x;
+      const rz = t.pose.p.z - a.z;
+      const along = rx * ux + rz * uz;
+      if (along < 0.05 * len || along > 0.95 * len) continue;
+      const side = rx * -uz + rz * ux;
+      const gap = Math.abs(side) - t.plant!.diameter / 2;
+      if (gap > T.corridorWidthM[1] / 2 + T.groveRadiusM[1]) continue;
+      if (side > 0) {
+        left = Math.min(left, gap);
+        nl++;
+      } else {
+        right = Math.min(right, gap);
+        nr++;
+      }
+    }
+    const width = left + right;
+    if (nl >= 2 && nr >= 2 && Math.min(left, right) >= T.routeClearM - F32_TOL && width >= T.corridorWidthM[0] - F32_TOL && width <= T.corridorWidthM[1] + F32_TOL) {
+      out.push({ leg: k, left, right, nl, nr });
+    }
+  }
+  return out;
+}
+
+/** How far ape home i may lie from its §6.7 distance: A "38 m" exactly, B "≈ 62 m" and C "≈ 78 m" within the jitter. */
+const homeTol = (i: number): number => (i === 0 ? 1e-9 : T.apeHomeDistJitterM + 1e-9);
+
+/** §6.7's hard rules (and the counts), as a list of what breaks them: empty when the Clearing keeps them all. */
+function hardRuleProblems(w: World): string[] {
+  const out: string[] = [];
+  const sd = w.spawnData!;
+  const k = kinds(w);
+  if (sd.hardFallbacks !== 0) out.push(`${sd.hardFallbacks} placements fell back to a spot breaking a hard rule`);
+  if (k.all.length !== 261 || k.joints.length !== 13) out.push(`${k.all.length} entities and ${k.joints.length} joints`);
+  if (k.trees.length !== 60) out.push(`${k.trees.length} trees`);
+  const gatePairs = gates(k.trees);
+  if (gatePairs.length !== T.gates) out.push(`${gatePairs.length} gates`);
+  const inGate = (a: Entity, b: Entity): boolean => gatePairs.some(([x, y]) => (x === a && y === b) || (x === b && y === a));
+  for (const t of k.trees) {
+    const p = xz(t);
+    const r = t.plant!.diameter / 2;
+    if (dist(p, spawn) - r < T.spawnClearM) out.push(`tree ${t.id} within ${T.spawnClearM} m of the spawn`);
+    if (routeDist(w, p) - r < T.routeClearM - F32_TOL) out.push(`tree ${t.id} ${(routeDist(w, p) - r).toFixed(2)} m from the route`);
+    if (dist(p, sd.lair!) - r < T.lairClearM) out.push(`tree ${t.id} near the lair`);
+    if (slopeDeg(w, p.x, p.z) >= T.maxSlopeDeg) out.push(`tree ${t.id} on a ${slopeDeg(w, p.x, p.z).toFixed(1)}° slope`);
+    for (const o of k.trees) if (o.id > t.id && !inGate(o, t) && dist(p, xz(o)) < T.treeMinGapM) out.push(`trees ${t.id} and ${o.id} ${dist(p, xz(o)).toFixed(2)} m apart`);
+  }
+  for (const e of [...k.saplings, ...k.boulders]) if (routeDist(w, xz(e)) < T.routeClearM - F32_TOL) out.push(`${e.look} ${e.id} on the route`);
+  for (const q of sd.route) if (dist(q, spawn) < T.routeMinSpawnDistM) out.push(`waypoint ${JSON.stringify(q)} near the spawn`);
+  for (const [a, b] of routeSegs(w)) {
+    const n = Math.ceil(dist(a, b));
+    for (let i = 0; i <= n; i++) {
+      const q = { x: a.x + ((b.x - a.x) * i) / n, z: a.z + ((b.z - a.z) * i) / n };
+      if (slopeDeg(w, q.x, q.z) > T.maxSlopeDeg) {
+        out.push(`leg ${JSON.stringify(a)} → ${JSON.stringify(b)} steeper than ${T.maxSlopeDeg}°`);
+        break;
+      }
+    }
+  }
+  let loop = 2 * dist(sd.lair!, sd.route[0]);
+  for (let i = 0; i < sd.route.length; i++) loop += dist(sd.route[i], sd.route[(i + 1) % sd.route.length]);
+  if (loop < 400 * 0.85 || loop > 400 * 1.15) out.push(`a patrol loop of ${loop.toFixed(0)} m`);
+  const bearings = sd.apeHomes.map((h) => Math.atan2(h.home.x - spawn.x, h.home.z - spawn.z));
+  sd.apeHomes.forEach((h, i) => {
+    if (Math.abs(dist(h.home, spawn) - T.apeHomeDistM[i]) > homeTol(i)) out.push(`home ${i} at ${dist(h.home, spawn).toFixed(1)} m`);
+    for (let j = i + 1; j < bearings.length; j++) {
+      let d = Math.abs(bearings[i] - bearings[j]) % (2 * Math.PI);
+      d = Math.min(d, 2 * Math.PI - d) * (180 / Math.PI);
+      if (d < T.apeHomeMinSepDeg - 1e-9) out.push(`homes ${i} and ${j} ${d.toFixed(1)}° apart`);
+    }
+  });
+  for (const g of k.grass) if (w.cover.at(g.pose.p.x, g.pose.p.z) < T.grassMinCover) out.push(`grass ${g.id} outside the meadows`);
+  if (k.vines.filter((j) => j.rope!.lengthM >= 17.96).length < 4) out.push('fewer than 4 vines ≥ 17.96 m');
+  if (corridorLegs(w).length < T.corridorLegs) out.push(`${corridorLegs(w).length} corridor legs`);
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // Counts
 // ---------------------------------------------------------------------------
 
 describe('the Clearing (§6.7)', () => {
-  it.each(SEEDS)('seed %i: exact counts of every kind, every one generated, untouched and uncredited', (seed) => {
+  it.each(SEEDS)('seed %i: exact counts of every kind, every one generated, untouched and uncredited; no hard-rule fallback', (seed) => {
     const w = world(seed);
     const k = kinds(w);
+    expect(w.spawnData!.hardFallbacks).toBe(0);
     expect(k.trees).toHaveLength(60);
     for (const t of k.trees) {
       expect(t.material).toBe('greenWood');
@@ -273,7 +374,7 @@ describe('the Clearing (§6.7)', () => {
     });
     const runs: string[] = [];
     for (const o of order) if (runs[runs.length - 1] !== o) runs.push(o);
-    expect(runs).toEqual(['tree', 'vine', 'coil', 'sapling', 'stone', 'flint', 'boulder', 'branch', 'log', 'rotten', 'grass', 'snag', 'cache', 'rock']);
+    expect(runs).toEqual(['tree', 'vine', 'coil', 'sapling', 'stone', 'flint', 'boulder', 'branch', 'log', 'rotten', 'grass', 'snag', 'cache', 'boundary']);
   });
 
   // -------------------------------------------------------------------------
@@ -362,44 +463,9 @@ describe('the Clearing (§6.7)', () => {
 
   it.each(SEEDS)('seed %i: two legs run through a grove the route splits: a tree-free corridor 12-16 m wide with trunks on both sides', (seed) => {
     const w = world(seed);
-    const { trees } = kinds(w);
-    const route = w.spawnData!.route;
-    let corridors = 0;
-    for (let k = 0; k < route.length; k++) {
-      const a = route[k];
-      const b = route[(k + 1) % route.length];
-      const len = dist(a, b);
-      const ux = (b.x - a.x) / len;
-      const uz = (b.z - a.z) / len;
-      // Trunks beside the leg's middle 90 %: their surface distance to its left and right.
-      let left = Infinity;
-      let right = Infinity;
-      let nl = 0;
-      let nr = 0;
-      for (const t of trees) {
-        const rx = t.pose.p.x - a.x;
-        const rz = t.pose.p.z - a.z;
-        const along = rx * ux + rz * uz;
-        if (along < 0.05 * len || along > 0.95 * len) continue;
-        const side = rx * -uz + rz * ux;
-        const gap = Math.abs(side) - t.plant!.diameter / 2;
-        if (gap > T.corridorWidthM[1] / 2 + T.groveRadiusM[1]) continue;
-        if (side > 0) {
-          left = Math.min(left, gap);
-          nl++;
-        } else {
-          right = Math.min(right, gap);
-          nr++;
-        }
-      }
-      // A corridor: trunks on both sides, none inside the route's lane, the free width between them 12-16 m.
-      const width = left + right;
-      if (nl >= 2 && nr >= 2 && Math.min(left, right) >= T.routeClearM - F32_TOL && width >= T.corridorWidthM[0] - F32_TOL && width <= T.corridorWidthM[1] + F32_TOL) {
-        corridors++;
-        console.info(`seed ${seed}: leg ${k} corridor ${left.toFixed(2)} + ${right.toFixed(2)} m, ${nl} | ${nr} trunks`);
-      }
-    }
-    expect(corridors).toBeGreaterThanOrEqual(T.corridorLegs);
+    const corridors = corridorLegs(w);
+    for (const c of corridors) console.info(`seed ${seed}: leg ${c.leg} corridor ${c.left.toFixed(2)} + ${c.right.toFixed(2)} m, ${c.nl} | ${c.nr} trunks`);
+    expect(corridors.length).toBeGreaterThanOrEqual(T.corridorLegs);
   });
 
   it.each(SEEDS)('seed %i: the gates stand at a grove edge beside the route: a person fits between the trunks, the giant does not', (seed) => {
@@ -416,10 +482,10 @@ describe('the Clearing (§6.7)', () => {
     }
   });
 
-  it.each(SEEDS)('seed %i: ape homes A, B, C at 38, 62 and 78 m, ≥ 100° apart, with 3-waypoint loops of 15 m; the player faces A', (seed) => {
+  it.each(SEEDS)('seed %i: ape homes A, B, C at 38, ≈ 62 and ≈ 78 m, ≥ 100° apart, with 3-waypoint loops of 15 m; the player faces A', (seed) => {
     const w = world(seed);
     const { apeHomes, playerYaw } = w.spawnData!;
-    expect(apeHomes.map((h) => dist(h.home, spawn))).toEqual(T.apeHomeDistM.map((d) => expect.closeTo(d, 9)));
+    apeHomes.forEach((h, i) => expect(Math.abs(dist(h.home, spawn) - T.apeHomeDistM[i]), `home ${i}`).toBeLessThanOrEqual(homeTol(i)));
     const bearings = apeHomes.map((h) => Math.atan2(h.home.x - spawn.x, h.home.z - spawn.z));
     for (let i = 0; i < 3; i++) {
       for (let j = i + 1; j < 3; j++) {
@@ -448,7 +514,9 @@ describe('the Clearing (§6.7)', () => {
     const w = world(seed);
     const k = kinds(w);
     const near = (es: Entity[], r: number): Entity[] => es.filter((e) => dist(xz(e), spawn) <= r + 1e-6);
-    expect(near(k.coils, T.coilNearSpawnM).map((e) => e.rope!.lengthM).sort((a, b) => a - b)).toEqual([8, 12, 18]);
+    // §6.7 puts the 12 m and 18 m coils within 20 m (and the cache's 8 m one beside the spawn); a grove-edge coil may lie
+    // that close too.
+    expect(near(k.coils, T.coilNearSpawnM).map((e) => e.rope!.lengthM)).toEqual(expect.arrayContaining([...T.coilNearSpawnLengthsM, T.starterCoilM]));
     expect(near(k.saplings, T.saplingNearSpawnM).length).toBeGreaterThanOrEqual(T.saplingsNearSpawn);
     expect(near(k.stones, T.stoneNearSpawnM).length).toBeGreaterThanOrEqual(T.stonesNearSpawn);
     expect(near(k.flint, T.flintNearSpawnM).length).toBeGreaterThanOrEqual(T.flintNearSpawn);
@@ -465,7 +533,7 @@ describe('the Clearing (§6.7)', () => {
     // Grass bundles in the meadows.
     for (const g of k.grass) expect(w.cover.at(g.pose.p.x, g.pose.p.z), `grass ${g.id}`).toBeGreaterThanOrEqual(T.grassMinCover);
     // Nothing lies on the spawn point.
-    for (const e of k.all) if (e.look !== 'rock') expect(dist(xz(e), spawn), `${e.look} ${e.id}`).toBeGreaterThanOrEqual(T.nearSpawnMinM - 1);
+    for (const e of k.all) if (e.look !== 'boundary') expect(dist(xz(e), spawn), `${e.look} ${e.id}`).toBeGreaterThanOrEqual(T.nearSpawnMinM - 1);
   });
 
   // -------------------------------------------------------------------------
@@ -474,6 +542,11 @@ describe('the Clearing (§6.7)', () => {
 
   it.each(SEEDS)('seed %i: the rim is steeper than 45° all round: every bearing crosses a band of it, then the rim top', (seed) => {
     const w = world(seed);
+    // The rim starts at R(θ) ≥ rimRadiusM − rimRadiusJitterM (in its norm): the rays start 2 m short of the nearest it can
+    // be, and skip the ledge (its 63° drop and end walls are not the rim).
+    const from = T.rimRadiusM - T.rimRadiusJitterM - 2;
+    const nearLedge = (x: number, z: number): boolean =>
+      [-1, 0, 1].some((ox) => [-1, 0, 1].some((oz) => clearingLedgeDepth(x + ox, z + oz) > 0));
     for (let deg = 0; deg < 360; deg += 1) {
       const a = (deg * Math.PI) / 180;
       const dx = Math.sin(a);
@@ -481,11 +554,15 @@ describe('the Clearing (§6.7)', () => {
       let steepest = 0;
       let run = 0;
       let longest = 0;
-      // From inside the valley out to the terrain's edge.
-      for (let r = 60; ; r += 0.1) {
+      // From the rim's foot out to the terrain's edge.
+      for (let r = from; ; r += 0.1) {
         const x = r * dx;
         const z = r * dz;
         if (Math.abs(x) > 99.9 || Math.abs(z) > 99.9) break;
+        if (clearingRimNorm(x, z) < from || nearLedge(x, z)) {
+          run = 0;
+          continue;
+        }
         const s = slopeDeg(w, x, z);
         steepest = Math.max(steepest, s);
         run = s > 45 ? run + 0.1 : 0;
@@ -697,21 +774,60 @@ describe('the Clearing (§6.7)', () => {
     for (const e of coils) expect(e.pose.p.y, `coil ${e.id}`).toBeGreaterThan(start.get(e.id)!.y - 0.1);
   });
 
+  it('the boundary walls: four fixed, undrawn boxes just outside the terrain, reaching boundaryWallAboveM over its edge', () => {
+    const w = world(S);
+    const walls = kinds(w).walls;
+    expect(walls).toHaveLength(4);
+    const t = w.terrain;
+    const half = (t.tilesX * t.tileSize) / 2;
+    let edgeTop = -Infinity;
+    for (let s = -half; s <= half; s += t.spacing) {
+      for (const [x, z] of [
+        [-half, s],
+        [half, s],
+        [s, -half],
+        [s, half],
+      ]) edgeTop = Math.max(edgeTop, t.originalHeightAt(x, z));
+    }
+    for (const e of walls) {
+      expect(e.state).toBe('fixed');
+      expect(e.look).toBe('boundary');
+      const b = e.shape as { kind: 'box'; hx: number; hy: number; hz: number };
+      expect(b.kind).toBe('box');
+      // Outside the terrain (its inner face on the edge), and high enough for a high arc.
+      expect(Math.max(Math.abs(e.pose.p.x) - b.hx, Math.abs(e.pose.p.z) - b.hz)).toBeCloseTo(half, 3);
+      expect(e.pose.p.y + b.hy).toBeGreaterThanOrEqual(edgeTop + T.boundaryWallAboveM - 0.5);
+    }
+  });
+
   it('a world smaller than the Clearing keeps only what lands on its terrain', async () => {
     const w = await make({ seed: S, size: 50 });
     const half = (w.terrain.tilesX * w.terrain.tileSize) / 2;
-    const off = w.entities.all().filter((e) => e.look !== 'rock' && (Math.abs(e.pose.p.x) > half || Math.abs(e.pose.p.z) > half));
+    const off = w.entities.all().filter((e) => e.look !== 'boundary' && (Math.abs(e.pose.p.x) > half || Math.abs(e.pose.p.z) > half));
     expect(off).toEqual([]);
-    expect(w.entities.all().filter((e) => e.look === 'rock')).toHaveLength(4);
+    expect(w.entities.all().filter((e) => e.look === 'boundary')).toHaveLength(4);
     expect(w.spawnData!.route).toHaveLength(8);
+  });
+
+  it('ten more seeds keep every hard rule (no navmesh)', async () => {
+    const problems: Record<number, string[]> = {};
+    for (const seed of [1, 2, 3, 42, 99, 2026, 31337, 123456789, 0x7fffffff, 0xcafebabe]) {
+      const w = await createWorld({ seed, scene: 'clearing', nav: 'off', player: false });
+      const p = hardRuleProblems(w);
+      if (p.length > 0) problems[seed] = p;
+      w.dispose();
+    }
+    expect(problems).toEqual({});
+    // And the three seeds the rest of this file reads.
+    for (const seed of SEEDS) expect(hardRuleProblems(world(seed)), `seed ${seed}`).toEqual([]);
   });
 
   // -------------------------------------------------------------------------
   // Navigation and the definition of done
   // -------------------------------------------------------------------------
 
-  it("every route leg is pathable on the ruler layer, every ape loop on the human layer, and the rim can't be climbed", async () => {
-    const w = await make({ seed: S, nav: 'full', player: false });
+  it.each(SEEDS)("seed %i: every route leg is pathable on the ruler layer, every ape loop on the human layer, and the rim can't be climbed", async (seed) => {
+    const w = await make({ seed, nav: 'full', player: false });
     const nav = w.nav!;
     const at = (p: XZ) => ({ x: p.x, y: w.terrain.heightAt(p.x, p.z), z: p.z });
     for (const [a, b] of routeSegs(w)) {
@@ -746,23 +862,28 @@ describe('the Clearing (§6.7)', () => {
       expect(nav.isWalkable('human', mid.x, mid.z)).toBe(true);
       expect(nav.isWalkable('ruler', mid.x, mid.z)).toBe(false);
     }
+    w.dispose(); // both navmeshes, before the next seed's
   });
 
-  it('createWorld({ scene: \'clearing\' }) builds in < 300 ms plus nav (best of 5, in CPU time)', async () => {
-    // CPU time of this worker, not wall time: the suite runs workers side by side on a shared machine, and a build's
-    // cost is the work it does, not how long it waits for a core. Wall time is logged beside it.
+  it('createWorld({ scene: \'clearing\' }) builds in < 300 ms plus nav: the median warm build, in CPU time', async () => {
+    // One seed, built 2 + 5 times: the first two warm the code up (the cold one is logged); the budget is the median of
+    // the next five. CPU time of this worker, not wall time: the suite runs workers side by side on a shared machine,
+    // and a build's cost is the work it does, not how long it waits for a core. Wall time is logged beside it.
     const cpu: number[] = [];
     const wall: number[] = [];
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 7; i++) {
       const c0 = process.cpuUsage();
       const t0 = performance.now();
-      const w = await createWorld({ seed: S + i, scene: 'clearing', nav: 'off' });
+      const w = await createWorld({ seed: S, scene: 'clearing', nav: 'off' });
       wall.push(performance.now() - t0);
       const c = process.cpuUsage(c0);
       cpu.push((c.user + c.system) / 1000);
       w.dispose();
     }
-    console.info(`Clearing builds (nav off): CPU ${cpu.map((t) => t.toFixed(0)).join(', ')} ms; wall ${wall.map((t) => t.toFixed(0)).join(', ')} ms`);
-    expect(Math.min(...cpu)).toBeLessThan(300);
+    const warm = cpu.slice(2).sort((a, b) => a - b);
+    const median = warm[Math.floor(warm.length / 2)];
+    const ms = (xs: number[]): string => xs.map((t) => t.toFixed(0)).join(', ');
+    console.info(`Clearing builds (nav off): cold CPU ${cpu[0].toFixed(0)} ms, wall ${wall[0].toFixed(0)} ms; warm CPU ${ms(cpu.slice(2))} ms (median ${median.toFixed(0)}), wall ${ms(wall.slice(2))} ms`);
+    expect(median).toBeLessThan(300);
   });
 });
