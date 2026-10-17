@@ -5,7 +5,7 @@ import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { BONES } from '../src/body/skeleton';
 import type { CombatEvent } from '../src/sim/combat';
 import { type Command, moveCommand, setTuningCommand, type VerbCommand } from '../src/sim/commands';
-import { IdCounter, LEGACY_IDS } from '../src/sim/fighter';
+import { type Fighter, IdCounter, LEGACY_IDS } from '../src/sim/fighter';
 import { Rng, seedFor } from '../src/sim/math';
 import { createPlayer } from '../src/sim/roster';
 import { getTuningValue, resetTuning } from '../src/tuning/registry';
@@ -31,11 +31,14 @@ beforeAll(async () => {
   await physicsReady();
 });
 
+/** A fighter's own Rng (private on Fighter; the save reads it through P04's records). */
+const rngOf = (f: Fighter): Rng => (f as unknown as { rng: Rng }).rng;
+
 /** Every number of the player's and the sim's state that outcomes depend on, as exact text. */
 function digest(w: World): string {
   const parts: number[] = [w.tick, w.combat.rng.state];
   for (const f of w.combat.fighters) {
-    parts.push(f.id, f.pos.x, f.pos.y, f.pos.z, f.vel.x, f.vel.y, f.vel.z, f.walkVel.x, f.walkVel.z, f.yaw, f.hp, f.stamina, f.stateFrame, f.rng.state);
+    parts.push(f.id, f.pos.x, f.pos.y, f.pos.z, f.vel.x, f.vel.y, f.vel.z, f.walkVel.x, f.walkVel.z, f.yaw, f.hp, f.stamina, f.stateFrame, rngOf(f).state);
     for (const b of BONES) {
       const x = f.rig[b];
       parts.push(x.pos.x, x.pos.y, x.pos.z, x.rot.x, x.rot.y, x.rot.z, x.rot.w);
@@ -46,7 +49,7 @@ function digest(w: World): string {
 
 /** Events as comparable text (fighters by id). */
 function eventsText(ce: readonly CombatEvent[], we: readonly WorldEvent[]): string {
-  return JSON.stringify([...ce, ...we], (k, v) => (v && typeof v === 'object' && 'id' in v && 'rig' in v ? `fighter:${v.id}` : v));
+  return JSON.stringify([...ce, ...we], (_k, v) => (v && typeof v === 'object' && 'id' in v && 'rig' in v ? `fighter:${v.id}` : v));
 }
 
 describe('createWorld', () => {
@@ -109,7 +112,7 @@ describe('createWorld', () => {
       const replica = createPlayer({ ids: new IdCounter(1), rngSeed: seedFor(77, 'fighter', 1) });
       replica.ground = w.ground;
       replica.updatePose(0, 0, 0);
-      expect(p.rng.state).toBe(replica.rng.state);
+      expect(rngOf(p).state).toBe(rngOf(replica).state);
       expect(w.combat.rng.state).toBe(new Rng(seedFor(77, 'combat')).state);
       expect(w.rngs.combat).toBe(w.combat.rng);
       expect(w.rngs.world.state).toBe(new Rng(seedFor(77, 'world')).state);
