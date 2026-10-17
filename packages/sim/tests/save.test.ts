@@ -544,10 +544,24 @@ const INVENTORY: Record<string, Record<string, string>> = {
     collider: 'not saved: the Rapier collider, rebuilt from the record',
     prevPose: 'not saved: client interpolation (a load sets it to the pose)',
   },
-  JointStore: { world: 'not saved: a link' },
-  Breaking: { world: 'not saved: a link' },
+  JointStore: {
+    world: 'not saved: a link',
+    byId: 'saved: joints (every joint, generation\'s included: restoreRecord replaces the store)',
+    sorted: 'saved: joints (id order)',
+    snapshot: 'not saved: a cache of sorted',
+    rt: 'not saved: per-joint runtime (the Rapier joint, a world-point end\'s hidden fixed body, the rope sensor), made again from joints by restoreRecord',
+    tripped: 'not saved: the strand groups whose tripwire load phase 9d took this tick (a crossing is counted once per tick)',
+  },
+  Breaking: {
+    world: 'not saved: a link',
+    pending: 'not saved: breaks found in phases 9c and 11 for phase 12 of the same tick, which empties it; empty at a tick end',
+  },
   Loads: { world: 'not saved: a link' },
-  Felling: { world: 'not saved: a link' },
+  Felling: {
+    world: 'not saved: a link',
+    moments: 'not saved: moments added in phases 4d and 9c for phase 13c of the same tick, which empties it; empty at a tick end',
+    falls: "saved: felling (a falling trunk's phase and hinge; its runtime joint to the stump is made again from it and entities[].plant)",
+  },
   CombatSim: {
     fighters: 'saved: fighters (step order)',
     events: 'not saved: cleared at the start of every tick',
@@ -718,9 +732,7 @@ function missingStep(v: unknown, path: string): string | null {
  */
 const AWAITING: Record<string, string> = {
   cover: 'GroundCover (P21)',
-  joints: 'JointStore (P10)',
   spawner: 'Spawner (P22)',
-  felling: 'Felling (P10)',
 };
 
 describe('completeness (RR-19)', () => {

@@ -651,7 +651,11 @@ export type WorldEvent =
   /** Thud, dust, shake ∝ mass (SPEC:581). */
   | { type: 'land'; entity: number | null; f: Fighter | null; point: V3; energy: number; mass: number }
   | { type: 'break'; entity: number; pieces: number[]; point: V3; energy: number }
-  | { type: 'joint'; joint: number; what: 'snap' | 'cut' | 'untie' | 'loose' | 'release' }
+  /**
+   * point: the middle of the joint's anchors when it happened (P10's JointStore always sets it; a snapped joint is gone
+   * by phase 17b, so listeners read the point here). Optional only so event literals written before P10 still type.
+   */
+  | { type: 'joint'; joint: number; what: 'snap' | 'cut' | 'untie' | 'loose' | 'release'; point?: V3 }
   | { type: 'chop'; tree: number; point: V3; remaining: number }
   | { type: 'fell'; tree: number; dir: V3 }
   | { type: 'crossCut'; entity: number; pieces: number[] | null }

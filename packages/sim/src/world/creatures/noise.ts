@@ -158,7 +158,7 @@ export class NoiseBus {
           break;
         case 'joint': {
           if (e.what !== 'snap') break;
-          const at = jointPoint(w, byId, e.joint);
+          const at = e.point ? v3(e.point) : jointPoint(w, byId, e.joint);
           if (at) this.emit({ at, radius: T.ropeSnap, kind: 'ropeSnap', source: null });
           break;
         }
@@ -265,9 +265,8 @@ function fighterIndex(w: World): Map<number, Fighter> {
 
 /**
  * Where a rope or joint is: the middle of its two anchors' world points (an entity anchor through the entity's pose, a
- * held end at its holder, a loose end or a world point as given). null once the record is gone.
- * TODO(P10): the `joint` event names no point; a snap is heard only while JointStore.get still returns the record in
- * phase 17b.
+ * held end at its holder, a loose end or a world point as given). null once the record is gone. The fallback for a
+ * `joint` event without its `point` (P10's JointStore always gives one: a snapped joint is gone by phase 17b).
  */
 function jointPoint(w: World, byId: ReadonlyMap<number, Fighter>, id: number): V3 | null {
   const j = w.joints.get(id);
