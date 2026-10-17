@@ -485,14 +485,14 @@ export class Ragdoll {
 
   /**
    * Call once per fixed step, before the presentation world steps. `down`: where the sim's slab holds the body while
-   * the fighter is knocked down or KO'd (null: standing, or no slab, when the root is free as in DS).
+   * the fighter is knocked down or KO'd (null: standing, or no slab, when the root is free as in DS). `rig`: the pose
+   * the standing root follows (f.rig, or a fresh rig built at a respawn before the sim's next pose update).
    */
-  drive(f: Fighter, down: DownTarget | null = null) {
+  drive(f: Fighter, down: DownTarget | null = null, rig: Rig = f.rig) {
     const lying = f.state === 'knockdown' || f.state === 'ko';
     const slab = lying ? down : null;
     const [rootBase, muscleBase] = this.baseStrength(f, slab);
     this.rootStrength = rootBase * (1 - this.dipValue('root'));
-    const rig = f.rig;
     const T = RAGDOLL_TUNING;
 
     for (const name of BONES) {

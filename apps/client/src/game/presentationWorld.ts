@@ -46,7 +46,21 @@ import { Trauma } from './trauma';
 export const PRESENTATION_TUNING = defineTuning(
   'PRESENTATION_TUNING',
   'Client › presentation',
-  { maxRagdolls: 8, mirrorRadiusM: 30, lodHysteresisM: 2 },
+  {
+    maxRagdolls: 8,
+    mirrorRadiusM: 30,
+    lodHysteresisM: 2,
+    // DS bodyLanding (game.ts), detected on the ragdoll: a downed body falling faster than bodyFallSpeed whose fall
+    // drops below bodyFallStopFrac of that in one step, with its pelvis within bodyFallNearM × scale of the ground, has
+    // landed; then no other landing for bodyFallQuietSteps. A fall at bodyFallHardSpeed is as hard as it gets.
+    // (FEEL_TUNING.steps.landStopFrac / thuds.bodyHardSpeed (P37) and CAMERA_TUNING.landHardSpeed (P34) hold their
+    // own copies of the same DS numbers for the sound and the camera.)
+    bodyFallSpeed: 1.4,
+    bodyFallStopFrac: 0.35,
+    bodyFallNearM: 0.45,
+    bodyFallQuietSteps: 20,
+    bodyFallHardSpeed: 5,
+  },
   {
     maxRagdolls: { unit: 'ragdolls', source: 'NEW: SPEC:655-656 (ragdoll LOD)', min: 0, max: SLOT_COUNT, step: 1, label: 'max ragdolls' },
     mirrorRadiusM: { unit: 'm', source: 'NEW: SPEC:655-656 (ragdoll LOD)', min: 5, max: 200, step: 1, label: 'mirror radius' },
@@ -58,6 +72,11 @@ export const PRESENTATION_TUNING = defineTuning(
       step: 0.5,
       label: 'LOD hysteresis',
     },
+    bodyFallSpeed: { unit: 'm/s', source: 'DS (game.ts bodyLanding: falling faster than 1.4 m/s)', min: 0, max: 10, step: 0.1, label: 'body fall from' },
+    bodyFallStopFrac: { unit: '× fall speed', source: 'DS (game.ts bodyLanding: stopped below 0.35 of the fall speed)', min: 0, max: 1, step: 0.05, label: 'body fall stopped below' },
+    bodyFallNearM: { unit: 'm × scale', source: 'DS (game.ts bodyLanding: pelvis within 0.45 × scale of the ground)', min: 0, max: 2, step: 0.05, label: 'body fall near ground' },
+    bodyFallQuietSteps: { unit: 'steps', source: 'DS (game.ts bodyLanding: 20 quiet steps after a landing)', min: 0, max: 120, step: 1, label: 'body fall quiet' },
+    bodyFallHardSpeed: { unit: 'm/s', source: 'DS (game.ts bodyLanding: hard = fall speed / 5)', min: 0.5, max: 30, step: 0.5, label: 'body fall hard at' },
   },
 );
 
@@ -124,14 +143,9 @@ const UP = new Vector3(0, 1, 0);
 const DOWN = Object.freeze({ x: 0, y: -1, z: 0 });
 /** Rapier InteractionGroups for a query that sees only the environment (terrain and mirrors), never a ragdoll. */
 const ENV_QUERY = groups(0xffff, GROUP_ENV);
-// DS bodyLanding (game.ts): a body falling faster than this (m/s) that stops sharply near the ground is a landing…
-const FALL_SPEED = 1.4;
-const FALL_STOP = 0.35;
-/** …with the pelvis within this × scale of the ground; then no other landing for FALL_QUIET steps. */
-const FALL_NEAR = 0.45;
-const FALL_QUIET = 20;
-/** DS: a fall at 5 m/s is as hard as it gets. */
-const FALL_HARD_SPEED = 5;
+
+/** Knocked down or KO'd (a dead fighter is KO'd: Fighter.alive): the only states a slab may draw the body in. */
+const isDown = (f: Fighter): boolean => f.state === 'knockdown' || f.state === 'ko';
 
 const _yaw = new Quaternion();
 const _v = new Vector3();
@@ -156,7 +170,12 @@ export class PresentationWorld implements PresentationPort, BodyFallSource {
   private readonly falls = new Map<Fighter, { vy: number; quiet: number }>();
   /** Where the camera is (the level of detail and the mirrors are measured from it). */
   private camera: () => V3 | null;
-  private readonly snapRig: Rig = makeRig();
+  /**
+   * Fighters snapped (snapTo) since the last step, with a fresh rig at f.pos and f.yaw: until the sim's next pose
+   * update, f.rig is still where the body was (a respawn teleports in phase 15, after phase 3 posed the rig at the
+   * corpse), so this step builds and drives their ragdolls toward the fresh rig instead. Cleared after each step.
+   */
+  private readonly snapped = new Map<Fighter, Rig>();
   private readonly move: BodyMove = { from: new Vector3(), to: new Vector3(), rot: new Quaternion() };
   private readonly down: DownTarget = { at: new Vector3(), rot: new Quaternion(), vel: new Vector3() };
   private disposed = false;
@@ -267,8 +286,9 @@ export class PresentationWorld implements PresentationPort, BodyFallSource {
     if (f.ruler || this.disposed) return null;
     if (this.ragdolls.size >= ragdollCap() || this.slots.count >= SLOT_COUNT) return null;
     const rd = new Ragdoll(this.R, this.rapier, f, this.slots);
-    const move = this.slabMove(f, f.rig);
-    rd.snapTo(f, f.rig, move);
+    const rig = this.rigOf(f);
+    const move = this.slabMove(f, rig);
+    rd.snapTo(f, rig, move);
     if (move) {
       const slab = this.world.downed.pose(f.id);
       const v = this.world.downed.velocity(f.id);
@@ -297,13 +317,12 @@ export class PresentationWorld implements PresentationPort, BodyFallSource {
     this.syncDynamic(world, cam);
     this.levelOfDetail(world, cam);
     const fighters = world.combat.fighters;
-    const isDown = (f: Fighter) => f.state === 'knockdown' || f.state === 'ko' || !f.alive;
     let downSlots = 0;
     for (const [f, rd] of this.ragdolls) if (isDown(f)) downSlots |= rd.slot;
     for (const [f, rd] of this.ragdolls) {
       rd.setContacts(isDown(f), downSlots);
       this.slideOff(f, rd, fighters);
-      rd.drive(f, this.downTarget(world, f));
+      rd.drive(f, this.downTarget(world, f), this.rigOf(f));
       rd.capturePrev();
     }
     // Downed fighters beyond the level of detail: the rig laid on the slab.
@@ -316,6 +335,7 @@ export class PresentationWorld implements PresentationPort, BodyFallSource {
       else this.slabPoses.set(f, new SlabPose(f.rig, move));
     }
     for (const f of this.slabPoses.keys()) if (!fighters.includes(f)) this.slabPoses.delete(f);
+    this.snapped.clear();
     this.rapier.step();
     for (const [f, rd] of this.ragdolls) {
       rd.captureCur();
@@ -337,7 +357,8 @@ export class PresentationWorld implements PresentationPort, BodyFallSource {
       let p: Vector3;
       if (rd) p = rd.pelvisPos();
       else {
-        const hip = this.world.downed.hip(f.id);
+        // Only a downed body lies on its slab (a respawned one is at the spawn while the slab is still active).
+        const hip = isDown(f) ? this.world.downed.hip(f.id) : null;
         p = hip ? new Vector3(hip.x, hip.y, hip.z) : f.rig.pelvis.pos.clone();
       }
       p.y = Math.max(this.world.terrain.heightAt(p.x, p.z) + 0.35 * f.scale, p.y);
@@ -347,11 +368,16 @@ export class PresentationWorld implements PresentationPort, BodyFallSource {
 
   /**
    * Puts the body back where the sim has the fighter, at once (a respawn): a fresh rig at f.pos and f.yaw (the sim's
-   * rig is last tick's until its next pose update), laid on the slab if one holds it. A body with limbs cut loose is
-   * rebuilt whole from what the sim keeps of it (f.severed, which a respawn clears, §4.14), in this world's slots.
+   * rig is last tick's until its next pose update; the next step drives toward the fresh one), laid on the slab only
+   * if the fighter is down and one holds it (a respawned fighter stands while its corpse slab is still active, until
+   * the next tick's phase 4a). A body with limbs cut loose is rebuilt whole from what the sim keeps of it (f.severed,
+   * which a respawn clears, §4.14), in this world's slots.
    */
   snapTo(f: Fighter): void {
     this.falls.delete(f);
+    const rig = this.snapped.get(f) ?? makeRig();
+    forwardKinematics(f.pose, rig, f.pos, f.yaw, f.scale);
+    this.snapped.set(f, rig);
     let rd: Ragdoll | null = this.ragdolls.get(f) ?? null;
     if (!rd) return;
     if (rd.loose.size > 0) {
@@ -359,8 +385,7 @@ export class PresentationWorld implements PresentationPort, BodyFallSource {
       rd = this.attachRagdoll(f);
       if (!rd) return;
     }
-    forwardKinematics(f.pose, this.snapRig, f.pos, f.yaw, f.scale);
-    rd.snapTo(f, this.snapRig, this.slabMove(f, this.snapRig));
+    rd.snapTo(f, rig, this.slabMove(f, rig));
   }
 
   bodyPose(f: Fighter): BodyPose | null {
@@ -405,6 +430,7 @@ export class PresentationWorld implements PresentationPort, BodyFallSource {
     for (const rd of this.ragdolls.values()) rd.dispose();
     this.ragdolls.clear();
     this.slabPoses.clear();
+    this.snapped.clear();
     this.mirrors.clear();
     this.falls.clear();
     this.bodyFalls.clear();
@@ -446,12 +472,19 @@ export class PresentationWorld implements PresentationPort, BodyFallSource {
     this.falls.delete(f);
   }
 
+  /** The rig the body follows this step: the fresh one snapTo built since the last step, else the sim's f.rig. */
+  private rigOf(f: Fighter): Rig {
+    return this.snapped.get(f) ?? f.rig;
+  }
+
   /**
    * The rigid move that lays `rig` (the fighter standing at f.pos, turned f.yaw) on the sim's slab: the rig's pelvis
    * to the slab's hip, the fighter's yaw frame to the slab's rotation (the slab is built standing at the fighter's
-   * yaw, §4.5). Null when no slab holds the fighter.
+   * yaw, §4.5). Null unless the fighter is knocked down or KO'd and a slab holds it: a fighter standing again (a
+   * respawn, a revive) keeps its slab active until the sim's next phase 4a, and must not be drawn lying on it.
    */
   private slabMove(f: Fighter, rig: Rig): BodyMove | null {
+    if (!isDown(f)) return null;
     const slab = this.world.downed.pose(f.id);
     const hip = this.world.downed.hip(f.id);
     if (!slab || !hip) return null;
@@ -468,7 +501,7 @@ export class PresentationWorld implements PresentationPort, BodyFallSource {
    * slab (its rotation × the pose's pelvis), and the slab's velocity at the hip. Null otherwise.
    */
   private downTarget(world: World, f: Fighter): DownTarget | null {
-    if (f.state !== 'knockdown' && f.state !== 'ko') return null;
+    if (!isDown(f)) return null;
     const slab = world.downed.pose(f.id);
     const hip = world.downed.hip(f.id);
     if (!slab || !hip) return null;
@@ -491,9 +524,9 @@ export class PresentationWorld implements PresentationPort, BodyFallSource {
    * (Presentation only now: nothing flows back into the sim.)
    */
   private slideOff(f: Fighter, rd: Ragdoll, fighters: readonly Fighter[]): void {
-    if (f.state !== 'knockdown' && f.state !== 'ko') return;
+    if (!isDown(f)) return;
     for (const s of fighters) {
-      if (s === f || !s.alive || s.state === 'knockdown' || s.state === 'ko') continue;
+      if (s === f || isDown(s)) continue;
       for (const b of TORSO) {
         if (rd.loose.has(b)) continue;
         const body = rd.bodies[b];
@@ -522,14 +555,14 @@ export class PresentationWorld implements PresentationPort, BodyFallSource {
     let s = this.falls.get(f);
     if (!s) this.falls.set(f, (s = { vy: 0, quiet: 0 }));
     s.quiet = Math.max(0, s.quiet - 1);
-    const down = f.state === 'knockdown' || f.state === 'ko';
+    const T = PRESENTATION_TUNING;
     const vy = Math.min(rd.bodies.pelvis.linvel().y, rd.bodies.chest.linvel().y);
-    if (down && s.quiet === 0 && s.vy < -FALL_SPEED && vy > s.vy * FALL_STOP) {
+    if (isDown(f) && s.quiet === 0 && s.vy < -T.bodyFallSpeed && vy > s.vy * T.bodyFallStopFrac) {
       const p = rd.pelvisPos();
-      if (this.groundWithin(p, FALL_NEAR * f.scale)) {
-        const fall: BodyFall = { f, at: p, hard: Math.min(1, -s.vy / FALL_HARD_SPEED), mass: f.mass / HUMANOID_MASS };
+      if (this.groundWithin(p, T.bodyFallNearM * f.scale)) {
+        const fall: BodyFall = { f, at: p, hard: hardness(-s.vy), mass: f.mass / HUMANOID_MASS };
         for (const l of this.bodyFalls) l(fall);
-        s.quiet = FALL_QUIET;
+        s.quiet = Math.round(T.bodyFallQuietSteps);
       }
     }
     s.vy = vy;
@@ -578,6 +611,12 @@ export class PresentationWorld implements PresentationPort, BodyFallSource {
         return C.convexHull(new Float32Array(s.points));
     }
   }
+}
+
+/** How hard a fall at `speed` m/s lands, 0..1 (DS bodyLanding: full at bodyFallHardSpeed). */
+function hardness(speed: number): number {
+  const full = PRESENTATION_TUNING.bodyFallHardSpeed;
+  return full > 0 ? Math.min(1, Math.max(0, speed) / full) : 1;
 }
 
 /** maxRagdolls as a whole number of slots (at most SLOT_COUNT: one collision bit each). */
@@ -712,11 +751,11 @@ export class Fx implements FxPort {
           // A landing hard enough to hurt (scored by the rule) is a body hitting the ground: DS bodyLanding at full force.
           if (e.energy > 0) this.landingDust(at, 1, e.mass / HUMANOID_MASS, e.f.scale);
         } else {
-          // A log, a stone, a felled trunk (SPEC:581): dust ∝ its mass, as hard as it was fast (√(2E/m), DS: 5 m/s is
-          // as hard as it gets), spread as wide as a body of that mass.
+          // A log, a stone, a felled trunk (SPEC:581): dust ∝ its mass, as hard as it was fast (√(2E/m), DS: full at
+          // bodyFallHardSpeed), spread as wide as a body of that mass.
           const mass = e.mass / HUMANOID_MASS;
           const speed = e.mass > 0 ? Math.sqrt((2 * Math.max(0, e.energy)) / e.mass) : 0;
-          this.landingDust(at, Math.min(1, speed / FALL_HARD_SPEED), mass, Math.cbrt(mass));
+          this.landingDust(at, hardness(speed), mass, Math.cbrt(mass));
         }
         return;
       }
