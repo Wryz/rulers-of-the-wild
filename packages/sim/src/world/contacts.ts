@@ -187,6 +187,13 @@ export class ContactSystem {
    * from. Never saved, for the same reason as `resync`: a load makes them again.
    */
   private restarts: readonly { a: Owner; b: Owner }[] | null = null;
+  /**
+   * The other starts of the load's zero-length step (restoredStarts): contacts the saved world didn't have (no group
+   * restored touching), whose first step is the first step after the load. The saved world's next step would have raised
+   * them; the loaded world's raises them no more (its narrow phase already has them), so the next process() takes them
+   * as that step's own starts: new contacts, scored. Never saved: a load makes them again.
+   */
+  private loadStarts: ContactPair[] | null = null;
 
   constructor(world: World) {
     this.world = world;
@@ -209,6 +216,11 @@ export class ContactSystem {
     const resynced = new Set<Episode>();
     const restarts = this.restarts;
     this.restarts = null;
+    // The load's new contacts (loadStarts): this step's own starts, as the saved world's would have raised them.
+    if (this.loadStarts) {
+      pairs = this.withLoadStarts(w, pairs, this.loadStarts);
+      this.loadStarts = null;
+    }
     // The load's narrow-phase starts first (restoredStarts): they rebuild the restored episodes' counts, as the first
     // step's own re-raised starts do below. One for no restored episode is a contact the saved world already had (or
     // never counted): dropped, never a new episode.
@@ -371,10 +383,17 @@ export class ContactSystem {
    * first (P13's loadWorld steps the rebuilt world by zero time so its scene queries see every body) hands that step's
    * pairs to restoredStarts: its starts are the re-raised ones, and the first step raises them no more (without them the
    * counts of contacts that go on would drop to 0 at the first process()).
+   * It replaces every runtime map (core-fix; DEVIATION: §1.5.8 has `restoreRecord(r)`, the graces restored apart): the
+   * groups, the contact graces (`grace`, §8.3 `contactGrace`, exactly: a grace the world's construction or the loader's
+   * own making of fighters opened goes), the resync and the load's starts (both kinds). A grace the load itself opens
+   * (§4.3: every history reset, a load's included) is opened after it.
    */
-  restoreRecord(r: ContactRecV1[]): void {
+  restoreRecord(r: ContactRecV1[], grace: readonly (readonly [number, number])[]): void {
     this.episodes.clear();
+    this.graceUntil.clear();
+    for (const [f, t] of grace) this.graceUntil.set(f, t);
     this.restarts = null;
+    this.loadStarts = null;
     const resync = new Set<Episode>();
     for (const rec of r) {
       const subject: Merged = rec.creature > 0 ? { kind: 'fighter', id: rec.creature } : { kind: 'entity', id: -rec.creature };
@@ -389,12 +408,44 @@ export class ContactSystem {
 
   /**
    * After restoreRecord, the pairs of the load's zero-length step (P13's refreshQueries): its starts are the narrow
-   * phase re-raising every collider pair that still overlaps, which restoreRecord's resync expects from the first step.
-   * They are held for the next process(), where they rebuild the restored episodes' counts and nothing else.
+   * phase raising every collider pair that overlaps, held for the next process(). Those of a group restored touching are
+   * the saved contacts going on, as restoreRecord's resync expects from the first step: they rebuild the restored
+   * counts and nothing else. The others (core-fix) are contacts the saved world didn't have yet, whose first step is the
+   * first step after the load (the saved world's next step would have raised them; the loaded one's no longer does):
+   * that process() takes them as new contacts of its tick (loadStarts), so an impact due then still lands (a log a tick
+   * from a lying player's slab at the save used to be lost).
    */
   restoredStarts(pairs: readonly ContactPair[]): void {
-    const starts = pairs.filter((p) => p.started).map((p) => ({ a: p.a, b: p.b }));
-    this.restarts = this.resync && starts.length > 0 ? starts : null;
+    const restarts: { a: Owner; b: Owner }[] = [];
+    const fresh: ContactPair[] = [];
+    for (const p of pairs) {
+      if (!p.started) continue;
+      const ep = this.episodeOf(p.a, p.b, false);
+      if (ep && this.resync?.has(ep)) restarts.push({ a: p.a, b: p.b });
+      // (A pair that is never counted is skipped there as any start is; no group is made here: a save before the first
+      // step holds the restored groups only.)
+      else fresh.push(p);
+    }
+    this.restarts = this.resync && restarts.length > 0 ? restarts : null;
+    this.loadStarts = fresh.length > 0 ? fresh : null;
+  }
+
+  /**
+   * The first process() after a load: the step's drained pairs with the load's new contacts (loadStarts) as starts of
+   * this step, in the drain's order (sorted by owners; stable). A held start whose collider is gone since, or whose pair
+   * this step stopped (a body moved away before it: a dev teleport in phase 1c), is dropped with that stop: the saved
+   * world's step, made after the move, would have raised neither.
+   */
+  private withLoadStarts(w: World, pairs: readonly ContactPair[], starts: readonly ContactPair[]): ContactPair[] {
+    const key = (p: ContactPair): string => `${p.ca!.handle}/${p.cb!.handle}`;
+    const stopped = new Set<string>();
+    for (const p of pairs) if (!p.started && p.ca && p.cb) stopped.add(key(p));
+    const live = (c: RAPIER.Collider | null): boolean => c !== null && w.physics.isRegistered(c.handle);
+    const keep = starts.filter((p) => live(p.ca) && live(p.cb) && !stopped.has(key(p)));
+    const dropped = new Set<string>();
+    for (const p of starts) if (p.ca && p.cb && stopped.has(key(p))) dropped.add(key(p));
+    const rest = pairs.filter((p) => p.started || !p.ca || !p.cb || !dropped.has(key(p)));
+    return [...rest, ...keep].sort((x, y) => compareOwners(x.a, y.a) || compareOwners(x.b, y.b));
   }
 
   /** (fighter, untilTick), sorted: the open contact graces (§8.3 `contactGrace`). */
@@ -402,6 +453,7 @@ export class ContactSystem {
     return [...this.graceUntil].map(([f, t]): [number, number] => [f, t]).sort((x, y) => x[0] - y[0]);
   }
 
+  /** TODO(core-fix): restoreRecord's `grace` does this too (the loader uses that); fold it there once nothing calls it. */
   restoreGrace(r: [number, number][]): void {
     this.graceUntil.clear();
     for (const [f, t] of r) this.graceUntil.set(f, t);

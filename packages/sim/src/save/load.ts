@@ -11,9 +11,9 @@
 // 1. tuning: with `applyTuning`, the sim tables are reset to their defaults and the save's overrides set on top, first
 //    (they shape generation); without it the registry is left alone (RR-17). The client's tables are never touched. All
 //    or nothing: a failure anywhere puts the registry back;
-// 2. a World built from the save's seed and options: generation regenerates every untouched generated entity and joint;
-//    the fighters construction made (the player, the spawner's creatures) and any non-generated entity are removed
-//    again, since the save replaces them;
+// 2. a World built for a load (WorldOptions.load) from the save's seed and options: generation regenerates every
+//    untouched generated entity and joint; no player, no spawner creatures and no navmesh are made (the save replaces
+//    the first two, step 7 builds the third); a non-generated entity, if any, is removed, since the save replaces it;
 // 3. terrain edits and the dug mask, then cover edits, over the generated ground;
 // 4. entities (EntityStore.restoreRecord: `removed` generated ids dropped, saved records rebuilt in id order), then
 //    joints (JointStore.restoreRecord). The joint rule (a joint has no generated/touched flag): the save holds every
@@ -29,19 +29,21 @@
 //    TODO(P13, M3, SPEC:917): in world mode phases 13a/13b move f.pos after updatePose, so a downed fighter's tick-end
 //    rig is not the forward kinematics of its saved pose and pos; an exact restore of a downed fighter's rig saves the
 //    rig or rebuilds it at the pre-13a position (P04's note on Fighter.restoreRecord);
-// 6. bodies: controllers, slabs and ruler bodies from their records; the standing zones' pose history is reset (the
-//    physics world's pre-step store is not restorable: every owner's next store reads carryV 0, as after a teleport);
-//    contacts (ContactSystem.restoreRecord replaces its runtime maps, graces included) and the saved graces re-opened;
-//    felling, deaths and corpses; the queued impulses;
-// 7. the world RNG streams and the id counters; the navmesh rebuilt over the loaded ground and its dirty queue
-//    restored;
-// 8. every collider the load made put into the scene queries by a zero-length Rapier step that moves nothing (so the
-//    first tick's queries before its phase-7 step see the world the save saw: refreshQueries), its starts handed to the
-//    contact pipeline so the restored episodes keep their counts; the events construction pushed cleared.
+// 6. contacts first: ContactSystem.restoreRecord replaces every runtime map with the save's, its graces included (so a
+//    grace the making of the fighters opened goes); then bodies: controllers, slabs (with the standing zones on or off
+//    beside them, DownedBodies.restoreRecord) and ruler bodies from their records; the pose history of the standing
+//    zones that are on is reset, which opens §4.3's load grace for their fighters (the physics world's pre-step store is
+//    not restorable: every owner's next store reads carryV 0, as after a teleport); felling, deaths and corpses; the
+//    queued impulses;
+// 7. the world RNG streams and the id counters; the navmesh built over the loaded ground and its dirty queue restored;
+// 8. every collider the load made put into the scene queries by PhysicsWorld.refreshQueries (a zero-length Rapier step
+//    that moves nothing, so the first tick's queries before its phase-7 step see the world the save saw), its starts
+//    handed to the contact pipeline so the restored episodes keep their counts and the contacts the saved world's next
+//    step would have started start on the first tick (ContactSystem.restoredStarts); the events construction pushed
+//    cleared.
 // Rapier's body order after a load differs from the saving world's (restored bodies are made after the generated ones
 // kept), so a loaded world matches the saved one within SPEC:730's 1 cm and 1° at rest, not bit for bit; two loads of
 // one save are bit-identical to each other.
-import type RAPIER from '@dimforge/rapier3d-compat';
 import { BONES, type BoneName } from '../body/skeleton';
 import type { ButtonCommand, Command, CommandButton, DevOp, MetaCommand, MoveCommand, TuningEdit, VerbCommand, VerbId } from '../sim/commands';
 import { type Fighter, IdCounter } from '../sim/fighter';
@@ -129,7 +131,7 @@ export async function loadWorld(bytes: Uint8Array, opts?: LoadOptions): Promise<
   try {
     if (opts?.applyTuning) applyTuningOverrides(save.tuningOverrides);
     const o = save.options;
-    w = new World({ seed: save.seed, scene: o.scene, terrain: o.terrain, size: o.size, nav: opts?.nav ?? 'full', player: o.player, sparringApe: o.sparringApe });
+    w = new World({ seed: save.seed, scene: o.scene, terrain: o.terrain, size: o.size, nav: opts?.nav ?? 'full', player: o.player, sparringApe: o.sparringApe, load: true });
     restoreWorld(w, save);
     return w;
   } catch (e) {
@@ -206,8 +208,8 @@ function applyTuningOverrides(list: readonly TuningOverrideV1[]): void {
 // ---------------------------------------------------------------------------
 
 function restoreWorld(w: World, s: SaveV1): void {
-  // 2. What construction made that the save replaces.
-  for (const f of [...w.combat.fighters].sort(byId)) w.removeFighter(f);
+  // 2. What construction made that the save replaces (a world built for a load has no fighters; generation makes only
+  // generated entities, so this finds nothing unless it ever doesn't).
   for (const e of w.entities.all()) if (!e.generated) w.removeEntity(e.id);
 
   // 3. The ground.
@@ -242,7 +244,8 @@ function restoreWorld(w: World, s: SaveV1): void {
   w.verbs.restoreRecord(s.verbs);
   w.spawner.restoreRecord(s.spawner);
 
-  // 6. Bodies, contacts, felling, deaths, impulses.
+  // 6. Contacts, bodies, felling, deaths, impulses.
+  w.contacts.restoreRecord(s.contacts, s.contactGrace);
   const kcc: { fighter: number; kcc: KccRecV1 }[] = [];
   const slabs: { fighter: number; slab: SlabRecV1 }[] = [];
   const rulers: { fighter: number; ruler: NonNullable<BodiesRecV1['ruler']> }[] = [];
@@ -255,13 +258,15 @@ function restoreWorld(w: World, s: SaveV1): void {
   w.kcc.restoreRecord(kcc);
   w.downed.restoreRecord(slabs);
   w.rulers.restoreRecord(rulers);
-  // The standing zones have no record of their own: they are off exactly while the slab is active, and until the
-  // phase 4a after the slab was handed back (world/downed.ts), so that is where a load leaves them.
-  // TODO(P08-fix): ZoneBodies could save its `enabled` itself (or DownedBodies.restoreRecord set it).
-  for (const { fighter, slab } of slabs) if (slab.enabled || slab.handedBack) w.zones.setEnabled(fighterById(w, fighter, 'bodies'), false);
-  for (const f of [...w.combat.fighters].sort(byId)) if (!f.ruler) w.zones.resetHistory(f);
-  w.contacts.restoreRecord(s.contacts);
-  for (const [id, until] of s.contactGrace) w.contacts.grace(id, until);
+  // §4.3: a load resets the standing zones' pose history, with a contact grace (after the restored graces, so the later
+  // window wins). DEVIATION (§4.3 resets and graces every fighter at a load; core-fix): not for zones that are off (a
+  // fighter down on its slab, or just handed back): they aren't in the world, and the phase 4a that turns them on
+  // resets them with a grace of its own; the grace would only keep the slab's new contacts from scoring (a log landing
+  // on a lying player just after a load was recorded but never scored).
+  // TODO(core-fix): a standing fighter's new contacts in the zoneGraceTicks after a load are still never scored (§4.3's
+  // load grace); restoring bodies[].zonesHistory into the physics world's pre-step store instead of resetting it would
+  // make the grace unnecessary.
+  for (const f of [...w.combat.fighters].sort(byId)) if (!f.ruler && w.zones.enabled(f)) w.zones.resetHistory(f);
   w.felling.restoreRecord(s.felling);
   w.deaths.restoreRecord(s.deaths, s.corpses);
   s.impulses.forEach((q, i) => {
@@ -283,55 +288,22 @@ function restoreWorld(w: World, s: SaveV1): void {
   w.events.length = 0;
 }
 
-/** A Rapier body's pose and velocities, and whether it sleeps (what refreshQueries must leave as it was). */
-function bodyState(b: RAPIER.RigidBody): number[] {
-  const t = b.translation();
-  const q = b.rotation();
-  const v = b.linvel();
-  const a = b.angvel();
-  return [t.x, t.y, t.z, q.x, q.y, q.z, q.w, v.x, v.y, v.z, a.x, a.y, a.z, b.isSleeping() ? 1 : 0];
-}
-
 /**
  * 8. Every collider the load made (restored entities, fighters' bodies, regenerated ones) into the scene queries,
  * without moving anything. A new collider is invisible to queries until a Rapier step (MAP rapier finding 7; World's
  * constructor primes the terrain the same way), and the first tick after a load queries before its phase-7 step: dev
  * ops and teleports (phase 1c), minds' perception rays (2), the movers' supportAt (3). The saved world had every one of
  * these colliders in its broad phase, so without this a load would change those outcomes (a giant standing on a
- * restored pit cover would read the pit floor). So: one Rapier step of zero length. Its events never reach phase 9 as
- * new contacts (pairs already touching at the save start no new contact on the first tick, as in the saved world): its
- * starts go to ContactSystem.restoredStarts, which counts them toward the restored episodes only, so the counts the save
- * holds carry on (the first step raises them no more). A zero-length step moves no body and changes no velocity
- * (measured: bit for bit, with resting stacks, sliding bodies, kinematic capsules and motorised, rope, spring and fixed
- * joints); that is checked here, so a Rapier that did otherwise fails the load loudly instead of changing the world
- * quietly.
- * TODO(P05-fix): PhysicsWorld.refreshQueries(), primeQueries' general form, so physics.ts owns the Rapier step; the
- * loader then calls it.
+ * restored pit cover would read the pit floor). So: PhysicsWorld.refreshQueries, one Rapier step of zero length that
+ * moves nothing (it checks that and fails the load loudly otherwise). Its starts are the rebuilt narrow phase raising
+ * every pair that overlaps, and go to ContactSystem.restoredStarts (the first step raises them no more): those of a
+ * group the save holds as touching count toward it only (pairs already touching at the save start no new contact on
+ * the first tick, as in the saved world), so the counts the save holds carry on; the others are the contacts the saved
+ * world's next step would have started, and start on the first tick (core-fix: they were dropped, and an impact due on
+ * that tick never happened).
  */
 function refreshQueries(w: World): void {
-  const rapier = w.physics.rapier;
-  const before = new Map<number, number[]>();
-  rapier.bodies.forEach((b) => {
-    before.set(b.handle, bodyState(b));
-  });
-  const dt = rapier.timestep;
-  rapier.timestep = 0;
-  try {
-    rapier.step(w.physics.events);
-  } finally {
-    rapier.timestep = dt;
-  }
-  const pairs = w.physics.drain();
-  rapier.bodies.forEach((b) => {
-    const was = before.get(b.handle);
-    const now = bodyState(b);
-    if (!was || !was.every((x, i) => Object.is(x, now[i]))) {
-      throw new Error(`loadWorld: the zero-length step that refreshes the scene queries changed Rapier body ${b.handle}`);
-    }
-  });
-  // Its starts are the rebuilt narrow phase re-raising every pair that still overlaps: the contact pipeline rebuilds
-  // the restored episodes' counts from them in the first phase 9 (the first step raises them no more).
-  w.contacts.restoredStarts(pairs);
+  w.contacts.restoredStarts(w.physics.refreshQueries());
 }
 
 /**
@@ -524,6 +496,12 @@ function crossCheck(s: SaveV1): void {
     if (q && !(q.creature < c.creature || (q.creature === c.creature && q.owner < c.owner))) {
       throw new Error(`save record: contacts are not sorted by (creature, owner) without repeats at ${p}`);
     }
+  });
+  // What a slab isn't clear of (core-fix): ids the world has given (DownedBodies.restoreRecord checks each names a body).
+  s.bodies.forEach((b, i) => {
+    const n = b.slab?.notClearOf;
+    n?.entities.forEach((id, k) => counted('entity', id, `bodies[${i}].slab.notClearOf.entities[${k}]`));
+    n?.fighters.forEach((id, k) => counted('fighter', id, `bodies[${i}].slab.notClearOf.fighters[${k}]`));
   });
   // A ruler body's mover memory (rulerBody()): the entities it names below the counter (a support or a deflecting
   // obstacle outlives its entity, a vanished cover is the point, but an id the world hasn't given yet would latch onto the
@@ -1210,15 +1188,29 @@ function bodies(v: unknown, p: string): BodiesRecV1 {
     }),
     zonesHistory: arr(o.zonesHistory, `${p}.zonesHistory`).map((x, i) => fin(x, `${p}.zonesHistory[${i}]`)),
     slab: nullable(o.slab, `${p}.slab`, (x, q) => {
-      const s = exactKeys(obj(x, q), ['enabled', 'pose', 'lin', 'ang', 'hold', 'handedBack', 'dv'], q);
+      const s = exactKeys(obj(x, q), ['enabled', 'pose', 'lin', 'ang', 'hold', 'handedBack', 'dv', 'notClearOf'], q);
+      const enabled = bool(s.enabled, `${q}.enabled`);
+      // What the active slab isn't clear of (core-fix): ids, each list increasing without repeats, none while it is off;
+      // crossCheck checks them against the counters, DownedBodies.restoreRecord that each names a body.
+      const at = `${q}.notClearOf`;
+      const n = exactKeys(obj(s.notClearOf, at), ['entities', 'fighters'], at);
+      const ids = (v: unknown, path: string): number[] => {
+        const out = arr(v, path).map((x, i) => nat(x, `${path}[${i}]`));
+        out.forEach((id, i) => {
+          if (i > 0 && !(id > out[i - 1])) fail(`${path}[${i}]`, id, 'an id after the one before it (increasing, no repeats)');
+        });
+        if (out.length > 0 && !enabled) fail(path, v, 'empty (the slab is off)');
+        return out;
+      };
       return {
-        enabled: bool(s.enabled, `${q}.enabled`),
+        enabled,
         pose: pose3(s.pose, `${q}.pose`),
         lin: v3(s.lin, `${q}.lin`),
         ang: v3(s.ang, `${q}.ang`),
         hold: nat(s.hold, `${q}.hold`),
         handedBack: bool(s.handedBack, `${q}.handedBack`),
         dv: nullable(s.dv, `${q}.dv`, v3),
+        notClearOf: { entities: ids(n.entities, `${at}.entities`), fighters: ids(n.fighters, `${at}.fighters`) },
       };
     }),
     ruler: nullable(o.ruler, `${p}.ruler`, rulerBody),

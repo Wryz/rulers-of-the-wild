@@ -11,6 +11,19 @@
 //   pop (liftBase + liftPerLift × the move's lift) when a melee blow put it down this tick, and any queued Δv; it topples
 //   at toppleRadS/√scale about up × dir. f.vel and f.walkVel go to 0 (the body owns the momentum); the controller and the
 //   zones are disabled; a `launch` event carries the velocities to the client's ragdoll.
+// - Clear of dynamic bodies (core-fix). DEVIATION (§4.5 enables the slab where the fighter stood and leaves the rest to
+//   Rapier): a slab is never solved against a dynamic body it was enabled inside. When the slab comes into the world
+//   (the launch in phase 4a, or a downed fighter's teleport) it lists the dynamic bodies (entities, other slabs, a
+//   tripped ruler) that reach its spine (its long axis thickened to the core's half-thickness, halfThick × scale: the
+//   body's centre line), and the step leaves those pairs out (PhysicsWorld.addPairFilter). In every later phase 4a the
+//   list only shrinks: a body that no longer reaches the spine leaves it and is solid to the slab from then on; nothing
+//   joins it. A slab enabled where the fighter stood inside a falling log no longer has Rapier throw the log out of it (a
+//   300 kg log that pressed the player from 4 m went back up at +4.95 m/s, AC-6 part 2): the log falls on through to the
+//   ground, as it fell through the standing zones, and the body falls against it once they are apart. A body that comes
+//   onto the slab later is always solved against it, however deep a fast one ends a step inside it (a log has no CCD:
+//   at 10-17 m/s it moves 0.17-0.29 m a tick, past the 4 cm border): listing it then would let it fall through the body
+//   unscored. Fixed bodies and the terrain are always solid to the slab, and a body touching it or overlapping only its
+//   edge at the launch is solved as usual. The list is saved (bodies[].slab.notClearOf) and restored as it is.
 // - Phase 13a: f.pos follows the slab's hip (x, z; y = the support under it). On the frame before the getup a slab
 //   still moving faster than settleSpeed holds the fighter down (at most settleMaxHold frames); then the stand-spot
 //   search finds where the standing capsule fits, the slab is disabled and the controller is teleported there. The
@@ -23,7 +36,7 @@ import type { SlabRecV1 } from '../save/schema';
 import type { Fighter } from '../sim/fighter';
 import { defineTuning } from '../tuning/registry';
 import { CHARACTER_TUNING } from './characters';
-import { collisionGroups, kccQueryGroups, solverGroups } from './groups';
+import { collisionGroups, GROUP, kccQueryGroups, solverGroups } from './groups';
 import { ownerKey } from './physics';
 import type { Quat, V3 } from './types';
 import type { World } from './world';
@@ -93,17 +106,29 @@ interface Slab {
   handedBack: boolean;
   /** Δv queued by world impacts (applied in the next phase 4a). */
   dv: V3 | null;
+  /**
+   * The handles of the dynamic bodies the slab isn't clear of: those that reached its spine when it came into the world
+   * (launch, teleport) and have reached it in every phase 4a since. The step leaves those pairs out. Saved by owner id
+   * (bodies[].slab.notClearOf); empty while the slab is off.
+   */
+  clearOf: Set<number>;
 }
 
 const IDENTITY = Object.freeze({ x: 0, y: 0, z: 0, w: 1 });
+/** The groups of dynamic bodies a slab collides with (entities, other slabs, a tripped ruler's solid bones). */
+const COLLIDES_DOWNED_DYNAMIC = GROUP.ENTITY | GROUP.DOWNED | GROUP.RULER_SOLID;
 const DOWN = Object.freeze({ x: 0, y: -1, z: 0 });
 
 export class DownedBodies {
   readonly world: World;
   private readonly byId = new Map<number, Slab>();
 
+  /** Body handle of an active slab with bodies it isn't clear of → that slab (the pair filter's index). */
+  private readonly ghosts = new Map<number, Slab>();
+
   constructor(world: World) {
     this.world = world;
+    world.physics.addPairFilter((b1, b2) => this.ghostPair(b1, b2) || this.ghostPair(b2, b1));
   }
 
   /** The slab, disabled, standing where the fighter stands. */
@@ -134,13 +159,14 @@ export class DownedBodies {
     );
     const owner = { kind: 'fighter' as const, id: f.id, part: 'slab' as const };
     physics.register(col, owner);
-    this.byId.set(f.id, { f, body, col, halfLen, key: ownerKey(owner), active: false, hold: 0, handedBack: false, dv: null });
+    this.byId.set(f.id, { f, body, col, halfLen, key: ownerKey(owner), active: false, hold: 0, handedBack: false, dv: null, clearOf: new Set() });
   }
 
   remove(f: Fighter): void {
     const s = this.byId.get(f.id);
     if (!s) return;
     this.byId.delete(f.id);
+    this.ghosts.delete(s.body.handle);
     this.world.physics.unregister(s.col);
     this.world.physics.rapier.removeRigidBody(s.body);
   }
@@ -166,17 +192,23 @@ export class DownedBodies {
         if (!down && !s.active) w.zones.setEnabled(f, true);
       }
       if (!s.active) {
-        if (down) this.launch(w, f, s, lifts?.get(f) ?? null);
-        // A Δv meant for a standing fighter is CombatSim's (f.vel); one left over from a launch that didn't happen goes.
-        else s.dv = null;
-        continue;
+        if (down) {
+          this.launch(w, f, s, lifts?.get(f) ?? null);
+          this.updateClear(s, true);
+        } else {
+          // A Δv meant for a standing fighter is CombatSim's (f.vel); one left over from a launch that didn't happen goes.
+          s.dv = null;
+          this.updateClear(s, false);
+        }
+      } else {
+        if (s.dv) {
+          const v = s.body.linvel();
+          s.body.setLinvel({ x: v.x + s.dv.x, y: v.y + s.dv.y, z: v.z + s.dv.z }, true);
+          s.dv = null;
+        }
+        if (!down) this.standUp(w, f, s);
+        this.updateClear(s, false);
       }
-      if (s.dv) {
-        const v = s.body.linvel();
-        s.body.setLinvel({ x: v.x + s.dv.x, y: v.y + s.dv.y, z: v.z + s.dv.z }, true);
-        s.dv = null;
-      }
-      if (!down) this.standUp(w, f, s);
     }
   }
 
@@ -211,6 +243,33 @@ export class DownedBodies {
     }
   }
 
+  /**
+   * World.teleport of a fighter that is down on its active slab (knocked down or KO'd): the slab goes with it, at rest,
+   * turned by `turn` (rad) about the vertical, its hip over (x, z) and its lowest point on `y` (the support World.teleport
+   * found there); its pose history is reset (§4.3, RF-1; World.teleport opens the contact grace). Phase 13a then reads
+   * f.pos from it there. Returns false, moving nothing, for a fighter not down on its slab (a standing one is the
+   * controller's; one that went down this tick gets its slab where f.pos is in the next phase 4a).
+   */
+  teleport(f: Fighter, x: number, y: number, z: number, turn: number): boolean {
+    const s = this.byId.get(f.id);
+    if (!s || !s.active || (f.state !== 'knockdown' && f.state !== 'ko')) return false;
+    const T = DOWNED_TUNING;
+    const sc = f.scale;
+    const q0 = s.body.rotation();
+    const q = mulQuat(yawQuat(turn), { x: q0.x, y: q0.y, z: q0.z, w: q0.w });
+    const toHip = rotate(q, { x: 0, y: T.boneBands[1] * sc - s.halfLen, z: 0 });
+    const down = verticalExtent(q, T.halfWidth * sc, T.halfLength * sc, T.halfThick * sc) + T.border * sc;
+    s.body.setTranslation({ x: x - toHip.x, y: y + down, z: z - toHip.z }, true);
+    s.body.setRotation(q, true);
+    s.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+    s.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    s.dv = null;
+    this.world.physics.resetHistory(s.key);
+    // In the world anew where it lands: what it isn't clear of there (what it left behind is solid to it again).
+    this.updateClear(s, true);
+    return true;
+  }
+
   /** A world impact's Δv for a downed or launched fighter (applied in the next phase 4a). */
   queueDv(f: Fighter, dv: V3): void {
     const s = this.byId.get(f.id);
@@ -230,6 +289,18 @@ export class DownedBodies {
   /** Whether the fighter's slab is in the world. */
   active(f: Fighter): boolean {
     return this.byId.get(f.id)?.active ?? false;
+  }
+
+  /**
+   * The ids of the entities the step leaves out of the fighter's active slab this tick (Slab.clearOf: they reached its
+   * spine when it came into the world and in every phase 4a since), in id order; [] when it is clear of every entity.
+   */
+  notClearOf(f: Fighter): number[] {
+    const s = this.byId.get(f.id);
+    if (!s || s.clearOf.size === 0) return [];
+    const out: number[] = [];
+    for (const e of this.world.entities.all()) if (e.body && s.clearOf.has(e.body.handle)) out.push(e.id);
+    return out;
   }
 
   /** The active slab's linear and angular velocity (f32), else null. */
@@ -286,12 +357,21 @@ export class DownedBodies {
           hold: s.hold,
           handedBack: s.handedBack,
           dv: s.dv ? { ...s.dv } : null,
+          notClearOf: this.clearOfRecord(s),
         };
         return { fighter: s.f.id, slab };
       });
   }
 
-  /** Puts each listed fighter's slab back as recorded (the fighters were added to the world first). */
+  /**
+   * Puts each listed fighter's slab back as recorded (the fighters and the entities were added to the world first), with
+   * the standing zones as they are at a tick end beside it: off exactly while the slab is active, and until the phase 4a
+   * after it was handed back (syncDown); on otherwise (ZoneBodies.setEnabled(true) resets their history and opens a
+   * grace, RF-1). What an active slab isn't clear of is the record's (notClearOf), never derived again from the poses: the
+   * loader's zero-length step and the first tick leave out the pairs the saved world's would. A slab that isn't active
+   * has none (a record that says otherwise is broken), and a listed id must name an entity with a body, another
+   * fighter's slab or a ruler's body.
+   */
   restoreRecord(r: { fighter: number; slab: SlabRecV1 }[]): void {
     for (const { fighter, slab } of r) {
       const s = this.byId.get(fighter);
@@ -307,7 +387,9 @@ export class DownedBodies {
       const dv = slab.dv as V3 | null | undefined;
       s.dv = dv ? { x: dv.x, y: dv.y, z: dv.z } : null;
       this.world.physics.resetHistory(s.key);
+      this.world.zones.setEnabled(s.f, !(s.active || s.handedBack));
     }
+    for (const { fighter, slab } of r) this.restoreClear(this.byId.get(fighter)!, slab.notClearOf);
   }
 
   // -------------------------------------------------------------------------
@@ -358,6 +440,114 @@ export class DownedBodies {
     w.kcc.setEnabled(f, false);
     w.zones.setEnabled(f, false);
     w.events.push({ type: 'launch', f, vel: lin, angVel: ang });
+  }
+
+  /**
+   * What the slab isn't clear of (Slab.clearOf; see the top of this file), at the slab's pose now and the other bodies'
+   * (each collider placed on its body's pose: a body moved since the last step counts where it is). `fresh` (the slab
+   * has just come into the world: the launch, a teleport) lists every dynamic body that reaches its spine (a capsule
+   * along its long axis, of the core's half-thickness: inside the body, not at its surface); otherwise (every other phase
+   * 4a) the list only loses the bodies that no longer reach it, or are gone, disabled or no longer dynamic. None while the
+   * slab is off. Fixed and kinematic bodies, sensors and anything the slab doesn't collide with are never listed.
+   */
+  private updateClear(s: Slab, fresh: boolean): void {
+    if (!s.active) s.clearOf.clear();
+    else if (fresh || s.clearOf.size > 0) {
+      const T = DOWNED_TUNING;
+      const sc = s.f.scale;
+      const core = new RAPIER.Capsule((T.halfLength - T.halfThick) * sc, T.halfThick * sc);
+      const p = s.body.translation();
+      const q = s.body.rotation();
+      const rapier = this.world.physics.rapier;
+      if (fresh) {
+        s.clearOf.clear();
+        rapier.colliders.forEach((c) => {
+          const b = c.parent();
+          if (b && !s.clearOf.has(b.handle) && reachesSpine(s, b, c, core, p, q)) s.clearOf.add(b.handle);
+        });
+      } else {
+        for (const h of [...s.clearOf]) {
+          const b = rapier.getRigidBody(h);
+          // (Rapier's sets index bodies by slot: a gone body's slot may hold a newer body with another handle.)
+          let still = false;
+          if (b && b.handle === h) for (let i = 0; i < b.numColliders() && !still; i++) still = reachesSpine(s, b, b.collider(i), core, p, q);
+          if (!still) s.clearOf.delete(h);
+        }
+      }
+    }
+    this.indexClear(s);
+  }
+
+  /**
+   * The ghost index and the collider's hook flag follow Slab.clearOf. The flag is set only on an enabled slab and only
+   * when it changes: setting a collider's flags puts it back into the broad phase even while its body is disabled
+   * (measured: a disabled slab set each tick met the falling log and took 2 m/s off the AC-6 press). A disabled slab
+   * keeps its flag; its pairs are solved as usual (it has none while off) and the phase 4a that enables it sets the flag
+   * again before the step.
+   */
+  private indexClear(s: Slab): void {
+    if (s.clearOf.size > 0) this.ghosts.set(s.body.handle, s);
+    else this.ghosts.delete(s.body.handle);
+    if (!s.active) return;
+    const want = s.clearOf.size > 0 ? RAPIER.ActiveHooks.FILTER_CONTACT_PAIRS : RAPIER.ActiveHooks.NONE;
+    if (s.col.activeHooks() !== want) s.col.setActiveHooks(want);
+  }
+
+  /**
+   * Slab.clearOf by owner (SlabRecV1.notClearOf): the entities by id and the fighters (another's slab, a tripped ruler)
+   * by id, each increasing. A body gone since the last phase 4a is left out (that phase 4a drops it).
+   */
+  private clearOfRecord(s: Slab): { entities: number[]; fighters: number[] } {
+    const entities: number[] = [];
+    const fighters: number[] = [];
+    const physics = this.world.physics;
+    for (const h of s.clearOf) {
+      const b = physics.rapier.getRigidBody(h);
+      if (!b || b.handle !== h || b.numColliders() === 0) continue;
+      const o = physics.ownerOf(b.collider(0).handle);
+      if (o?.kind === 'entity') entities.push(o.id);
+      else if (o?.kind === 'fighter') fighters.push(o.id);
+    }
+    const up = (a: number, b: number): number => a - b;
+    return { entities: entities.sort(up), fighters: fighters.sort(up) };
+  }
+
+  /** Slab.clearOf from a record (restoreRecord): each id to the body it names in the loaded world. */
+  private restoreClear(s: Slab, r: { entities: number[]; fighters: number[] }): void {
+    s.clearOf.clear();
+    const n = r.entities.length + r.fighters.length;
+    if (n > 0 && !s.active) throw new Error(`DownedBodies.restoreRecord: fighter ${s.f.id}'s slab is off but lists bodies it isn't clear of`);
+    const physics = this.world.physics;
+    for (const id of r.entities) {
+      const b = this.world.entities.get(id)?.body;
+      if (!b) throw new Error(`DownedBodies.restoreRecord: fighter ${s.f.id}'s slab isn't clear of entity ${id}, which has no body`);
+      s.clearOf.add(b.handle);
+    }
+    let rulers: Map<number, number> | null = null;
+    for (const id of r.fighters) {
+      let h = id === s.f.id ? undefined : this.byId.get(id)?.body.handle;
+      if (h === undefined && id !== s.f.id) {
+        // A ruler's body (it has no slab): found by its colliders' owner.
+        if (!rulers) {
+          const found = new Map<number, number>();
+          physics.rapier.colliders.forEach((c) => {
+            const o = physics.ownerOf(c.handle);
+            const b = c.parent();
+            if (b && o?.kind === 'fighter' && o.part === 'ruler') found.set(o.id, b.handle);
+          });
+          rulers = found;
+        }
+        h = rulers.get(id);
+      }
+      if (h === undefined) throw new Error(`DownedBodies.restoreRecord: fighter ${s.f.id}'s slab isn't clear of fighter ${id}, who has no other slab or ruler body`);
+      s.clearOf.add(h);
+    }
+    this.indexClear(s);
+  }
+
+  /** The pair filter: `slab` is an active slab's body and `other` a body it isn't clear of. */
+  private ghostPair(slab: number, other: number): boolean {
+    return this.ghosts.get(slab)?.clearOf.has(other) ?? false;
   }
 
   /** Keep the fighter down one more tick (CombatSim gets it up when stateFrame reaches stunFrames). */
@@ -441,6 +631,22 @@ export class DownedBodies {
   }
 }
 
+/**
+ * Whether collider `c` of body `b` keeps the slab `s` from being clear of `b` (Slab.clearOf): `b` is another dynamic,
+ * enabled body, `c` an enabled solid collider in a group the slab collides with (COLLIDES_DOWNED_DYNAMIC), and `c`, placed
+ * on `b`'s pose now, overlaps `core` (the slab's spine) at the slab's pose `p`, `q`.
+ */
+function reachesSpine(s: Slab, b: RAPIER.RigidBody, c: RAPIER.Collider, core: RAPIER.Shape, p: RAPIER.Vector, q: RAPIER.Rotation): boolean {
+  if (b.handle === s.body.handle || !b.isDynamic() || !b.isEnabled() || c.isSensor() || !c.isEnabled()) return false;
+  if (!((c.collisionGroups() >>> 16) & COLLIDES_DOWNED_DYNAMIC)) return false;
+  const bp = b.translation();
+  const bq = b.rotation();
+  const lp = c.translationWrtParent() ?? { x: 0, y: 0, z: 0 };
+  const lq = c.rotationWrtParent() ?? IDENTITY;
+  const d = rotate(bq, lp);
+  return core.intersectsShape(p, q, c.shape, { x: bp.x + d.x, y: bp.y + d.y, z: bp.z + d.z }, mulQuat(bq, lq));
+}
+
 /** The rotation of `yaw` about +Y (the fighter yaw convention: 0 faces +z). */
 function yawQuat(yaw: number): Quat {
   return { x: 0, y: Math.sin(yaw / 2), z: 0, w: Math.cos(yaw / 2) };
@@ -456,6 +662,21 @@ function rotate(q: Quat, v: V3): V3 {
     y: v.y + q.w * ty + (q.z * tx - q.x * tz),
     z: v.z + q.w * tz + (q.x * ty - q.y * tx),
   };
+}
+
+/** a·b (b applied first). */
+function mulQuat(a: Quat, b: Quat): Quat {
+  return {
+    x: a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+    y: a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+    z: a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+    w: a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+  };
+}
+
+/** The half-height along world y of a box of half extents (hx, hy, hz) turned by q. */
+function verticalExtent(q: Quat, hx: number, hy: number, hz: number): number {
+  return Math.abs(rotate(q, { x: hx, y: 0, z: 0 }).y) + Math.abs(rotate(q, { x: 0, y: hy, z: 0 }).y) + Math.abs(rotate(q, { x: 0, y: 0, z: hz }).y);
 }
 
 /** v rotated by the inverse of unit quaternion q. */

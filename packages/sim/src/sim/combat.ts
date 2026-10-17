@@ -2,8 +2,8 @@ import { Vector3 } from 'three';
 import { type BoneName, bonePoint, fistPoint, footPoint, SKELETON } from '../body/skeleton';
 import type { PoseName } from '../body/poses';
 import { AIDirector, type Brain, MAX_HEFT } from './ai';
-import { boolFromRecord, numFromRecord, readV3, strFromRecord, v3Record } from '../body/animator';
-import { type Button, type Fighter, type WeaponRecord } from './fighter';
+import { boolFromRecord, numFromRecord, readV3, v3Record } from '../body/animator';
+import { type Button, type Fighter, type WeaponRecord, weaponFromRecord, weaponRecord } from './fighter';
 import { RectWalkable, type Walkable } from '../world/collision';
 import type { Finish, FighterMover, GroundQuery, ImpactCause, RulerZoneId, V3, Work, WorldPort } from '../world/types';
 import { getTuningValue } from '../tuning/registry';
@@ -16,7 +16,7 @@ import { angleDelta, approachAngle, clamp, DT, Rng } from './math';
 import { aimBallistic, centreOfMass, integrate, type Projectile, projectileDir, projectilePoints, pointVelocity, substeps } from './projectiles';
 import { DEFENSES, type DefenseKind, type Height, type MoveDef, moveLength, spinProgress } from './moves';
 import { chooseDefense, moveContext, selectPlayerMove } from './select';
-import { bladePoints, GORE, heft, LIMB_TOUGHNESS, limbBones, sampleOffsets, SEVER_AT, selectWeaponMove, WEAPON_MOVES, WEAPONS, type WeaponDef, type WeaponId, type Wound } from './weapons';
+import { bladePoints, GORE, heft, LIMB_TOUGHNESS, limbBones, sampleOffsets, SEVER_AT, selectWeaponMove, WEAPON_MOVES, type WeaponDef, type Wound } from './weapons';
 
 /** A weapon lying on the arena floor. */
 export interface Drop {
@@ -2188,7 +2188,8 @@ export class CombatSim {
         if (f.work !== work || f.state !== 'pickup') return;
       }
     }
-    if (f.stateFrame >= f.stunFrames) f.enterLocomotion(6);
+    // (A work action in a world rises back to its stance no faster than it bent, core-fix: Fighter.workFadeFrames.)
+    if (f.stateFrame >= f.stunFrames) f.enterLocomotion(work && f.ground ? f.workFadeFrames() : 6);
   }
 }
 
@@ -2196,13 +2197,11 @@ export class CombatSim {
 // CombatSim's save records (docs/M1-DESIGN.md §8.3; MAP gap-7 §3.1, §6). Plain data, keys in a fixed order: fighters by
 // id, weapons by id, vectors as V3, sets as arrays in their insertion order. P13 places them in SaveV1: `frame` is
 // `tick`, `rng` is `rng.combat`, the serials are `counters.dropSerial`/`counters.projSerial`, `drops`, `projectiles`,
-// `pending` as they are, and `prevBlade` is a new field, `prevBlade: [number, V3[]][]` (MAP gap-7 §3.1: save it, or
-// resumes keep a different set of swept blades). TODO(P13): §8.3's SaveV1 doesn't list it yet; add it there, to
-// save/schema.ts's SaveV1 and to the save's completeness inventory.
+// `pending` as they are, and `prevBlade` is SaveV1's `prevBlade: [number, V3[]][]` (MAP gap-7 §3.1: saved, or resumes
+// keep a different set of swept blades). §8.3's SaveV1 listing doesn't name it; save/schema.ts's SaveV1 holds it,
+// save/serialize.ts writes it, save/load.ts reads it back through restoreRecord, and the save's completeness inventory
+// (tests/save.test.ts, RR-19) lists it.
 // ---------------------------------------------------------------------------
-
-/** A weapon in a record: P04's WeaponRecord (sim/fighter.ts), the one shape for a weapon in the save. */
-export type CombatWeaponRecord = WeaponRecord;
 
 // The records are type aliases, not interfaces, so they are assignable to the save's `{ id: number; [field: string]:
 // unknown }` placeholders (save/schema.ts's DropRecV1 and ProjRecV1) until P13 gives those their exact fields.
@@ -2210,7 +2209,7 @@ export type CombatWeaponRecord = WeaponRecord;
 /** A weapon lying around (Drop); `from` null when it was placed rather than let go of. */
 export type DropRecord = {
   id: number;
-  weapon: CombatWeaponRecord;
+  weapon: WeaponRecord;
   pos: V3;
   yaw: number;
   from: V3 | null;
@@ -2220,7 +2219,7 @@ export type DropRecord = {
 export type ProjectileRecord = {
   id: number;
   serial: number;
-  weapon: CombatWeaponRecord;
+  weapon: WeaponRecord;
   owner: number;
   scale: number;
   pos: V3;
@@ -2273,48 +2272,6 @@ function arrFromRecord(v: unknown, field: string): readonly unknown[] {
 /** A V3 record read back into a new Vector3 (readV3 checks each of x, y and z). */
 function vecFromRecord(v: unknown, field: string): Vector3 {
   return readV3(objFromRecord(v, field) as unknown as V3, new Vector3(), field);
-}
-
-/** An own property of a table (a weapon id never reaches the prototype). */
-function ownWeapon(id: string): WeaponDef | undefined {
-  return Object.prototype.hasOwnProperty.call(WEAPONS, id) ? WEAPONS[id as WeaponId] : undefined;
-}
-
-// TODO(P04): fighter.ts's weaponRecord/weaponFromRecord and clonePlain are these; use them once they are exported.
-function weaponRecord(w: WeaponDef): CombatWeaponRecord {
-  return { id: w.id, def: ownWeapon(w.id) === w ? null : plainCopy(w) };
-}
-
-/**
- * A WEAPONS entry by id, or a synthesised tool's definition by value (whose id must be the record's). The definition's
- * own fields are copied as they are: they are the WeaponDef type's, checked by P13's schema validation of the save
- * (docs/M1-DESIGN.md §8.3), as P04's Fighter records leave them.
- */
-function weaponFromRecord(v: unknown, field: string): WeaponDef {
-  const r = objFromRecord(v, field);
-  const id = strFromRecord(r.id, `${field}.id`);
-  if (r.def !== null) {
-    const def = objFromRecord(r.def, `${field}.def`);
-    if (def.id !== id) throw brokenRecord(`${field}.def.id`, def.id, `the record's weapon id ${JSON.stringify(id)}`);
-    return plainCopy(def) as unknown as WeaponDef;
-  }
-  const w = ownWeapon(id);
-  if (!w) throw new Error(`save record: ${field} is weapon ${JSON.stringify(id)}, which doesn't exist`);
-  return w;
-}
-
-/** A deep copy of plain data in its key order, leaving out undefined values (a WeaponDef is numbers, strings and a map). */
-function plainCopy<T>(v: T): T {
-  if (Array.isArray(v)) return v.map((x) => plainCopy(x)) as T;
-  if (v !== null && typeof v === 'object') {
-    const o: Record<string, unknown> = {};
-    for (const k of Object.keys(v)) {
-      const x = (v as Record<string, unknown>)[k];
-      if (x !== undefined) o[k] = plainCopy(x);
-    }
-    return o as T;
-  }
-  return v;
 }
 
 function dropRecord(d: Drop): DropRecord {
@@ -2383,7 +2340,7 @@ function projectileFromRecord(v: unknown, at: string, byId: (id: unknown, field:
  * imports a world module (docs/M1-DESIGN.md §4.4). Reached only in world mode, where the verb system has registered
  * the table; without it this throws, naming the table.
  */
-function verbTuning(key: 'faceTurnRate' | 'standOffM'): number {
+function verbTuning(key: 'faceTurnRate' | 'standOffM' | 'workStepM'): number {
   const v = getTuningValue('VERB_TUNING', key);
   if (typeof v !== 'number') throw new Error(`VERB_TUNING.${key} is not a number`);
   return v;
@@ -2391,8 +2348,8 @@ function verbTuning(key: 'faceTurnRate' | 'standOffM'): number {
 
 /**
  * A work action's approach (docs/M1-DESIGN.md §5.0): turn toward `faceAt` by VERB_TUNING.faceTurnRate of the
- * remaining angle per tick, and step in as for a weapon on the floor until within VERB_TUNING.standOffM of it (× scale,
- * as DungeonStyle's squat reach is).
+ * remaining angle per tick, and step in VERB_TUNING.workStepM × scale a tick (DungeonStyle's PICKUP_STEP, as for a weapon
+ * on the floor) until within VERB_TUNING.standOffM of it (× scale, as DungeonStyle's squat reach is).
  */
 function faceWork(f: Fighter, w: Work) {
   const dx = w.faceAt.x - f.pos.x;
@@ -2402,7 +2359,7 @@ function faceWork(f: Fighter, w: Work) {
   f.yaw += angleDelta(f.yaw, Math.atan2(dx, dz)) * verbTuning('faceTurnRate');
   const near = verbTuning('standOffM') * f.scale;
   if (d > near) {
-    const k = Math.min(PICKUP_STEP * f.scale, d - near) / d;
+    const k = Math.min(verbTuning('workStepM') * f.scale, d - near) / d;
     f.pos.x += dx * k;
     f.pos.z += dz * k;
   }

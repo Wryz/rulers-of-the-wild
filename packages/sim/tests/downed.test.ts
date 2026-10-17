@@ -6,6 +6,8 @@
 //
 // Scene numbers (masses, sizes, blows) are test constants, never tuning (§9).
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { loadWorld } from '../src/save/load';
+import { serializeWorld } from '../src/save/serialize';
 import { BRAWLER_PLAN, BrawlerAI, DEFAULT_AI } from '../src/sim/ai';
 import type { CombatEvent } from '../src/sim/combat';
 import { moveCommand } from '../src/sim/commands';
@@ -16,6 +18,7 @@ import { SPECIES_BODY } from '../src/sim/species';
 import { resetTuning } from '../src/tuning/registry';
 import { CHARACTER_TUNING } from '../src/world/characters';
 import { DOWNED_TUNING } from '../src/world/downed';
+import { spawnLog } from '../src/world/factory';
 import { MATERIALS } from '../src/world/materials';
 import { physicsReady } from '../src/world/physics';
 import type { Quat, V3, WorldEvent } from '../src/world/types';
@@ -96,7 +99,7 @@ function untilHandBack(w: World, f: Fighter, max = 800): number {
 /** Puts an active slab at a pose, at rest (a staged body for the stand-spot cases). */
 function placeSlab(w: World, f: Fighter, p: V3, q: Quat): void {
   const z = { x: 0, y: 0, z: 0 };
-  w.downed.restoreRecord([{ fighter: f.id, slab: { enabled: true, pose: { p, q }, lin: z, ang: z, hold: 0, handedBack: false, dv: null } }]);
+  w.downed.restoreRecord([{ fighter: f.id, slab: { enabled: true, pose: { p, q }, lin: z, ang: z, hold: 0, handedBack: false, dv: null, notClearOf: { entities: [], fighters: [] } } }]);
 }
 
 // ---------------------------------------------------------------------------
@@ -479,6 +482,189 @@ describe('the slab (§4.5)', () => {
     w.downed.restoreRecord(JSON.parse(text));
     expect(JSON.stringify(w.downed.toRecord())).toBe(text);
     expect(() => w.downed.restoreRecord([{ fighter: 42, slab: rec[0].slab }])).toThrow(/no slab/);
+  });
+});
+
+describe('core-fix: clear of dynamic bodies, the zones on restore, a downed teleport', () => {
+  /**
+   * The AC-6 drop (§11.6): a 300 kg log from `dropM` (4 m) above the standing player's feet (on the terrain, or on a
+   * fixed platform `platform` m high), stepped until the slab comes in.
+   */
+  async function pressed(o: { platform?: number; dropM?: number } = {}): Promise<{ w: World; p: Fighter; id: number }> {
+    const w = await make({ seed: 3 });
+    const top = o.platform ?? 0;
+    if (top > 0) {
+      w.addEntity({ material: 'dryWood', shape: { kind: 'box', hx: 2, hy: top / 2, hz: 2 }, p: { x: 0, y: top / 2, z: 0 }, state: 'fixed', look: 'box' });
+      w.step();
+      w.teleport(w.player!, 0, 0);
+    }
+    const p = w.player!;
+    for (let t = 0; t < 10; t++) w.step();
+    expect(p.pos.y).toBeCloseTo(top, 2);
+    const id = spawnLog(w, { p: { x: p.pos.x, y: top + (o.dropM ?? 4), z: p.pos.z }, length: 3, mass: 300 });
+    for (let t = 0; t < 80 && !w.downed.active(p); t++) w.step();
+    expect(p.state).toBe('knockdown');
+    expect(w.downed.active(p)).toBe(true);
+    return { w, p, id };
+  }
+
+  it('a slab enabled inside a falling 300 kg log is left out of its pairs with it until clear: the log falls on through to the terrain (AC-6 at 4 m)', async () => {
+    const { w, p, id } = await pressed();
+    const log = w.entities.get(id)!;
+    // Enabled upright where the player stood, around the log: not clear of it, so the step left the pair out and the
+    // log kept falling (Rapier's depenetration had thrown it up at +4.95 m/s).
+    expect(w.downed.notClearOf(p)).toEqual([id]);
+    expect(log.body!.linvel().y).toBeLessThan(-4);
+    let clearAt = -1;
+    let lowest = Infinity;
+    for (let t = 0; t < 240; t++) {
+      w.step();
+      if (clearAt < 0 && w.downed.notClearOf(p).length === 0) clearAt = w.tick;
+      lowest = Math.min(lowest, w.entities.get(id)!.pose.p.y);
+    }
+    // Apart within a few ticks, the log on the terrain (its apothem is 0.229 m), the body solid to it again.
+    expect(clearAt).toBeGreaterThan(0);
+    expect(w.entities.get(id)!.pose.p.y).toBeLessThan(0.3);
+    expect(lowest).toBeGreaterThan(0.2);
+    expect(w.downed.notClearOf(p)).toEqual([]);
+  });
+
+  it('fixed bodies stay solid to a slab that is not clear of a log: it lies on the platform, not through it', async () => {
+    // (From 4.5 m: on the platform the log meets the head ball off its top from 4 m, a hitstun.)
+    const { w, p, id } = await pressed({ platform: 1, dropM: 4.5 });
+    expect(w.downed.notClearOf(p)).toEqual([id]);
+    let lowest = Infinity;
+    for (let t = 0; t < 120 && w.downed.active(p); t++) {
+      w.step();
+      const s = w.downed.pose(p.id);
+      if (s) lowest = Math.min(lowest, s.p.y);
+    }
+    // The slab's centre never goes below its half-thickness (0.10 m) over the platform's top.
+    expect(lowest).toBeGreaterThan(1 + (DOWNED_TUNING.halfThick + DOWNED_TUNING.border) * 0.95);
+    expect(w.entities.get(id)!.pose.p.y).toBeLessThan(1.3);
+  });
+
+  it('a save taken while a slab is not clear of a log loads: the loaded slab is not clear of it either, and the log falls on', async () => {
+    const { w, p, id } = await pressed();
+    expect(w.downed.notClearOf(p)).toEqual([id]);
+    // (The loader's zero-length step would otherwise solve the overlap and change the log, which it refuses.)
+    const l = await loadWorld(serializeWorld(w), { nav: 'off' });
+    live.push(l);
+    const lp = l.player!;
+    expect(l.downed.active(lp)).toBe(true);
+    expect(l.downed.notClearOf(lp)).toEqual([id]);
+    l.step();
+    expect(l.entities.get(id)!.body!.linvel().y).toBeLessThan(-4);
+  });
+
+  it('restoreRecord leaves the standing zones as a tick end has them: off while the slab is active or just handed back', async () => {
+    const w = await make({ seed: 17 });
+    const p = w.player!;
+    w.step();
+    expect(w.zones.enabled(p)).toBe(true);
+    const z = { x: 0, y: 0, z: 0 };
+    const slab = (enabled: boolean, handedBack: boolean) => ({ enabled, pose: { p: { x: 0, y: 0.1, z: 0 }, q: ALONG_X }, lin: z, ang: z, hold: 0, handedBack, dv: null, notClearOf: { entities: [], fighters: [] } });
+    w.downed.restoreRecord([{ fighter: p.id, slab: slab(true, false) }]);
+    expect(w.zones.enabled(p)).toBe(false);
+    w.downed.restoreRecord([{ fighter: p.id, slab: slab(false, true) }]);
+    expect(w.zones.enabled(p)).toBe(false);
+    w.downed.restoreRecord([{ fighter: p.id, slab: slab(false, false) }]);
+    expect(w.zones.enabled(p)).toBe(true);
+  });
+
+  it('World.teleport of a downed fighter takes its slab along, at rest on the support, its hip over the spot; it gets up there', async () => {
+    const w = await make({ seed: 18 });
+    const p = w.player!;
+    w.step();
+    knock(w, p, { kb: 2, lift: 0 });
+    // Down and lying still (the settle hold keeps it down while it moves).
+    for (let t = 0; t < 120; t++) {
+      w.step();
+      const v = w.downed.velocity(p.id);
+      if (t > 10 && v && len(v.lin) + len(v.ang) < 0.05) break;
+    }
+    expect(w.downed.active(p)).toBe(true);
+    const q0 = w.downed.pose(p.id)!.q;
+    const yaw0 = p.yaw;
+    w.teleport(p, 8, -5, yaw0 + Math.PI / 2);
+    expect(hdist(w.downed.hip(p.id)!, { x: 8, y: 0, z: -5 })).toBeLessThan(1e-5);
+    expect(w.downed.velocity(p.id)).toEqual({ lin: { x: 0, y: 0, z: 0 }, ang: { x: 0, y: 0, z: 0 } });
+    // Turned a quarter about the vertical with the fighter.
+    const q = w.downed.pose(p.id)!.q;
+    const turn = { x: 0, y: Math.sin(Math.PI / 4), z: 0, w: Math.cos(Math.PI / 4) };
+    const want = {
+      x: turn.w * q0.x + turn.y * q0.z,
+      y: turn.w * q0.y + turn.y * q0.w,
+      z: turn.w * q0.z - turn.y * q0.x,
+      w: turn.w * q0.w - turn.y * q0.y,
+    };
+    expect(Math.abs(q.x * want.x + q.y * want.y + q.z * want.z + q.w * want.w)).toBeCloseTo(1, 5);
+    for (let t = 0; t < 5; t++) w.step();
+    // f.pos follows the slab there (phase 13a), and the slab lies still on the ground (no drop, no throw).
+    expect(hdist(p.pos, { x: 8, y: 0, z: -5 })).toBeLessThan(0.05);
+    expect(len(w.downed.velocity(p.id)!.lin)).toBeLessThan(0.3);
+    expect(untilHandBack(w, p)).toBeGreaterThan(0);
+    expect(hdist(p.pos, { x: 8, y: 0, z: -5 })).toBeLessThan(1.2);
+  });
+
+  it('a log that falls onto a lying player is always solid to the slab: from 10-14 m at sub-tick offsets, every drop scores, nothing is left out', async () => {
+    // A log has no CCD: at 14-17 m/s it ends a step up to 0.29 m inside the slab, past its 4 cm border. Listed then (as
+    // when the list was taken in every phase 4a), it fell through the body unscored (0 HP in 5 of these 15 drops).
+    const drop = async (h: number, massKg: number): Promise<{ hp: number; leftOut: number }> => {
+      const w = await make({ seed: 7 });
+      const p = w.player!;
+      for (let t = 0; t < 5; t++) w.step();
+      knock(w, p, { kb: 0.5, lift: 0 });
+      for (let t = 0; t < 120; t++) {
+        w.step();
+        p.stunFrames = p.stateFrame + 1000;
+      }
+      const hip = w.downed.hip(p.id)!;
+      const id = spawnLog(w, { p: { x: hip.x, y: hip.y + h, z: hip.z }, length: 3, mass: massKg });
+      let hp = 0;
+      let leftOut = 0;
+      for (let t = 0, after = -1; t < 200 && after < 10; t++) {
+        const r = w.step();
+        p.stunFrames = p.stateFrame + 1000;
+        for (const e of r.world) if (e.type === 'impact' && e.defender === p && e.cause.kind === 'entity' && e.cause.entityId === id && hp === 0) hp = e.damage;
+        if (w.downed.notClearOf(p).length > 0) leftOut++;
+        if (hp > 0) after++;
+      }
+      w.dispose();
+      live.splice(live.indexOf(w), 1);
+      return { hp, leftOut };
+    };
+    for (const h of [10, 11, 12, 13, 14]) {
+      for (const dy of [0, 0.07, 0.14]) {
+        const r = await drop(h + dy, 300);
+        expect(r.leftOut, `300 kg from ${h + dy} m`).toBe(0);
+        // (45.8-66.2 HP: a few HP more with each metre.)
+        expect(r.hp, `300 kg from ${h + dy} m`).toBeGreaterThan(40);
+      }
+    }
+    for (const [h, m] of [
+      [10, 800],
+      [12, 1500],
+    ]) {
+      const r = await drop(h, m);
+      expect(r.leftOut, `${m} kg from ${h} m`).toBe(0);
+      expect(r.hp, `${m} kg from ${h} m`).toBeGreaterThan(40);
+    }
+  });
+
+  it('what a slab is not clear of is saved by id and restored as it is, never derived again; a broken list is refused', async () => {
+    const { w, p, id } = await pressed();
+    const rec = w.downed.toRecord();
+    expect(rec[0].slab.notClearOf).toEqual({ entities: [id], fighters: [] });
+    // Restored as recorded even where the poses say otherwise: the list is state.
+    const moved = { ...rec[0].slab, pose: { p: { x: 20, y: 0.3, z: 20 }, q: ALONG_X } };
+    w.downed.restoreRecord([{ fighter: p.id, slab: moved }]);
+    expect(w.downed.notClearOf(p)).toEqual([id]);
+    w.downed.restoreRecord([{ fighter: p.id, slab: { ...moved, notClearOf: { entities: [], fighters: [] } } }]);
+    expect(w.downed.notClearOf(p)).toEqual([]);
+    expect(() => w.downed.restoreRecord([{ fighter: p.id, slab: { ...moved, notClearOf: { entities: [9999], fighters: [] } } }])).toThrow(/entity 9999, which has no body/);
+    expect(() => w.downed.restoreRecord([{ fighter: p.id, slab: { ...moved, notClearOf: { entities: [], fighters: [p.id] } } }])).toThrow(/no other slab or ruler body/);
+    expect(() => w.downed.restoreRecord([{ fighter: p.id, slab: { ...moved, enabled: false } }])).toThrow(/off but lists/);
   });
 });
 

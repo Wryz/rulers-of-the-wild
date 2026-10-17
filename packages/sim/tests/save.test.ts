@@ -55,7 +55,8 @@ import type { CreatureMind } from '../src/world/creatures/mind';
 import { spawnBox, spawnGrass, spawnLog, spawnRopeCoil, spawnSapling, spawnStick, spawnStone, spawnTree } from '../src/world/factory';
 import { physicsReady } from '../src/world/physics';
 import type { Quat, RulerState, V3 } from '../src/world/types';
-import { createWorld, type World, type WorldOptions } from '../src/world/world';
+import { NavSystem } from '../src/world/nav';
+import { createWorld, World, type WorldOptions } from '../src/world/world';
 import { WORLD_TUNING } from '../src/world/worldTuning';
 
 /** Rapier worlds and a few hundred ticks: explicit time limits (§11's convention), generous for a loaded machine. */
@@ -236,8 +237,8 @@ describe('saveRecord', () => {
     expect(hist.length).toBe(BONES.length * 2 * 7);
     for (let i = 0; i < hist.length; i += 7) expect(Math.hypot(hist[i + 3], hist[i + 4], hist[i + 5], hist[i + 6]), `quaternion at ${i + 3}`).toBeCloseTo(1, 5);
     const slab = s.bodies[0].slab!;
-    expect(Object.keys(slab)).toEqual(['enabled', 'pose', 'lin', 'ang', 'hold', 'handedBack', 'dv']);
-    expect([slab.enabled, slab.hold, slab.handedBack, slab.dv]).toEqual([false, 0, false, null]);
+    expect(Object.keys(slab)).toEqual(['enabled', 'pose', 'lin', 'ang', 'hold', 'handedBack', 'dv', 'notClearOf']);
+    expect([slab.enabled, slab.hold, slab.handedBack, slab.dv, slab.notClearOf]).toEqual([false, 0, false, null, { entities: [], fighters: [] }]);
     expect(s.rulers).toEqual([]);
     // The empty scene has no creature homes and no sparring ape.
     expect(s.spawner.homes).toEqual([]);
@@ -492,6 +493,8 @@ const INVENTORY: Record<string, Record<string, string>> = {
     resets: 'not saved: pending history resets (a load resets every history)',
     gravityY: 'not saved: WORLD_TUNING.gravityY (tuningOverrides)',
     freed: 'not saved: false for a live world',
+    pairFilters: 'not saved: code (the pair filters systems register when the world is built)',
+    hooks: "not saved: code (Rapier's contact-pair hook, calling the pair filters)",
   },
   WorldQueries: { physics: 'not saved: a link', entities: 'not saved: links to the entity store' },
   Terrain: {
@@ -646,10 +649,14 @@ const INVENTORY: Record<string, Record<string, string>> = {
     cols: "not saved: the bone sensors, rebuilt (a severed bone's is turned off in phase 4b)",
     offs: 'not saved: derived from the scale',
     keys: 'not saved: owner keys',
-    enabled: 'not saved: off exactly while the slab is active or just handed back; the loader sets it from bodies[].slab',
+    enabled: 'not saved: off exactly while the slab is active or just handed back; DownedBodies.restoreRecord sets it from bodies[].slab',
     jump: 'not saved: a load resets the pose history, which sets it',
   },
-  DownedBodies: { world: 'not saved: a link', byId: 'saved: bodies (each Slab as bodies[].slab)' },
+  DownedBodies: {
+    world: 'not saved: a link',
+    byId: 'saved: bodies (each Slab as bodies[].slab)',
+    ghosts: 'not saved: the active slabs with bodies they are not clear of, an index of Slab.clearOf (set again with it)',
+  },
   Slab: {
     f: 'not saved: the fighter (a link)',
     body: 'not saved: the slab body, rebuilt (bodies[].slab.pose, lin, ang)',
@@ -660,6 +667,7 @@ const INVENTORY: Record<string, Record<string, string>> = {
     hold: 'saved: bodies[].slab.hold',
     handedBack: 'saved: bodies[].slab.handedBack',
     dv: 'saved: bodies[].slab.dv',
+    clearOf: 'saved: bodies[].slab.notClearOf (by entity and fighter id; it only shrinks after the launch, so it is state)',
   },
   RulerBodies: {
     world: 'not saved: a link',
@@ -690,6 +698,7 @@ const INVENTORY: Record<string, Record<string, string>> = {
     graceUntil: 'saved: contactGrace',
     resync: 'not saved: the restored groups still touching, from a load to its first phase 9 (null at every tick end); a load sets it again from contacts[].touching',
     restarts: "not saved: the load's own narrow-phase starts, held from a load to its first phase 9 (null at every tick end); a load makes them again",
+    loadStarts: "not saved: the load's narrow-phase starts of contacts the save didn't hold, held from a load to its first phase 9 (null at every tick end); a load makes them again",
     scored: 'not saved: a dev read-out (impacts scored so far), never read by the sim',
     unscored: 'not saved: dev read-outs (pairs and episodes left unscored, by reason), never read by the sim',
   },
@@ -1388,6 +1397,115 @@ function angleDeg(a: Quat, b: Quat): number {
 }
 const dist = (a: V3, b: V3): number => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 
+describe('the loader (core-fix)', () => {
+  it('builds into a world made for a load: no player, no creatures, no navmesh until it builds one, once', async () => {
+    const empty = track(new World({ seed: 7, scene: 'empty', size: 50, nav: 'full', player: true, sparringApe: false, load: true }));
+    expect(empty.combat.fighters).toHaveLength(0);
+    expect(empty.player).toBeNull();
+    expect(empty.nav!.built).toBe(false);
+    // The options still say what the saved world was built with (they are saved again as they are).
+    expect(empty.options).toMatchObject({ player: true, sparringApe: false, nav: 'full' });
+    expect('load' in empty.options).toBe(false);
+    const w = await make({ nav: 'full' });
+    populate(w);
+    run(w, 20, new Rng(5));
+    const bytes = serializeWorld(w);
+    const build = vi.spyOn(NavSystem.prototype, 'build');
+    try {
+      const l = await load(bytes, { nav: 'full' });
+      expect(build).toHaveBeenCalledTimes(1);
+      expect(l.nav!.built).toBe(true);
+      expect(l.combat.fighters.map((f) => f.id)).toEqual(w.combat.fighters.map((f) => f.id));
+    } finally {
+      build.mockRestore();
+    }
+  });
+
+  it('keeps the saved contact graces and opens the load grace, and nothing else: no grace from making the fighters', async () => {
+    const w = await make();
+    const g = w.spawnCreature('giantApe', { x: 12, z: 12 }, 0);
+    // (AC-5's "AI paused": the giant's mind only senses, so the test needs none of P20's decisions.)
+    (w.minds.get(g) as CreatureMind).paused = true;
+    run(w, 30, new Rng(6));
+    const p = w.player!;
+    w.contacts.grace(p.id, w.tick + 40);
+    const bytes = serializeWorld(w);
+    const s = parsed(bytes) as unknown as SaveV1;
+    expect(s.contactGrace).toEqual([[p.id, w.tick + 40]]);
+    const l = await load(bytes);
+    // The player's saved grace (later than the load's); the giant's teleport while the loader made it (a grace to tick
+    // 3) is not the save's and is gone; a ruler's load opens none here (its body's history reset is its own).
+    expect(l.contacts.graceRecord()).toEqual([[p.id, w.tick + 40]]);
+    expect(l.contacts.graceRecord().some(([id]) => id === g.id)).toBe(false);
+    // And a save of the loaded world holds the same graces.
+    expect((parsed(serializeWorld(l)) as unknown as SaveV1).contactGrace).toEqual(s.contactGrace);
+  });
+
+  it('a contact whose first step is the first step after a load still lands: a log on a lying player, saved on any tick before it', async () => {
+    // A 300 kg log dropped 8 m onto a player held lying. The loader's zero-length step raises the start of a contact
+    // the saved world's next step would have raised (the log already within reach of the slab at the save); the first
+    // real step raises it no more. It is a new contact on that tick, scored as the original scores it.
+    const hold = (p: Fighter) => {
+      p.stunFrames = p.stateFrame + 1000;
+    };
+    const stage = async (): Promise<{ w: World; id: number }> => {
+      const w = await make({ seed: 7 });
+      const p = w.player!;
+      for (let t = 0; t < 5; t++) w.step();
+      const sim = w.combat;
+      const orig = sim.stepBody;
+      sim.stepBody = function (this: typeof sim) {
+        sim.stepBody = orig;
+        const ev = orig.call(sim);
+        p.vel.set(0.5, 0, 0);
+        p.enterKnockdown();
+        ev.push({ type: 'hit', attacker: p, defender: p, move: { lift: 0 }, knockdown: true, ko: false } as never);
+        return ev;
+      };
+      for (let t = 0; t < 120; t++) {
+        w.step();
+        hold(p);
+      }
+      const hip = w.downed.hip(p.id)!;
+      const id = spawnLog(w, { p: { x: hip.x, y: hip.y + 8, z: hip.z }, length: 3, mass: 300 });
+      return { w, id };
+    };
+    type Hit = { tick: number; damage: number; energy: number };
+    const hitsUntil = (w: World, id: number, end: number): Hit[] => {
+      const out: Hit[] = [];
+      const p = w.player!;
+      while (w.tick < end) {
+        const r = w.step();
+        hold(p);
+        for (const e of r.world) if (e.type === 'impact' && e.defender === p && e.cause.kind === 'entity' && e.cause.entityId === id) out.push({ tick: e.tick, damage: e.damage, energy: e.energy });
+      }
+      return out;
+    };
+    const a = await stage();
+    const want = hitsUntil(a.w, a.id, a.w.tick + 200);
+    // (The log lands on the body at T and, after it, once more on its way off.)
+    expect(want.length).toBeGreaterThanOrEqual(1);
+    expect(want[0].damage).toBeGreaterThan(30);
+    const T = want[0].tick;
+    // Saved on each of the ticks before the impact's (the contact's first step is T's): the loaded world scores it on
+    // the same tick with the same HP (a load is not bit-exact for Rapier's solver state: within 0.1 %). Saved on T
+    // itself: it is not scored again.
+    for (let s = T - 4; s <= T; s++) {
+      const b = await stage();
+      expect(hitsUntil(b.w, b.id, s)).toEqual(want.filter((h) => h.tick <= s));
+      const l = await load(serializeWorld(b.w));
+      const got = hitsUntil(l, b.id, T + 10);
+      if (s === T) {
+        expect(got, `saved at tick ${s}`).toEqual([]);
+        continue;
+      }
+      expect(got, `saved at tick ${s}`).toHaveLength(1);
+      expect(got[0].tick, `saved at tick ${s}`).toBe(T);
+      expect(Math.abs(got[0].damage / want[0].damage - 1), `saved at tick ${s}: ${got[0].damage} HP`).toBeLessThan(1e-3);
+    }
+  });
+});
+
 describe('a world at rest', () => {
   it("saved and loaded, matches the original within 1 cm and 1° over 10 s, and its contacts carry on as the original's", async () => {
     const w = await make();
@@ -1724,6 +1842,29 @@ describe('broken saves', () => {
       (r) => (r.coverBreak = { tick: 2, cause: { kind: 'entity', entityId: 4, fighterId: null, credit: [], held: false, feature: 'cover' } }),
       `${at}.coverBreak.cause.entityId names entity 4, which is not below counters.entity (1)`,
     );
+  });
+
+  it("checks what a slab is not clear of (core-fix): ids increasing, none while the slab is off, each below its counter", () => {
+    const s0 = parsed(good) as unknown as SaveV1;
+    const i = s0.bodies.findIndex((b) => b.slab !== null);
+    expect(i).toBeGreaterThanOrEqual(0);
+    expect(readSave(good).bodies[i].slab!.notClearOf).toEqual({ entities: [], fighters: [] });
+    const at = `save record: bodies[${i}].slab.notClearOf`;
+    const no = (edit: (r: Record<string, unknown>) => void, message: string | RegExp) =>
+      refuse((s) => edit((s.bodies as Record<string, unknown>[])[i].slab as Record<string, unknown>), message);
+    const on = (n: { entities: number[]; fighters: number[] }) => (r: Record<string, unknown>) => {
+      r.enabled = true;
+      r.notClearOf = n;
+    };
+    no((r) => delete r.notClearOf, `${at} is missing, not there`);
+    no((r) => (r.notClearOf = { entities: [] }), `${at}.fighters is missing, not there`);
+    no((r) => (r.notClearOf = { entities: [], fighters: [], bodies: [] }), `${at} has a field this version doesn't have: bodies`);
+    no((r) => (r.notClearOf = { entities: [1], fighters: [] }), /notClearOf\.entities is .*, not empty \(the slab is off\)/);
+    no(on({ entities: [-1], fighters: [] }), `${at}.entities[0] is -1, not a whole number ≥ 0`);
+    no(on({ entities: [2, 1], fighters: [] }), `${at}.entities[1] is 1, not an id after the one before it (increasing, no repeats)`);
+    no(on({ entities: [], fighters: [3, 3] }), `${at}.fighters[1] is 3, not an id after the one before it (increasing, no repeats)`);
+    no(on({ entities: [999], fighters: [] }), `${at}.entities[0] names entity 999, which is not below counters.entity`);
+    no(on({ entities: [], fighters: [999] }), `${at}.fighters[0] names fighter 999, which is not below counters.fighter`);
   });
 
   it("checks a fighter's verb state field by field, and its fighter and entities against the save", () => {

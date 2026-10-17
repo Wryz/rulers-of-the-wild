@@ -26,7 +26,6 @@
 import RAPIER from '@dimforge/rapier3d-compat';
 import { BONE_ZONE } from '../body/mass';
 import type { KccRecV1 } from '../save/schema';
-import type { CombatSim } from '../sim/combat';
 import { MOVE_CROUCH } from '../sim/commands';
 import type { Fighter } from '../sim/fighter';
 import { applyImpact } from '../sim/impact';
@@ -60,6 +59,19 @@ export const CHARACTER_TUNING = defineTuning(
     jumpSpeed: 4.2,
     landingKnockdownSpeed: 9,
     crouchHeightFrac: 0.7,
+    // Not §9.1 rows (core-fix): how the body shows a posture and bends in a work action (sim/fighter.ts, world mode).
+    // A posture set or cleared at once ramps in or out over this many frames (no jump of the pose).
+    postureRampFrames: 12,
+    // A work action's bend moves the head (relative to the feet) at most this fast (× scale): DS's 9-frame pickup squat
+    // swung it at up to 4.7 m/s, which with the step-in was a self-motion hit on anything in front.
+    workHeadSpeedMps: 3,
+    // ...and rises back to its stance after it at that speed: the cross-fade is planned on the head's way to DS's guard,
+    // which the walking stance stands a little above and behind, so a quarter more.
+    workRiseMargin: 1.25,
+    // On a slope the hips go down for a downhill foot the leg wouldn't reach (body/footwork.ts hipDrop): at most this far
+    // (a 0.3 grade needs ≈ 0.11 m; a foot planted in a hole for a tick is not chased) and at most this fast (× scale).
+    maxHipDropM: 0.2,
+    hipDropSpeedMps: 1.5,
     // The 12 standing hit zones' shapes (world/zones.ts; §4.8: "bone-shaped sensor colliders"), the bone colliders of
     // DungeonStyle's ragdoll (apps/client/src/body/ragdoll.ts), so a zone is where the body is drawn and falls (rule 3).
     // Per bone frame, × scale: the head a ball `headUp` along the bone; pelvis, abdomen and chest boxes [hx, hy, hz, up];
@@ -93,6 +105,11 @@ export const CHARACTER_TUNING = defineTuning(
     jumpSpeed: { unit: 'm/s × √scale', source: 'NEW: D-28 (≈ 0.9 m jump)' },
     landingKnockdownSpeed: { unit: 'm/s', source: 'NEW' },
     crouchHeightFrac: { unit: '× capsule height', source: 'NEW: a crouched ape is 1.39 m, so it fits under a deadfall log (RT-4)' },
+    postureRampFrames: { unit: 'frames for a full posture', source: 'NEW: core-fix (a posture never jumps the pose; head ≤ ~1.5 m/s)', min: 1 },
+    workHeadSpeedMps: { unit: 'm/s (world; the head, relative to the feet)', source: 'NEW: core-fix (a bend at ≤ 2-3 m/s, under v_safe with the step-in)', min: 0 },
+    workRiseMargin: { unit: "× the head's way to the guard", source: 'NEW: core-fix (the rise after a work action at ≤ workHeadSpeedMps)', min: 1 },
+    maxHipDropM: { unit: 'm × scale', source: 'NEW: core-fix (rule 3 on slopes: a planted ankle on its plant)', min: 0 },
+    hipDropSpeedMps: { unit: 'm/s (world)', source: 'NEW: core-fix (the hips never jump: the zones ride on them)', min: 0 },
     zoneShapes: {
       headR: { unit: 'm × scale', source: 'DS (ragdoll.ts head ball)' },
       headUp: { unit: 'm × scale along the bone', source: 'DS (ragdoll.ts head ball)' },
@@ -235,6 +252,9 @@ export class CharacterControllers implements FighterMover {
     const c = this.byId.get(f.id);
     if (!c) return;
     f.footwork.landed.length = 0;
+    // The grip of a dragged load, for the near hand of the posture (Fighter.reachAt; core-fix): read by this tick's
+    // updatePose, which comes after the mover in CombatSim's phase 3.
+    f.reachAt = this.dragGrip(f);
     c.collided.length = 0;
     c.pushed.length = 0;
     // Last tick's pushes (a body pushed then and not moving now has not yielded); none after a gap or a teleport.
@@ -594,6 +614,25 @@ export class CharacterControllers implements FighterMover {
     return hit.time_of_impact;
   }
 
+  /** The world point of a dragged load's grip (the entity's record pose, as the tether reads it), or null. */
+  private dragGrip(f: Fighter): V3 | null {
+    const h = f.inventory?.hands;
+    if (!h || h.mode !== 'drag') return null;
+    const e = this.world.entities.get(h.entity);
+    if (!e) return null;
+    const q = e.pose.q;
+    const v = h.grip;
+    // v rotated by q, plus the position.
+    const tx = 2 * (q.y * v.z - q.z * v.y);
+    const ty = 2 * (q.z * v.x - q.x * v.z);
+    const tz = 2 * (q.x * v.y - q.y * v.x);
+    return {
+      x: e.pose.p.x + v.x + q.w * tx + (q.y * tz - q.z * ty),
+      y: e.pose.p.y + v.y + q.w * ty + (q.z * tx - q.x * tz),
+      z: e.pose.p.z + v.z + q.w * tz + (q.x * ty - q.y * tx),
+    };
+  }
+
   /** A predicate that leaves the entity in the fighter's hands out of its sweeps (a carried or dragged load). */
   private heldFilter(f: Fighter): ((col: RAPIER.Collider) => boolean) | undefined {
     const held = f.inventory?.hands?.entity;
@@ -656,7 +695,7 @@ export class CharacterControllers implements FighterMover {
     const impactorMass = !e || e.state === 'fixed' || e.state === 'anchored' || w.entities.isAnchored(e) ? Infinity : e.mass;
     const impact = landingImpact(f, v, cause, point, impactorMass);
     w.events.push({ type: 'land', entity: e ? e.id : null, f, point, energy: impact?.energy ?? 0, mass: f.mass });
-    if (impact) applyWorldImpact(w.combat, impact);
+    if (impact) applyImpact(w.combat, impact);
     if (v > CHARACTER_TUNING.landingKnockdownSpeed && f.alive && f.state !== 'knockdown') f.enterKnockdown();
   }
 }
@@ -695,20 +734,6 @@ export function landingImpact(f: Fighter, v: number, cause: ImpactCause, point: 
 /** m/s: the species' v_safe (SPEC_BODY, 6·√scale, D-4); a fighter of no species lands as a human of its scale. */
 export function safeLandingSpeed(f: Fighter): number {
   return f.species ? SPECIES_BODY[f.species].vSafe : SPECIES_BODY.human.vSafe * Math.sqrt(f.scale);
-}
-
-/**
- * applyImpact, or nothing while sim/impact.ts is still P01's placeholder (it throws): a landing before P09 must not
- * throw from inside step(), as World.onKO's classification doesn't (world.ts classifyKO).
- * TODO(P09): once applyImpact is filled the placeholder's error never occurs; fold this back into a plain call.
- */
-function applyWorldImpact(sim: CombatSim, i: Impact): void {
-  try {
-    applyImpact(sim, i);
-  } catch (e) {
-    if (e instanceof Error && e.message.startsWith('sim/impact.ts: applyImpact is not implemented yet')) return;
-    throw e;
-  }
 }
 
 function paramsFor(scale: number): Params {
