@@ -11,7 +11,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@dimforge/rapier3d-compat": "^0.21.0",
+    "@dimforge/rapier3d-compat": "0.21.0",
     "@wild/sim": "0.1.0",
     "mp4-muxer": "^5.2.2",
     "three": "^0.186.1",
