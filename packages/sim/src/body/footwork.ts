@@ -1,6 +1,7 @@
 import { Vector3 } from 'three';
 import { MOVE_TUNING } from '../sim/rules';
-import type { GroundQuery } from '../world/types';
+import type { GroundQuery, V3 } from '../world/types';
+import { numFromRecord, readV3, v3Record } from './animator';
 import { ANKLE_HEIGHT, bonePoint, type Rig, SKELETON, type Side } from './skeleton';
 
 export interface FootworkStyle {
@@ -461,4 +462,103 @@ export class Footwork {
     const lim = 0.2;
     return [Math.max(-lim, Math.min(lim, cx - (hlx + hrx) / 2)) + offX, Math.max(-lim, Math.min(lim, cz - (hlz + hrz) / 2)) + offZ];
   }
+
+  // ---------------------------------------------------------------------------
+  // Save record (docs/M1-DESIGN.md §8.3, P04; MAP gap-7 §3.5)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * The feet and the stepping rhythm (MAP gap-7 §3.5's Save list), plus the limp (`style.limp`: wound state the world
+   * sets at run time, unlike the rest of the style, which the fighter's maker gives it). Not saved: `mods` (copied
+   * from the fighter's motion profile by every updatePose before anything reads them) and `landed` (output the client
+   * drains; it never changes an outcome).
+   */
+  toRecord(): FootworkRecord {
+    const limp = this.style.limp;
+    return {
+      L: footToRecord(this.L),
+      R: footToRecord(this.R),
+      steps: this.steps,
+      firstStepper: this.firstStepper,
+      lastStepper: this.lastStepper,
+      shift: { x: this.shift.x, z: this.shift.z, primed: this.shift.primed },
+      shiftTarget: { x: this.shiftTarget.x, z: this.shiftTarget.z },
+      run: this.run,
+      phase: this.phase,
+      wasGait: this.wasGait,
+      initialized: this.initialized,
+      gaitDur: this.gaitDur,
+      gaitLead: this.gaitLead,
+      limp: limp ? { side: limp.side, amount: limp.amount } : null,
+    };
+  }
+
+  /** Puts back a toRecord() state into these feet (their vectors keep their identity). */
+  restoreRecord(r: FootworkRecord) {
+    footFromRecord(r.L, this.L, 'footwork.L');
+    footFromRecord(r.R, this.R, 'footwork.R');
+    this.steps = numFromRecord(r.steps, 'footwork.steps');
+    this.firstStepper = r.firstStepper;
+    this.lastStepper = r.lastStepper;
+    this.shift.x = numFromRecord(r.shift.x, 'footwork.shift.x');
+    this.shift.z = numFromRecord(r.shift.z, 'footwork.shift.z');
+    this.shift.primed = r.shift.primed;
+    this.shiftTarget.x = numFromRecord(r.shiftTarget.x, 'footwork.shiftTarget.x');
+    this.shiftTarget.z = numFromRecord(r.shiftTarget.z, 'footwork.shiftTarget.z');
+    this.run = numFromRecord(r.run, 'footwork.run');
+    this.phase = numFromRecord(r.phase, 'footwork.phase');
+    this.wasGait = r.wasGait;
+    this.initialized = r.initialized;
+    this.gaitDur = numFromRecord(r.gaitDur, 'footwork.gaitDur');
+    this.gaitLead = numFromRecord(r.gaitLead, 'footwork.gaitLead');
+    if (r.limp) this.style.limp = { side: r.limp.side, amount: numFromRecord(r.limp.amount, 'footwork.limp.amount') };
+    else delete this.style.limp;
+  }
+}
+
+/** One foot's saved state (its `side` is which foot it is). */
+export type FootRecord = {
+  pos: V3;
+  from: V3;
+  to: V3;
+  stepping: boolean;
+  t: number;
+  dur: number;
+  height: number;
+  lead: number;
+  gait: boolean;
+};
+
+/** Footwork's saved state (Footwork.toRecord). */
+export type FootworkRecord = {
+  L: FootRecord;
+  R: FootRecord;
+  steps: number;
+  firstStepper: Side | null;
+  lastStepper: Side | null;
+  shift: { x: number; z: number; primed: boolean };
+  shiftTarget: { x: number; z: number };
+  run: number;
+  phase: number;
+  wasGait: boolean;
+  initialized: boolean;
+  gaitDur: number;
+  gaitLead: number;
+  limp: { side: Side; amount: number } | null;
+};
+
+function footToRecord(f: Foot): FootRecord {
+  return { pos: v3Record(f.pos), from: v3Record(f.from), to: v3Record(f.to), stepping: f.stepping, t: f.t, dur: f.dur, height: f.height, lead: f.lead, gait: f.gait };
+}
+
+function footFromRecord(r: FootRecord, f: Foot, field: string) {
+  readV3(r.pos, f.pos, `${field}.pos`);
+  readV3(r.from, f.from, `${field}.from`);
+  readV3(r.to, f.to, `${field}.to`);
+  f.stepping = r.stepping;
+  f.t = numFromRecord(r.t, `${field}.t`);
+  f.dur = numFromRecord(r.dur, `${field}.dur`);
+  f.height = numFromRecord(r.height, `${field}.height`);
+  f.lead = numFromRecord(r.lead, `${field}.lead`);
+  f.gait = r.gait;
 }

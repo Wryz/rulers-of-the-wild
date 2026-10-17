@@ -1,4 +1,5 @@
 import type { Rng } from '../sim/math';
+import { numFromRecord } from './animator';
 import type { LimbTarget, PoseSpec } from './skeleton';
 
 export type FeintKind = 'jab' | 'shoulder' | 'level' | 'step';
@@ -197,4 +198,79 @@ export class IdleBehavior {
       }
     }
   }
+
+  // ---------------------------------------------------------------------------
+  // Save record (docs/M1-DESIGN.md §8.3, P04; MAP gap-7 §3.5, §3.7)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Idle life's clocks, timers, bursts and offsets (MAP gap-7 §3.5's Save list), plus `mods`: the fighter copies its
+   * motion profile into them every updatePose except while idle life is paused (`Fighter.idlePaused`, P02a), when
+   * they hold the amplitudes from before the pause and apply() still reads them, so they are state. `paused` is set
+   * from the fighter before every tick and `rng` is the fighter's own (restored with it), so neither is here.
+   */
+  toRecord(): IdleRecord {
+    const f = this.feint;
+    const p = this.paw;
+    const m = this.mods;
+    return {
+      feint: f ? { kind: f.kind, t: f.t, dur: f.dur } : null,
+      paw: p ? { t: p.t, dur: p.dur } : null,
+      t: this.t,
+      bouncePhase: this.bouncePhase,
+      engagedBlend: this.engagedBlend,
+      feintTimer: this.feintTimer,
+      shuffleTimer: this.shuffleTimer,
+      pawTimer: this.pawTimer,
+      off: [this.off[0], this.off[1]],
+      offTarget: [this.offTarget[0], this.offTarget[1]],
+      feints: this.feints,
+      shuffles: this.shuffles,
+      mods: { bounce: m.bounce, bounceHz: m.bounceHz, sway: m.sway, head: m.head, feints: m.feints, paws: m.paws },
+    };
+  }
+
+  /**
+   * Puts back a toRecord() state. Constructing the fighter drew `t` and `bouncePhase` from its Rng (MAP gap-7 §3.7):
+   * they are overwritten here, and the Rng's own state is restored with the fighter's.
+   */
+  restoreRecord(r: IdleRecord) {
+    const n = numFromRecord;
+    this.feint = r.feint ? { kind: r.feint.kind, t: n(r.feint.t, 'idle.feint.t'), dur: n(r.feint.dur, 'idle.feint.dur') } : null;
+    this.paw = r.paw ? { t: n(r.paw.t, 'idle.paw.t'), dur: n(r.paw.dur, 'idle.paw.dur') } : null;
+    this.t = n(r.t, 'idle.t');
+    this.bouncePhase = n(r.bouncePhase, 'idle.bouncePhase');
+    this.engagedBlend = n(r.engagedBlend, 'idle.engagedBlend');
+    this.feintTimer = n(r.feintTimer, 'idle.feintTimer');
+    this.shuffleTimer = n(r.shuffleTimer, 'idle.shuffleTimer');
+    this.pawTimer = n(r.pawTimer, 'idle.pawTimer');
+    this.off = [n(r.off[0], 'idle.off[0]'), n(r.off[1], 'idle.off[1]')];
+    this.offTarget = [n(r.offTarget[0], 'idle.offTarget[0]'), n(r.offTarget[1], 'idle.offTarget[1]')];
+    this.feints = n(r.feints, 'idle.feints');
+    this.shuffles = n(r.shuffles, 'idle.shuffles');
+    const m = this.mods;
+    m.bounce = n(r.mods.bounce, 'idle.mods.bounce');
+    m.bounceHz = n(r.mods.bounceHz, 'idle.mods.bounceHz');
+    m.sway = n(r.mods.sway, 'idle.mods.sway');
+    m.head = n(r.mods.head, 'idle.mods.head');
+    m.feints = n(r.mods.feints, 'idle.mods.feints');
+    m.paws = n(r.mods.paws, 'idle.mods.paws');
+  }
 }
+
+/** IdleBehavior's saved state (IdleBehavior.toRecord). */
+export type IdleRecord = {
+  feint: { kind: FeintKind; t: number; dur: number } | null;
+  paw: { t: number; dur: number } | null;
+  t: number;
+  bouncePhase: number;
+  engagedBlend: number;
+  feintTimer: number;
+  shuffleTimer: number;
+  pawTimer: number;
+  off: [number, number];
+  offTarget: [number, number];
+  feints: number;
+  shuffles: number;
+  mods: { bounce: number; bounceHz: number; sway: number; head: number; feints: number; paws: number };
+};
