@@ -6,13 +6,10 @@
 import type { BoneName } from '../body/skeleton';
 import { BONE_ZONE, zoneMassShares } from '../body/mass';
 import { defineTuning } from '../tuning/registry';
-import type { SpeciesId } from '../world/types';
 import type { HurtZone } from './combat';
 import type { Fighter } from './fighter';
-// SPECIES_BODY (sim/species.ts, filled by P03 in parallel with this package; an empty placeholder at ca53ce7), read
-// through the module namespace so this file compiles both before and after P03 lands. species.ts imports only the
-// registry and types, so this adds no import cycle.
-import * as speciesModule from './species';
+// species.ts imports only the registry and types, so this adds no import cycle.
+import { SPECIES_BODY } from './species';
 
 /** The damage rule (folder "Damage rule", §9). */
 export const DAMAGE_TUNING = defineTuning(
@@ -121,19 +118,12 @@ export function zoneToughness(d: Fighter, zone: HurtZone): number {
   return d.toughnessJ + (d.armour[zone] ?? 0);
 }
 
-/** The part of SPECIES_BODY this module reads (a row per species; absent until P03 fills sim/species.ts). */
-type SpeciesMassModes = { SPECIES_BODY?: Partial<Record<SpeciesId, { massShareMode: 'bone' | 'zone' }>> };
-
 /**
  * Where a species' m_eff comes from: `SPECIES_BODY[d.species].massShareMode`, read at use time (a live table, the
- * §4.15 playtest lever); 'bone' for a fighter with no species (DungeonStyle's) or no row.
+ * §4.15 playtest lever); 'bone' for a fighter with no species (DungeonStyle's).
  */
 function massShareMode(d: Fighter): 'bone' | 'zone' {
-  if (!d.species) return 'bone';
-  // TODO(P02a-fix, once P03 has merged): import { SPECIES_BODY } from './species' by name and drop this cast and the
-  // optional chain (SPECIES_BODY then has a row for every SpeciesId). The cast compiles against both the placeholder
-  // and P03's table, and fails the typecheck if P03's rows lose `massShareMode: 'bone' | 'zone'`.
-  return (speciesModule as SpeciesMassModes).SPECIES_BODY?.[d.species]?.massShareMode ?? 'bone';
+  return d.species ? SPECIES_BODY[d.species].massShareMode : 'bone';
 }
 
 /**
