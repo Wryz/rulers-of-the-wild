@@ -7,6 +7,12 @@
 //   exposed to rules), the pre-step store with one tick of pose history (phase 5), the post-step velocity snapshot
 //   (phase 8, the rope fit's v_post), and the drain that turns collision events into owner pairs sorted by owner
 //   (phase 8). Nothing acts inside a Rapier callback: an exception there is swallowed silently (MAP gap-3 §1.3).
+// - Pair filters (core-fix): a system may leave chosen pairs of bodies out of the step (Rapier's contact-pair hook,
+//   consulted only for colliders flagged ActiveHooks.FILTER_CONTACT_PAIRS): no contact, no solver response, no event.
+//   The filters only read state their owner set before the step (world/downed.ts: a slab and a dynamic body it was
+//   enabled inside, until they are clear).
+// - `refreshQueries()`: a zero-length step that moves nothing, so colliders made since the last step are seen by the
+//   scene queries (primeQueries' general form, for a world that has bodies: the loader's, save/load.ts).
 // - PHYSICS_TUNING: the entity body parameters every body factory reads.
 import RAPIER from '@dimforge/rapier3d-compat';
 import { init as recastInit } from 'recast-navigation';
@@ -183,6 +189,17 @@ export class PhysicsWorld {
   /** Contact-force events drained in the last phase 8 (a dev cross-check only, never an outcome). */
   forceEventCount = 0;
 
+  /** Pair filters (addPairFilter): true leaves the pair of bodies out of the step. */
+  private readonly pairFilters: ((body1: number, body2: number) => boolean)[] = [];
+  /**
+   * Rapier's hooks: a contact pair one of whose colliders has ActiveHooks.FILTER_CONTACT_PAIRS is left out when a pair
+   * filter says so, and solved as usual otherwise (Rapier still applies the solver groups to it). Read-only.
+   */
+  private readonly hooks: RAPIER.PhysicsHooks = {
+    filterContactPair: (_c1, _c2, b1, b2) => (this.pairFilters.some((f) => f(b1, b2)) ? null : RAPIER.SolverFlags.COMPUTE_IMPULSE),
+    filterIntersectionPair: () => true,
+  };
+
   private readonly owners = new Map<number, Owner>();
   private readonly keys = new Map<number, string>();
   /** Colliders unregistered since the last drain: their `stopped` events arrive after the next step. */
@@ -323,14 +340,23 @@ export class PhysicsWorld {
     return found;
   }
 
-  /** Phase 7: one Rapier step (gravity re-read from WORLD_TUNING, so it is live). */
+  /** Phase 7: one Rapier step (gravity re-read from WORLD_TUNING, so it is live), with the pair filters. */
   step(): void {
     this.assertLive();
     if (WORLD_TUNING.gravityY !== this.gravityY) {
       this.gravityY = WORLD_TUNING.gravityY;
       this.rapier.gravity = { x: 0, y: this.gravityY, z: 0 };
     }
-    this.rapier.step(this.events);
+    this.rapier.step(this.events, this.hooks);
+  }
+
+  /**
+   * A filter of the pairs the step leaves out: called (inside the step, so it must only read) with the two bodies'
+   * handles of a contact pair one of whose colliders has ActiveHooks.FILTER_CONTACT_PAIRS set; true leaves the pair out
+   * (no contact, no impulse, no collision event). Registered once by the system that owns the flagged colliders.
+   */
+  addPairFilter(f: (body1: number, body2: number) => boolean): void {
+    this.pairFilters.push(f);
   }
 
   /** Phase 8: every awake dynamic body's linvel and angvel as the step left them, before any code impulse (RF-2). */
@@ -404,6 +430,42 @@ export class PhysicsWorld {
     this.events.drainContactForceEvents(() => {});
   }
 
+  /**
+   * Every collider made or moved since the last step into the scene queries, without moving anything: one Rapier step
+   * of zero length (with the pair filters), whose collision events it returns as phase 8's drain would (sorted owner
+   * pairs). primeQueries' general form, for a world that already has bodies (the loader's, save/load.ts step 8): a new
+   * collider is invisible to queries until a step (MAP rapier finding 7). Its starts are the rebuilt narrow phase raising
+   * every pair that overlaps. A zero-length step moves no body and changes no velocity (measured: bit for bit, with
+   * resting stacks, sliding bodies, kinematic capsules and motorised, rope, spring and fixed joints); that is checked
+   * here, so a Rapier that did otherwise fails loudly instead of changing the world quietly. The pre-step store and the
+   * post-step snapshot are left as they were.
+   */
+  refreshQueries(): ContactPair[] {
+    this.assertLive();
+    const before = new Map<number, number[]>();
+    this.rapier.bodies.forEach((b) => {
+      before.set(b.handle, bodyState(b));
+    });
+    const dt = this.rapier.timestep;
+    this.rapier.timestep = 0;
+    try {
+      this.rapier.step(this.events, this.hooks);
+    } finally {
+      this.rapier.timestep = dt;
+    }
+    const forces = this.forceEventCount;
+    const pairs = this.drain();
+    this.forceEventCount = forces;
+    this.rapier.bodies.forEach((b) => {
+      const was = before.get(b.handle);
+      const now = bodyState(b);
+      if (!was || !was.every((x, i) => Object.is(x, now[i]))) {
+        throw new Error(`PhysicsWorld.refreshQueries: the zero-length step changed Rapier body ${b.handle}`);
+      }
+    });
+    return pairs;
+  }
+
   /** Frees the Rapier world and the event queue (controllers and bodies go with the world). Idempotent. */
   free(): void {
     if (this.freed) return;
@@ -425,4 +487,13 @@ export class PhysicsWorld {
   private assertLive(): void {
     if (this.freed) throw new Error('PhysicsWorld: used after free()');
   }
+}
+
+/** A body's pose and velocities, and whether it sleeps (what refreshQueries must leave as it was). */
+function bodyState(b: RAPIER.RigidBody): number[] {
+  const t = b.translation();
+  const q = b.rotation();
+  const v = b.linvel();
+  const a = b.angvel();
+  return [t.x, t.y, t.z, q.x, q.y, q.z, q.w, v.x, v.y, v.z, a.x, a.y, a.z, b.isSleeping() ? 1 : 0];
 }
