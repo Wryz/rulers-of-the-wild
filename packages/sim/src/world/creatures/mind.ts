@@ -325,12 +325,14 @@ export abstract class CreatureMind implements Brain {
    */
   protected tugScript(self: Fighter, s: Extract<MindScript, { kind: 'tug' }>): void {
     const w = this.world;
-    if (this.routeIdx < 2 && !w.entities.get(s.entity)) {
+    const e = w.entities.get(s.entity);
+    if (this.routeIdx < 2 && !e) {
       if (this.routeIdx === 1) w.verbs.tug(self, null);
       this.routeIdx = 2;
     }
-    if (this.routeIdx === 0) {
-      const at = w.queries.projectPoint(s.entity, chestPoint(self)).point;
+    if (this.routeIdx === 0 && e) {
+      // Its surface point nearest the chest (an entity without a collider: its position).
+      const at = e.collider ? w.queries.projectPoint(s.entity, chestPoint(self)).point : e.pose.p;
       if (!inTakeReach(self, at)) {
         self.posture = null;
         this.walk(self, at.x - self.pos.x, at.z - self.pos.z, CREATURE_TUNING.ape.gait.investigate, true);

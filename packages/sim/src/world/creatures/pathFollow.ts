@@ -190,6 +190,13 @@ export class PathFollower {
    */
   corner(self: Fighter): V3 | null {
     const arrive = this.tune.arriveM;
+    // Carried past corners (a knockback, a shove, a teleport): on from the farthest corner within arriveM.
+    for (let k = this.points.length - 1; k > this.i; k--) {
+      if (flatDist(this.points[k], self.pos) <= arrive) {
+        this.i = k;
+        break;
+      }
+    }
     while (this.i < this.points.length) {
       const p = this.points[this.i];
       if (flatDist(p, self.pos) > arrive) return p;

@@ -46,6 +46,9 @@ import { IdCounter, LEGACY_IDS } from '../src/sim/fighter';
 import { Rng } from '../src/sim/math';
 import { createBrawler } from '../src/sim/roster';
 import { defineTuning, getTuningValue, resetTuning, setTuningValue, tuningSnapshot } from '../src/tuning/registry';
+import { ApeMind } from '../src/world/creatures/apeMind';
+import { createCreature } from '../src/world/creatures/factory';
+import type { CreatureMind } from '../src/world/creatures/mind';
 import { spawnBox, spawnGrass, spawnLog, spawnRopeCoil, spawnStick, spawnStone } from '../src/world/factory';
 import { physicsReady } from '../src/world/physics';
 import type { Quat, RulerState, V3 } from '../src/world/types';
@@ -640,7 +643,59 @@ const INVENTORY: Record<string, Record<string, string>> = {
     world: 'not saved: a link',
     byFighter: "saved: verbs (by fighter id: the focus, a continuous verb that is on, a creature's tug; a removed fighter's state is dropped)",
   },
-  MindRegistry: { world: 'not saved: a link', minds: 'saved: minds (by fighter id) and rng.minds' },
+  MindRegistry: {
+    world: 'not saved: a link',
+    minds: 'saved: minds (by fighter id) and rng.minds',
+    attackTick: "not saved: the tick a creature last started an attack, read in phase 3 of that same tick (two never start one on one tick)",
+    attacker: 'not saved: who started it, read with attackTick in phase 3 of that same tick',
+  },
+  /** A creature's mind (an ape's: CreatureMind's fields and the inner BrawlerAI). */
+  ApeMind: {
+    cfg: 'not saved: the AI config its maker gives it (CREATURE_TUNING when the ape is made)',
+    director: "not saved: CombatSim's AIDirector (a link; its state is saved as director)",
+    drops: "not saved: CombatSim's drops (a link; saved as drops)",
+    ownsTarget: 'not saved: a constant (the mind picks its target)',
+    state: 'saved: minds[].state',
+    stateTick: 'saved: minds[].stateTick',
+    resume: 'saved: minds[].resume',
+    mark: 'saved: minds[].mark',
+    paused: 'saved: minds[].paused',
+    senses: 'system: Senses',
+    path: 'system: PathFollower',
+    rng: "saved: minds[].rng and rng.minds (the world's mind stream)",
+    self: 'not saved: its fighter (a link; minds[].fighter names it)',
+    world: 'not saved: a link',
+    hurt: 'saved: minds[].hurt',
+    home: 'saved: minds[].home',
+    homeIdx: 'saved: minds[].homeIdx',
+    routeIdx: 'saved: minds[].routeIdx',
+    restUntil: 'saved: minds[].restUntil',
+    cooldownUntil: 'saved: minds[].cooldownUntil',
+    fleeUntil: 'saved: minds[].fleeUntil',
+    heading: 'saved: minds[].heading',
+    charge: 'saved: minds[].charge',
+    current: 'saved: minds[].script',
+    inner: "saved: minds[].inner (the inner BrawlerAI's history fields; its cfg and plan are the maker's, its rng CombatSim's)",
+  },
+  Senses: {
+    awareness: 'saved: minds[].awareness',
+    lkp: 'saved: minds[].lkp',
+    lkpTick: 'saved: minds[].lkpTick',
+    lastSeenTick: 'saved: minds[].lastSeenTick',
+    stimulus: 'saved: minds[].stimulus',
+  },
+  PathFollower: {
+    layer: "not saved: the species' nav layer, given when the mind is made",
+    points: 'saved: minds[].path.points',
+    i: 'saved: minds[].path.i',
+    goal: 'saved: minds[].path.goal',
+    complete: 'saved: minds[].path.complete',
+    tiles: 'saved: minds[].path.tiles',
+    versions: 'saved: minds[].path.versions (a load rebuilds the navmesh with versions from 1: the mind re-paths once, TODO(M3))',
+    requestTick: 'saved: minds[].path.requestTick',
+    pending: 'saved: minds[].path.pending',
+    stuck: 'saved: minds[].stuck',
+  },
   NoiseBus: {
     world: 'not saved: a link',
     queue: "not saved: noises, hurts and wounds waiting for phase 17b's fold, which empties it (minds emit in phase 2); empty at a tick end (§8.3)",
@@ -677,9 +732,13 @@ const DESCRIPTIVE = ['Registry', 'Save'];
  * `saved:` places that a populated test scene can't reach, because a list it steps into is empty there. Each says why;
  * every other place a `saved:` verdict names is checked against a populated save.
  */
-const UNREACHED: Record<string, string> = {
-  'minds[].inner': 'the test scene has no creature (and MindRegistry is P19\'s); save/load.ts checks the key of every mind record',
-};
+const UNREACHED: Record<string, string> = {};
+
+/** The populated scenes' creature: an ape 8 m off the player, a mind with a path, its inner BrawlerAI and its senses. */
+function addApe(w: World): CreatureMind {
+  const f = createCreature(w, 'ape', { x: 8, z: -8 }, 0);
+  return w.minds.get(f)!;
+}
 
 /** A save path: a save key, then `.field` steps; `name[]` steps into every element of a list. */
 const SAVE_PATH = /[A-Za-z]+(?:\[\])?(?:\.[A-Za-z]+(?:\[\])?)*/g;
@@ -725,7 +784,7 @@ const AWAITING: Record<string, string> = {
 
 describe('completeness (RR-19)', () => {
   /** Every inventoried object of a populated world, by inventory entry. */
-  function systems(w: World, e: number): Record<string, object> {
+  function systems(w: World, e: number, mind: CreatureMind): Record<string, object> {
     const rt = (w.entities as unknown as { rt: Map<number, object> }).rt;
     const byId = (system: object): Map<number, object> => (system as { byId: Map<number, object> }).byId;
     return {
@@ -757,6 +816,9 @@ describe('completeness (RR-19)', () => {
       Deaths: w.deaths,
       VerbSystem: w.verbs,
       MindRegistry: w.minds,
+      ApeMind: mind,
+      Senses: mind.senses,
+      PathFollower: mind.path,
       NoiseBus: w.noise,
       Spawner: w.spawner,
       ...(w.nav ? { NavSystem: w.nav } : {}),
@@ -766,8 +828,10 @@ describe('completeness (RR-19)', () => {
   it('every runtime field of every world system is saved, a system, or not saved for a reason', async () => {
     const w = await make({ nav: 'full' });
     const ids = populate(w);
+    const mind = addApe(w);
     run(w, 20, new Rng(4));
-    const sys = systems(w, ids.log);
+    expect(mind).toBeInstanceOf(ApeMind);
+    const sys = systems(w, ids.log, mind);
     const diffs: { entry: string; notInInventory: string[]; notOnObject: string[] }[] = [];
     for (const [name, o] of Object.entries(sys)) {
       const have = Object.keys(o).sort();
@@ -800,9 +864,11 @@ describe('completeness (RR-19)', () => {
   it('every place a `saved:` verdict names is in a populated save (sub-fields of records and list elements included)', async () => {
     const w = await make();
     const ids = populate(w);
+    const mind = addApe(w);
     run(w, 20, new Rng(5));
     w.entities.queueImpulse(ids.log, { x: 0, y: 1, z: 0 }, null);
     w.player!.ruler = rulerSample();
+    expect(mind.path.goal).not.toBeNull(); // grazing: a path to its first wander point
     const s = parsed(serializeWorld(w));
     const paths = new Set(Object.values(INVENTORY).flatMap((fields) => Object.values(fields).flatMap(savedPaths)));
     // Not vacuous: the record sub-fields and list elements are among them.
@@ -922,6 +988,45 @@ describe('save → load → save', () => {
     expect(s.impulses.length).toBe(1);
     // And a second round trip changes nothing more.
     expect(text(serializeWorld(track(await loadWorld(b, { nav: 'off' })))) === text(b)).toBe(true);
+  });
+
+  it('keeps a creature mind mid-chase (RR-19): its state, senses, path, timers, stream and inner BrawlerAI, byte for byte', async () => {
+    const w = await make({ nav: 'full' });
+    populate(w);
+    // An ape 12 m off the player, facing him, kept from grazing away (staging): it sees him and gives chase.
+    const f = createCreature(w, 'ape', { x: 0, z: 12 }, Math.PI);
+    const mind = w.minds.get(f) as ApeMind;
+    mind.cooldownUntil = 1e9;
+    mind.restUntil = 1e9;
+    let n = 0;
+    while (!(mind.state === 'chase' && mind.path.points.length > 0 && mind.path.i > 0) && n++ < 300) w.step();
+    expect(mind.state).toBe('chase');
+    // Mid-window after a hurt (stimulus Infinity), with a memory of it.
+    mind.senses.stimulus = Infinity;
+    mind.hurt = { tick: w.tick, point: { x: 0.5, y: 1, z: 11 } };
+    const a = serializeWorld(w);
+    const s = parsed(a) as unknown as SaveV1;
+    expect(s.minds.length).toBe(1);
+    expect(s.minds[0].state).toBe('chase');
+    expect(s.minds[0].path).not.toBeNull();
+    expect(s.minds[0].inner).not.toBeNull();
+    expect(s.rng.minds).toEqual([[f.id, mind.rng.state]]);
+    const l = await load(a, { nav: 'full' });
+    const b = serializeWorld(l);
+    const sa = sections(a, SAVE_V1_KEYS);
+    const sb = sections(b, SAVE_V1_KEYS);
+    for (const k of EXACT) expect(sb[k] === sa[k], `section ${k}`).toBe(true);
+    // The loaded mind is the same mind on the loaded fighter, and it carries on with the chase.
+    const lf = l.combat.fighters.find((x) => x.id === f.id)!;
+    const lm = l.minds.get(lf) as ApeMind;
+    expect(lm).toBeInstanceOf(ApeMind);
+    expect(l.combat.ais.get(lf)).toBe(lm);
+    expect(lm.senses.stimulus).toBe(Infinity);
+    expect(lm.rng.state).toBe(mind.rng.state);
+    expect(lf.target).toBe(l.player);
+    for (let k = 0; k < 60; k++) l.step();
+    expect(['chase', 'fight']).toContain(lm.state);
+    expect(lf.distanceTo(l.player!)).toBeLessThan(f.distanceTo(w.player!));
   });
 
   it('gives the loaded world its fighters, players, tick, entity poses, queue, impulses and streams', async () => {

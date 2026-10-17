@@ -291,7 +291,7 @@ export class ApeMind extends CreatureMind {
 
   protected act(self: Fighter, wk: Walkable | null): void {
     const g = CREATURE_TUNING.ape.gait;
-    if (this.state !== 'fight') self.posture = null;
+    self.posture = null; // (the look-around sets sniff below; a fight has none)
     switch (this.state) {
       case 'idle':
         this.steer(self, g.wander);
