@@ -71,27 +71,7 @@ export const BRAWLER_PALETTE: Palette = {
   bald: true,
 };
 
-export const ENEMY_PALETTES: Record<string, Palette> = {
-  rookie: { skin: '#e2b08a', shirt: '#6f7f90', pants: '#3b4252', gloves: '#d04848', boots: '#22252b', hair: '#2b211a', sleeves: 'shirt' },
-  brawler: BRAWLER_PALETTE,
-  kicker: { skin: '#b97f58', shirt: '#b97f58', pants: '#d8a71c', gloves: '#b8322a', boots: '#b07650', hair: '#151515', sleeves: 'skin', shins: '#b97f58' },
-  bruiser: { skin: '#9c6a52', shirt: '#46523f', pants: '#2d2a26', gloves: '#5a4632', boots: '#1f1a16', hair: '#1a1714', sleeves: 'skin', bald: true },
-};
-
-export const GEAR_COLORS: Record<string, { color: string; metalness: number; roughness: number }> = {
-  cloth: { color: '#8f806a', metalness: 0, roughness: 0.9 },
-  leather: { color: '#7a4e2e', metalness: 0, roughness: 0.7 },
-  iron: { color: '#8d9399', metalness: 0.5, roughness: 0.45 },
-  steel: { color: '#cfd6dd', metalness: 0.7, roughness: 0.3 },
-  gold: { color: '#d8b04a', metalness: 0.7, roughness: 0.35 },
-  blacksteel: { color: '#3a3d44', metalness: 0.8, roughness: 0.28 },
-  mythril: { color: '#a9d8ea', metalness: 0.85, roughness: 0.18 },
-};
-
-export type GearLook = Partial<Record<'helmet' | 'chest' | 'legs' | 'boots' | 'cuffs', { material: string; tier: number }>>;
-
 type Slot = keyof Omit<Palette, 'sleeves' | 'bald' | 'shins' | 'addons'>;
-
 
 /** Low-poly body built from simple faceted shapes, one group per physics bone. */
 export class FighterView {
@@ -273,7 +253,6 @@ export class FighterView {
     }
   }
 
-  private readonly gearMeshes: Mesh[] = [];
   private readonly ears = {} as Record<'L' | 'R', Mesh>;
   /** Raw patches where pieces were torn away. */
   private readonly gouges: Group[] = [];
@@ -302,72 +281,6 @@ export class FighterView {
       this.cutMesh.rotation.z = -0.3;
       this.bones.head.add(this.cutMesh);
       this.mats.head.push(mat);
-    }
-  }
-
-  /** Shows worn gear as blocky armour pieces on the body. */
-  setGear(look: GearLook) {
-    for (const m of this.gearMeshes) {
-      m.parent?.remove(m);
-      const mat = m.material as MeshStandardMaterial;
-      for (const list of Object.values(this.mats)) {
-        const i = list.indexOf(mat);
-        if (i >= 0) list.splice(i, 1);
-      }
-    }
-    this.gearMeshes.length = 0;
-    const piece = (bone: BoneName, kind: string, size: [number, number, number], pos: [number, number, number]) => {
-      const c = GEAR_COLORS[kind] ?? GEAR_COLORS.iron;
-      const mat = new MeshStandardMaterial({ color: c.color, metalness: c.metalness, roughness: c.roughness, flatShading: true });
-      const mesh = new Mesh(new BoxGeometry(...size), mat);
-      mesh.position.set(...pos);
-      mesh.castShadow = true;
-      this.bones[bone].add(mesh);
-      this.mats[bone].push(mat);
-      this.gearMeshes.push(mesh);
-      return mesh;
-    };
-    const h = look.helmet;
-    if (h) {
-      piece('head', h.material, [0.29, 0.13, 0.29], [0, 0.3, 0]);
-      piece('head', h.material, [0.29, 0.14, 0.05], [0, 0.22, -0.13]);
-      if (h.tier >= 3) piece('head', h.material, [0.27, 0.03, 0.05], [0, 0.2, 0.14]); // visor bar
-      if (h.tier >= 4) for (const s of [1, -1]) piece('head', h.material, [0.04, 0.16, 0.2], [s * 0.145, 0.17, 0.01]); // cheek guards
-      if (h.tier >= 5) piece('head', h.material, [0.05, 0.08, 0.26], [0, 0.4, 0]); // crest
-      if (h.tier >= 6) piece('head', 'gold', [0.3, 0.025, 0.3], [0, 0.245, 0]); // circlet
-    }
-    const c = look.chest;
-    if (c) {
-      piece('chest', c.material, [0.5, 0.3, 0.06], [0, 0.15, 0.14]);
-      if (c.tier >= 2) piece('chest', c.material, [0.5, 0.3, 0.06], [0, 0.15, -0.14]);
-      if (c.tier >= 3) for (const s of [1, -1]) piece('chest', c.material, [0.14, 0.08, 0.16], [s * 0.21, 0.29, 0]); // pauldrons
-      if (c.tier >= 4) piece('abdomen', c.material, [0.36, 0.2, 0.24], [0, 0.1, 0]); // faulds
-      if (c.tier >= 5) for (const s of [1, -1]) piece('chest', c.material, [0.18, 0.06, 0.2], [s * 0.23, 0.35, 0]); // second lames
-      if (c.tier >= 6) piece('chest', 'gold', [0.1, 0.1, 0.02], [0, 0.18, 0.175]); // boss
-    }
-    const l = look.legs;
-    if (l) {
-      for (const side of ['L', 'R'] as const) {
-        piece(`shin${side}`, l.material, [0.16, 0.26, 0.05], [0, -0.2, 0.08]);
-        if (l.tier >= 2) piece(`thigh${side}`, l.material, [0.18, 0.28, 0.05], [0, -0.22, 0.09]);
-        if (l.tier >= 4) piece(`shin${side}`, l.material, [0.1, 0.07, 0.07], [0, -0.03, 0.09]); // knee cops
-        if (l.tier >= 5) piece(`thigh${side}`, l.material, [0.18, 0.28, 0.05], [0, -0.22, -0.09]);
-      }
-    }
-    const b = look.boots;
-    if (b) {
-      for (const side of ['L', 'R'] as const) {
-        piece(`shin${side}`, b.material, [0.18, 0.13, 0.29], [0, -0.42, 0.045]);
-        if (b.tier >= 4) piece(`shin${side}`, b.material, [0.17, 0.12, 0.17], [0, -0.32, 0]); // cuff
-      }
-    }
-    const k = look.cuffs;
-    if (k) {
-      for (const side of ['L', 'R'] as const) {
-        piece(`foreArm${side}`, k.material, [0.15, 0.1, 0.15], [0, -0.21, 0]);
-        if (k.tier >= 3) for (const sx of [1, -1]) piece(`foreArm${side}`, 'steel', [0.03, 0.03, 0.06], [sx * 0.05, -0.3, 0.1]);
-        if (k.tier >= 4) piece(`foreArm${side}`, k.material, [0.14, 0.12, 0.14], [0, -0.1, 0]); // vambrace
-      }
     }
   }
 
@@ -672,20 +585,28 @@ export class FighterView {
     for (const g of sp.halves) if (g.userData.side) g.rotation.z = -(g.userData.side as number) * sp.open * k;
   }
 
-  /** Where a limb was cut off: a raw red stump on the body, and on the end of the limb. */
+  /**
+   * Where a limb was cut off: a raw red stump with bone showing on the body, and on the end of the limb. Rule 12 (C-fix):
+   * 'stylised' keeps the red caps without the bone; 'off' draws dark caps only (rule 3: the cut still shows).
+   */
   private addStump(w: Wound) {
     const lost = w.stump!;
     const r = (SKELETON[lost].radius ?? 0.06) * 2.1;
-    const cap = new Mesh(new BoxGeometry(lost === 'head' ? 0.16 : r, 0.03, lost === 'head' ? 0.14 : r), STUMP_MAT);
+    const flesh = this.gore === 'off' ? MARK_MAT : STUMP_MAT;
+    const cap = new Mesh(new BoxGeometry(lost === 'head' ? 0.16 : r, 0.03, lost === 'head' ? 0.14 : r), flesh);
     cap.position.set(w.local[0], w.local[1] - (lost === 'head' ? -0.01 : 0.012), w.local[2]);
     this.bones[w.bone].add(cap);
-    const bone = new Mesh(new BoxGeometry(r * 0.35, 0.035, r * 0.35), BONE_MAT);
-    bone.position.copy(cap.position);
-    this.bones[w.bone].add(bone);
-    const end = new Mesh(new BoxGeometry(lost === 'head' ? 0.12 : r * 0.95, 0.025, lost === 'head' ? 0.12 : r * 0.95), STUMP_MAT);
+    this.woundMeshes.push(cap);
+    if (this.gore === 'full') {
+      const bone = new Mesh(new BoxGeometry(r * 0.35, 0.035, r * 0.35), BONE_MAT);
+      bone.position.copy(cap.position);
+      this.bones[w.bone].add(bone);
+      this.woundMeshes.push(bone);
+    }
+    const end = new Mesh(new BoxGeometry(lost === 'head' ? 0.12 : r * 0.95, 0.025, lost === 'head' ? 0.12 : r * 0.95), flesh);
     end.position.set(0, lost === 'head' ? 0.02 : -0.01, 0);
     this.bones[lost].add(end);
-    this.woundMeshes.push(cap, bone, end);
+    this.woundMeshes.push(end);
   }
 
   /** The marks scar() has made. */

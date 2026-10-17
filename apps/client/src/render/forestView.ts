@@ -471,7 +471,6 @@ interface Leaf {
 export class LeafFall {
   readonly inst: Instancer;
   private readonly list: Leaf[] = [];
-  private static readonly MAX = 400;
 
   constructor(parent: Group) {
     const g = new PlaneGeometry(0.14, 0.09);
@@ -487,7 +486,7 @@ export class LeafFall {
   /** `n` leaves from inside a crown of radius `r` centred at `at`. */
   spawn(at: Vector3, r: number, n: number): void {
     const F = RENDER_TUNING.forest;
-    for (let i = 0; i < n && this.list.length < LeafFall.MAX; i++) {
+    for (let i = 0; i < n && this.list.length < RENDER_TUNING.forest.leafMax; i++) {
       const a = Math.random() * Math.PI * 2;
       const d = Math.sqrt(Math.random()) * r * 0.8;
       this.list.push({

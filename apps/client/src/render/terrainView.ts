@@ -20,7 +20,6 @@ import {
   Mesh,
   MeshStandardMaterial,
   type Scene,
-  type Vector3,
 } from 'three';
 import { defineTuning, type FieldMeta, MATERIAL_IDS, type MaterialId, type Terrain } from '@wild/sim';
 
@@ -141,6 +140,7 @@ export const RENDER_TUNING = defineTuning(
       leafFallMps: 1.1,
       leafDriftMps: 0.6,
       leafLifeS: 5,
+      leafMax: 400,
       variation: 0.1,
     },
     materials: MATERIAL_LOOKS,
@@ -161,6 +161,11 @@ export const RENDER_TUNING = defineTuning(
       strainBendFrac: 0.04,
       rotLumpFrac: 0.12,
       bloodColor: '#6e0a0a',
+      bloodTintGain: 1.1,
+      bloodTintMax: 0.92,
+      bloodPerImpact: 0.2,
+      bloodDamagePer: 40,
+      instancerIdleFrames: 3600,
     },
     ropes: {
       segments: 8,
@@ -180,6 +185,7 @@ export const RENDER_TUNING = defineTuning(
       beltDownM: 0.05,
       backOutM: 0.17,
       backTiltDeg: 35,
+      backUpM: 0.12,
     },
     drag: {
       linkColor: '#5e4b33',
@@ -287,6 +293,7 @@ export const RENDER_TUNING = defineTuning(
       leafFallMps: { unit: 'm/s', source: 'NEW: P32', min: 0.1, max: 10, step: 0.1 },
       leafDriftMps: { unit: 'm/s', source: 'NEW: P32', min: 0, max: 5, step: 0.1 },
       leafLifeS: { unit: 's', source: 'NEW: P32', min: 0.5, max: 30, step: 0.5 },
+      leafMax: { unit: 'leaves', source: 'NEW: P32 (C-fix moved it here: the most falling leaves at once)', min: 0, max: 4000, step: 10 },
       variation: { unit: '± brightness', source: 'NEW: P32 (tree-to-tree colour)', min: 0, max: 0.5, step: 0.01 },
     },
     materials: materialFields(),
@@ -320,6 +327,17 @@ export const RENDER_TUNING = defineTuning(
       strainBendFrac: { unit: '× length at capacity', source: 'NEW: §10.4 (a load above strainShowFrac of capacity bends it)', min: 0, max: 0.3, step: 0.005 },
       rotLumpFrac: { unit: '× radius', source: 'NEW: §10.4 ("dark spongy rotten wood": lumpy, not just dark)', min: 0, max: 0.5, step: 0.01 },
       bloodColor: colour('NEW: P32 (blood on a tool, rule 12: drawn only when gore is on)'),
+      bloodTintGain: { unit: '× blood', source: 'NEW: P32 (C-fix moved it here: how fast blood covers a tool\'s colour)', min: 0, max: 5, step: 0.05 },
+      bloodTintMax: { unit: 'fraction', source: 'NEW: P32 (C-fix moved it here: the most of a tool\'s colour blood covers)', min: 0, max: 1, step: 0.01 },
+      bloodPerImpact: { unit: 'blood 0-1', source: 'NEW: P32 (C-fix moved it here: blood a wounding world impact leaves on what struck)', min: 0, max: 1, step: 0.01 },
+      bloodDamagePer: { unit: 'damage per +1 blood', source: 'NEW: P32 (C-fix moved it here: more blood for a harder wound)', min: 1, max: 500, step: 1 },
+      instancerIdleFrames: {
+        unit: 'frames',
+        source: 'NEW: P32 (C-fix moved it here: an entity mesh nothing has drawn this long is freed, a fracture\'s one-off hull)',
+        min: 60,
+        max: 36000,
+        step: 60,
+      },
     },
     ropes: {
       segments: { unit: 'segments', source: 'NEW: §10.4 (an 8-segment parabola)', min: 1, max: 32, step: 1 },
@@ -339,6 +357,7 @@ export const RENDER_TUNING = defineTuning(
       beltDownM: { unit: 'm (× scale)', source: 'NEW: P32', min: -1, max: 1, step: 0.01 },
       backOutM: { unit: 'm (× scale)', source: 'NEW: P32 (a back item rides this far behind the chest)', min: 0, max: 1, step: 0.01 },
       backTiltDeg: { unit: '°', source: 'NEW: P32 (slung diagonally)', min: 0, max: 90, step: 1 },
+      backUpM: { unit: 'm (× scale)', source: 'NEW: P32 (C-fix moved it here: a back item rides this far up the chest)', min: -0.5, max: 0.5, step: 0.01 },
     },
     drag: {
       linkColor: colour('NEW: C-fix (the link drawn from a dragging hand to the grip it pulls by, rule 3)'),
@@ -405,10 +424,14 @@ export class TerrainView {
   readonly material = new MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: 0.95, metalness: 0 });
   private tiles: (TileView | null)[] = [];
 
-  constructor(scene: Scene, world: TerrainSource) {
+  /**
+   * `at`: where the camera will first be (the player), so each tile is built once at its own level of detail (C-fix:
+   * without it every tile was built at nearSpacing and most rebuilt coarser on the first frame).
+   */
+  constructor(scene: Scene, world: TerrainSource, at?: { x: number; z: number }) {
     this.group.name = 'terrain';
     scene.add(this.group);
-    this.sync(world);
+    this.sync(world, at);
   }
 
   /** The mesh of tile `i` (null before its first sync). */
@@ -422,7 +445,7 @@ export class TerrainView {
   }
 
   /** Builds or rebuilds every tile whose terrain version or level of detail changed. Without a camera, all are near. */
-  sync(world: TerrainSource, cam?: Vector3): void {
+  sync(world: TerrainSource, cam?: { x: number; z: number }): void {
     const t = world.terrain;
     if (this.tiles.length !== t.tileCount) {
       for (const v of this.tiles) v && this.drop(v);

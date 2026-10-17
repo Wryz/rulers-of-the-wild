@@ -542,7 +542,7 @@ export function entityColour(e: Entity, blood = 0, out = new Color()): Color {
   out.multiplyScalar(1 + E.variation * (hash2(e.id, 977) * 2 - 1));
   out.multiplyScalar(1 - E.wetDarken * Math.min(1, Math.max(0, e.moisture)));
   if (e.integrity < RENDER_TUNING.integrityCrack) out.multiplyScalar(E.crackDarken);
-  if (blood > 0) out.lerp(_blood.set(E.bloodColor), Math.min(0.92, blood * 1.1));
+  if (blood > 0) out.lerp(_blood.set(E.bloodColor), Math.min(E.bloodTintMax, blood * E.bloodTintGain));
   return out;
 }
 
@@ -663,7 +663,7 @@ export class EntityViews {
     // An instancer nothing has used for a minute goes (a fractured piece's one-off hull), and its geometry with the
     // last instancer that shares it (one per material).
     for (const [k, i] of [...this.instancers]) {
-      if (i.idle < 3600) continue;
+      if (i.idle < RENDER_TUNING.entities.instancerIdleFrames) continue;
       i.dispose(false);
       this.instancers.delete(k);
       const proto = k.slice(0, k.lastIndexOf('|'));
@@ -980,7 +980,7 @@ export function stowedMatrix(e: Entity, slot: CarrySlot, bone: Matrix4, scale: n
   let at: Vector3;
   let dir: Vector3;
   if (slot === 3) {
-    at = new Vector3(0, 0.12, -(C.backOutM + ax.crossHalf)).multiplyScalar(scale);
+    at = new Vector3(0, C.backUpM, -(C.backOutM + ax.crossHalf)).multiplyScalar(scale);
     const t = (C.backTiltDeg * Math.PI) / 180;
     dir = new Vector3(Math.sin(t), Math.cos(t), 0);
   } else {

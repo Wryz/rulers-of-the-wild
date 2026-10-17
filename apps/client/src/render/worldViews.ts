@@ -134,7 +134,7 @@ export class WorldViews implements WorldViewsPort {
     world: World,
   ) {
     this.sky = new Sky(scene);
-    this.terrain = new TerrainView(scene, world);
+    this.terrain = new TerrainView(scene, world, world.player?.pos);
     this.forest = new ForestView(scene);
     this.entities = new EntityViews(scene);
     this.ropes = new RopeViews(scene);
@@ -197,7 +197,8 @@ export class WorldViews implements WorldViewsPort {
     }
     if (e.type === 'impact') {
       const id = e.cause.entityId;
-      if (id !== null && e.damage > 0 && this.gore !== 'off') this.struck.set(id, Math.min(1, (this.struck.get(id) ?? 0) + 0.2 + e.damage / 40));
+      const E = RENDER_TUNING.entities;
+      if (id !== null && e.damage > 0 && this.gore !== 'off') this.struck.set(id, Math.min(1, (this.struck.get(id) ?? 0) + E.bloodPerImpact + e.damage / E.bloodDamagePer));
       return;
     }
     if (e.type === 'respawn') {

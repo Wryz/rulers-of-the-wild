@@ -34,6 +34,7 @@ import {
   Terrain,
   trunkPrism,
   type World,
+  type Wound,
   type WorldOptions,
   type WoundRecord,
 } from '@wild/sim';
@@ -873,6 +874,38 @@ describe('fighters', () => {
       }
     });
     expect(anyRed).toBe(true);
+  });
+
+  it('draws a severed stump by the gore level: red with bone (full), red (stylised), a dark mark (off) (C-fix)', () => {
+    const stump = { bone: 'upperArmL', local: [0, -0.3, 0], stump: 'foreArmL', length: 0.1, angle: 0, bleed: 1 } as unknown as Wound;
+    const look = (gore: 'full' | 'stylised' | 'off') => {
+      const view = new FighterView(APE_PALETTE);
+      view.gore = gore;
+      const before = new Set<Mesh>();
+      view.root.traverse((o) => o instanceof Mesh && before.add(o));
+      view.addWound(stump);
+      let red = 0;
+      let pale = 0;
+      let added = 0;
+      view.root.traverse((o) => {
+        if (!(o instanceof Mesh) || before.has(o)) return;
+        added++;
+        const c = (o.material as MeshStandardMaterial).color;
+        if (c.r - Math.max(c.g, c.b) > 0.2) red++;
+        if (c.r > 0.7 && c.g > 0.7 && c.b > 0.6) pale++;
+      });
+      return { red, pale, added };
+    };
+    const full = look('full');
+    expect(full.red).toBeGreaterThan(0);
+    expect(full.pale).toBe(1);
+    const stylised = look('stylised');
+    expect(stylised.red).toBeGreaterThan(0);
+    expect(stylised.pale).toBe(0);
+    const off = look('off');
+    expect(off.added).toBeGreaterThan(0);
+    expect(off.red).toBe(0);
+    expect(off.pale).toBe(0);
   });
 });
 
