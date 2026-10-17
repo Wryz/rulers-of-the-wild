@@ -6,7 +6,7 @@
 //
 // Positions, masses, HP and ticks here are test constants, never tuning (§9).
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { PerspectiveCamera, Vector3 } from 'three';
+import { PerspectiveCamera } from 'three';
 import {
   createPlayer,
   createWorld,
