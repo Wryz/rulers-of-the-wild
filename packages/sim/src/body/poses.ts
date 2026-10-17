@@ -1562,15 +1562,19 @@ export const POSE_SPECS = {
     ...feet(0.05, 0.02, 0),
   },
   // The giant's charge telegraph (§6.4): the head dropped, the shoulders hunched forward over planted feet.
+  // P20: the knuckle charge of an ape (§6.4 "posture headLow", "the lowered head"): hips down, the back bent over
+  // until the head is low, both arms reaching down in front so the knuckles meet near the ground (≈ 1 m up at the giant's
+  // 5.5, ≈ 2.5 m ahead of its root). Its forearms are then the leading body a charge meets a player with, across the
+  // gap its shins leave between them at a player's height (P20 review, finding 1).
   headLow: {
     ...GUARD,
-    root: [0, 0.78, 0.02],
-    pelvis: [0, 0, 0],
-    abdomen: [0.45, 0, 0],
-    chest: [0.35, 0, 0],
-    head: [0.25, 0, 0],
-    handL: { at: [0.3, 0.85, 0.45], hint: [0.6, -1, 0] },
-    handR: { at: [-0.3, 0.85, 0.45], hint: [-0.6, -1, 0] },
+    root: [0, 0.56, 0],
+    pelvis: [0.5, 0, 0],
+    abdomen: [0.65, 0, 0],
+    chest: [0.6, 0, 0],
+    head: [-1.0, 0, 0],
+    handL: { at: [0.02, 0.1, 0.45], hint: [0.6, -1, 0] },
+    handR: { at: [-0.02, 0.1, 0.45], hint: [-0.6, -1, 0] },
     ...feet(0.08, 0.05, 0),
   },
   // Sniffing the air or the ground: the head out and down, the body still.

@@ -208,6 +208,21 @@ export abstract class CreatureMind implements Brain {
     this.homeIdx = homeIdx;
   }
 
+  /** The alive opponent it is most aware of (ties: the lower id), or null. (Moved here from ApeMind by P20.) */
+  huntTarget(w: World): Fighter | null {
+    let best: Fighter | null = null;
+    let most = 0;
+    for (const f of w.combat.fighters) {
+      if (f === this.self || f.team === this.self.team || !f.alive) continue;
+      const a = this.senses.of(f.id);
+      if (a > most) {
+        most = a;
+        best = f;
+      }
+    }
+    return best;
+  }
+
   /**
    * Phase 2: sight (Δt = `dt`: DT near the player, aiFarPeriodTicks × DT far away), then the script's path or the
    * decision, then the path's upkeep (tile versions every repathCheckTicks near the player, every sensed tick far away;

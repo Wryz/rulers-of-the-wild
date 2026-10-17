@@ -57,21 +57,6 @@ export class ApeMind extends CreatureMind {
     this.enter(w, 'fight');
   }
 
-  /** The alive opponent it is most aware of (ties: the lower id), or null. */
-  huntTarget(w: World): Fighter | null {
-    let best: Fighter | null = null;
-    let most = 0;
-    for (const f of w.combat.fighters) {
-      if (f === this.self || f.team === this.self.team || !f.alive) continue;
-      const a = this.senses.of(f.id);
-      if (a > most) {
-        most = a;
-        best = f;
-      }
-    }
-    return best;
-  }
-
   /** The patrol loop: the spawn data's home loop (§6.7), or none for an ape made without one. */
   loop(w: World): readonly GroundXZ[] {
     return w.spawnData?.apeHomes[this.homeIdx]?.loop ?? [];

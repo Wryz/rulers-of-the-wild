@@ -226,6 +226,10 @@ export interface ContactRecV1 {
  * - `home`: the home point (the spawner's home, or where a creature made without one was made); `homeIdx` names the
  *   spawn data's home it came from (−1 none);
  * - `path.complete`: whether the path reaches its goal (a partial path's end counts as a failure, §6.5).
+ * Additions (P20), the giant's own fields, written last and only on a giant's record (RulerMind.toRecord):
+ * - `route`: the patrol route set by hand (RulerMind.setRoute: a test, AC-3's two waypoints), or null when it follows
+ *   the spawn data's (§6.7), which a load regenerates;
+ * - `climb`: the climb out of a pit under way (RulerMind.climb), or null.
  */
 export interface MindRecV1 {
   fighter: number;
@@ -254,6 +258,13 @@ export interface MindRecV1 {
   stuck: { pos: V3; tick: number; count: number };
   rng: number;
   inner: BrawlerRecV1 | null;
+  /** The giant's only (P20): its hand-set patrol route, or null (the spawn data's). Absent on an ape's record. */
+  route?: { x: number; z: number }[] | null;
+  /**
+   * The giant's only (P20): the climb out of a pit under way (its progress window's start and the rim directions given
+   * up on), or null. Absent on an ape's record.
+   */
+  climb?: { from: V3; tick: number; skip: number } | null;
 }
 
 /** The spawner (§6.6, §6.8). */
