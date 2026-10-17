@@ -1023,7 +1023,11 @@ const _timed = new WeakMap<MoveDef, Map<string, MoveDef>>();
 /** The least wind-up (frames) an opponent's strike gets: enough to see it and react. */
 export const ENEMY_MIN_STARTUP = 15;
 
-/** A move with its frame data stretched (>1 slower) — cached per move and tempo. */
+/**
+ * A move with its frame data stretched (>1 slower) — cached per move and tempo, to the
+ * hundredth. The frames come from that rounded tempo, so what the cache holds depends
+ * only on its key, never on which caller's tempo filled it first (rule 7).
+ */
 export function timed(m: MoveDef, tempo: number): MoveDef {
   if (Math.abs(tempo - 1) < 0.03) return m;
   const key = tempo.toFixed(2);
@@ -1031,7 +1035,8 @@ export function timed(m: MoveDef, tempo: number): MoveDef {
   if (!byTempo) _timed.set(m, (byTempo = new Map()));
   let t = byTempo.get(key);
   if (!t) {
-    const f = (n: number) => Math.round(n * tempo);
+    const k = Number(key);
+    const f = (n: number) => Math.round(n * k);
     t = {
       ...m,
       startup: Math.max(3, f(m.startup)),
