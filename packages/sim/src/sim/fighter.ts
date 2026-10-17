@@ -1,10 +1,24 @@
 import { Quaternion, Vector3 } from 'three';
-import { Animator, type TrackKey } from '../body/animator';
-import { Footwork, type FootworkStyle } from '../body/footwork';
-import { IdleBehavior, type IdleStyle } from '../body/idle';
+import {
+  Animator,
+  type AnimatorRecord,
+  numFromRecord,
+  poseFromRecord,
+  type PoseRecord,
+  poseToRecord,
+  readV3,
+  type TrackKey,
+  trackKeyFromRecord,
+  type TrackKeyRecord,
+  trackKeyToRecord,
+  v3Record,
+} from '../body/animator';
+import { Footwork, type FootworkRecord, type FootworkStyle } from '../body/footwork';
+import { IdleBehavior, type IdleRecord, type IdleStyle } from '../body/idle';
 import { makeProfile, type MotionMods, type MotionProfile, smoothProfile, targetProfile, type Zone, ZONE_RANGES } from '../body/motion';
 import { getPose, GUARD, POSE_SPECS, type PoseName } from '../body/poses';
 import {
+  BONES,
   forwardKinematics,
   blendPose,
   copyPose,
@@ -25,18 +39,20 @@ import { boneMassShares, humanoidMass } from '../body/mass';
 import type {
   Drive,
   GroundQuery,
+  ImpactCause,
   Inventory,
   KnockRecord,
   MaterialId,
   Posture,
   RulerState,
   SpeciesId,
+  V3 as WorldV3,
   Work,
 } from '../world/types';
-import { bladeFrame, gripSlide, heft, sampleOffsets, SECOND_HAND, WEAPON_MOVES, type WeaponDef, weaponTempo, type Wound } from './weapons';
+import { bladeFrame, gripSlide, heft, sampleOffsets, SECOND_HAND, WEAPON_MOVES, WEAPONS, type WeaponDef, type WeaponId, weaponTempo, type Wound } from './weapons';
 import { bodyCapsules, type Capsule, closestOnSegment } from './bodyShapes';
-import type { HurtZone } from './combat';
-import type { VerbCommand } from './commands';
+import type { Drop, HurtZone } from './combat';
+import { cloneCommand, type VerbCommand } from './commands';
 
 export interface FighterStyle {
   footwork: FootworkStyle;
@@ -58,7 +74,7 @@ export const OUTFIGHTER_STYLE: FighterStyle = {
   },
 };
 import { angleDelta, clamp, type Ease, Rng } from './math';
-import { type Aim, DEFENSES, type DefenseDef, type DefenseKind, type Height, markerFrame, type MoveDef } from './moves';
+import { type Aim, DEFENSES, type DefenseDef, type DefenseKind, ENEMY_MOVES, type Height, markerFrame, type MoveDef, PLAYER_MOVES } from './moves';
 
 export type FighterState =
   | 'idle'
@@ -1229,6 +1245,331 @@ export class Fighter {
     this.idle.apply(spec, (1 - m * 0.7) * f);
     return resolvePose(spec, this.locoPose);
   }
+
+  // ---------------------------------------------------------------------------
+  // Save record (docs/M1-DESIGN.md §8.3 FighterRecV1, P04; MAP gap-7 §3.4-3.7)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * The fighter's own Rng state (uint32). The save keeps every fighter's stream in its `rng.fighters` table (§8.3),
+   * apart from this record. IdleBehavior draws from the same Rng object, so setting it here restores both (MAP gap-7
+   * §6: the two must stay one stream).
+   */
+  get rngState(): number {
+    return this.rng.state;
+  }
+  set rngState(v: number) {
+    this.rng.state = v;
+  }
+
+  /**
+   * Everything this fighter needs to resume exactly (MAP gap-7 §3.4-3.5's Save lists, and §8.3's world fields), as
+   * plain data with a fixed key order (FighterRecord). References are kept by what they point at: the move as its
+   * table, id and tempo bucket (`timed` is pure), the aim by its move and id, the defence by its kind, the target by
+   * fighter id, weapons by id (by value only for a weapon that isn't a WEAPONS entry, a tool the world made, §5.2), the
+   * weapon being reached for by the id of the drop it lies in (`drops`: the sim's, CombatSim.drops). Animation keys and
+   * poses are by value.
+   *
+   * Not here: the Rng state (`rngState`, saved in the save's rng table), `ruler` (the save's `rulers`), `ground` (the
+   * world's, set again when the fighter joins a sim), `rig` (forward kinematics of the saved pose rebuild it), and
+   * per-tick scratch rewritten before it is read (`turnRate`, `breath`, `motionTarget`, `motionInfo`, `locoPose`,
+   * `layered`, the impact, retract and react poses, the footwork's mods).
+   */
+  toRecord(drops: readonly Drop[] = []): FighterRecord {
+    const pt = this.pickupTarget;
+    const d = this.defense;
+    const dc = this.defenseCooldown;
+    const k = this.lastKnock;
+    const w = this.work;
+    return {
+      id: this.id,
+      moves: movesKey(this.moves),
+      pos: v3Record(this.pos),
+      vel: v3Record(this.vel),
+      moveInput: v3Record(this.moveInput),
+      walkVel: v3Record(this.walkVel),
+      yaw: this.yaw,
+      scale: this.scale,
+      hp: this.hp,
+      guard: this.guard,
+      poise: this.poise,
+      state: this.state,
+      stateFrame: this.stateFrame,
+      stunFrames: this.stunFrames,
+      move: this.moveRecord(),
+      attackEnd: this.attackEnd,
+      stuckUntil: this.stuckUntil,
+      attackSerial: this.attackSerial,
+      hitThisAttack: this.hitThisAttack,
+      isCounterAttack: this.isCounterAttack,
+      perfectCounter: this.perfectCounter,
+      isPerfectCounter: this.isPerfectCounter,
+      aim: this.aimRecord(),
+      strikeHeight: this.strikeHeight,
+      defense: d ? { kind: d.def.kind, threatSerial: d.threatSerial, phase: d.phase, success: d.success, side: d.side } : null,
+      counter: this.counter ? { kind: this.counter.kind, frames: this.counter.frames } : null,
+      lastDefendedSerial: this.lastDefendedSerial,
+      defenseCooldown: { block: dc.block, duck: dc.duck, weave: dc.weave, slide: dc.slide },
+      defenseManual: this.defenseManual,
+      perfectSerial: this.perfectSerial,
+      dodgedSerial: this.dodgedSerial,
+      weaveSide: this.weaveSide,
+      buffer: this.buffer ? { button: this.buffer.button, frames: this.buffer.frames } : null,
+      target: this.target ? this.target.id : null,
+      combo: this.combo,
+      framesSinceBlock: this.framesSinceBlock,
+      framesSinceHit: this.framesSinceHit,
+      framesSinceLanded: this.framesSinceLanded,
+      framesSinceDefend: this.framesSinceDefend,
+      misreadSerial: this.misreadSerial,
+      lockedOn: this.lockedOn,
+      minHp: this.minHp,
+      stamina: this.stamina,
+      pickupRequest: this.pickupRequest,
+      pickupTarget: pt
+        ? { drop: drops.find((x) => x.pos === pt.pos)?.id ?? null, pos: v3Record(pt.pos), weapon: weaponRecord(pt.weapon), grabAt: pt.grabAt }
+        : null,
+      ammo: this.ammo ? { weapon: weaponRecord(this.ammo.weapon), count: this.ammo.count } : null,
+      airStep: v3Record(this.airStep),
+      weapon: this.weapon ? weaponRecord(this.weapon) : null,
+      wounds: this.wounds.map(woundRecord),
+      severed: [...this.severed],
+      torn: [...this.torn],
+      limbDamage: entriesRecord(this.limbDamage),
+      hitReaction: this.hitReaction,
+      autoDefense: this.autoDefense,
+      readSkill: this.readSkill,
+      repeatCount: this.repeatCount,
+      lastMoveId: this.lastMoveId,
+      sinceMoveStart: this.sinceMoveStart,
+      swingStamina: this.swingStamina,
+      wasBlocked: this.wasBlocked,
+      stats: fieldsRecord(this.stats, DEFAULT_STATS),
+      swingJitter: [this.swingJitter[0], this.swingJitter[1], this.swingJitter[2]],
+      swingViaMid: this.swingViaMid,
+      swingDy: this.swingDy,
+      anim: this.anim.toRecord(),
+      footwork: this.footwork.toRecord(),
+      idle: this.idle.toRecord(),
+      motion: fieldsRecord(this.motion, this.motion),
+      lookPitch: this.lookPitch,
+      bank: this.bank,
+      breathPhase: this.breathPhase,
+      heldBreath: this.heldBreath,
+      headTrack: this.headTrack,
+      moveBlend: this.moveBlend,
+      pose: poseToRecord(this.pose),
+      massKg: this.massKg,
+      baseMassKg: this.baseMassKg,
+      boneShare: entriesRecord(this.boneShare),
+      toughnessJ: this.toughnessJ,
+      species: this.species,
+      playerId: this.playerId,
+      lastKnock: k ? { tick: k.tick, cause: causeRecord(k.cause), by: k.by } : null,
+      armour: entriesRecord(this.armour),
+      inventory: inventoryRecord(this.inventory),
+      load: this.load ? { massKg: this.load.massKg, mode: this.load.mode } : null,
+      drive: this.drive ? { heading: this.drive.heading, speed: this.drive.speed, accel: this.drive.accel, climb: this.drive.climb } : null,
+      posture: this.posture ? { id: this.posture.id, weight: this.posture.weight } : null,
+      work: w
+        ? { kind: w.kind, frames: w.frames, actAt: w.actAt, faceAt: v3Record(w.faceAt), keys: w.keys.map(trackKeyToRecord), cmd: w.cmd ? cloneCommand(w.cmd) : null }
+        : null,
+      verbRequest: this.verbRequest ? { cmd: cloneCommand(this.verbRequest.cmd), frames: this.verbRequest.frames } : null,
+      verbAim: this.verbAim ? v3Record(this.verbAim) : null,
+      throwAim: this.throwAim ? { dir: v3Record(this.throwAim.dir), speedFrac: this.throwAim.speedFrac, techSpeed: this.throwAim.techSpeed } : null,
+      moveFlags: this.moveFlags,
+      jumpRequest: this.jumpRequest,
+      idlePaused: this.idlePaused,
+    };
+  }
+
+  /**
+   * Puts back a toRecord() state into this fighter, which must have been made the way the saved one was (same id,
+   * same move table, same style), as a loader makes it (MAP gap-7 §3.6-3.7):
+   * - construct it (that draws its idle clocks from its Rng: overwritten here) and add it to its sim first, since
+   *   CombatSim.add runs one updatePose that would advance the restored state; then restore;
+   * - set `rngState` too (the save keeps it apart from this record);
+   * - `ctx.fighters` holds every fighter of the sim (the target is found by id), `ctx.drops` the sim's drops (the weapon
+   *   being reached for is re-linked to the drop it lies in; if that drop is gone, a detached copy fails the pickup
+   *   just as the original would have).
+   * `rig` is rebuilt by forward kinematics of the restored pose: exactly the tick-end rig of a legacy fight (MAP gap-7
+   * §3.5). TODO(P13, M3 save-load-save gate, SPEC:917): in world mode phase 13a (downed.postStep) and 13b
+   * (rulers.postStep) move f.pos after updatePose, so a downed player's or ape's tick-end rig is not FK at the saved
+   * pos; an exact world-mode restore must save the rig or rebuild it at the pre-13a position.
+   */
+  restoreRecord(r: FighterRecord, ctx: FighterRestoreContext) {
+    if (r.id !== this.id) throw new Error(`Fighter.restoreRecord: a record of fighter ${r.id} given to fighter ${this.id}`);
+    const moves = movesKey(this.moves);
+    if (r.moves !== moves) throw new Error(`Fighter.restoreRecord: fighter ${this.id} was saved with the ${r.moves ?? 'custom'} moves, made with the ${moves ?? 'custom'} moves`);
+    const n = numFromRecord;
+    readV3(r.pos, this.pos, 'pos');
+    readV3(r.vel, this.vel, 'vel');
+    readV3(r.moveInput, this.moveInput, 'moveInput');
+    readV3(r.walkVel, this.walkVel, 'walkVel');
+    this.yaw = n(r.yaw, 'yaw');
+    this.scale = n(r.scale, 'scale');
+    this.hp = n(r.hp, 'hp');
+    this.guard = n(r.guard, 'guard');
+    this.poise = n(r.poise, 'poise');
+    this.state = r.state;
+    this.stateFrame = n(r.stateFrame, 'stateFrame');
+    this.stunFrames = n(r.stunFrames, 'stunFrames');
+    this.move = this.moveFromRecord(r.move);
+    this.attackEnd = n(r.attackEnd, 'attackEnd');
+    this.stuckUntil = n(r.stuckUntil, 'stuckUntil');
+    this.attackSerial = n(r.attackSerial, 'attackSerial');
+    this.hitThisAttack = r.hitThisAttack;
+    this.isCounterAttack = r.isCounterAttack;
+    this.perfectCounter = r.perfectCounter;
+    this.isPerfectCounter = r.isPerfectCounter;
+    this.aim = this.aimFromRecord(r.aim);
+    this.strikeHeight = r.strikeHeight;
+    const d = r.defense;
+    this.defense = d ? { def: DEFENSES[d.kind], threatSerial: n(d.threatSerial, 'defense.threatSerial'), phase: d.phase, success: d.success, side: d.side } : null;
+    this.counter = r.counter ? { kind: r.counter.kind, frames: n(r.counter.frames, 'counter.frames') } : null;
+    this.lastDefendedSerial = n(r.lastDefendedSerial, 'lastDefendedSerial');
+    for (const kind of Object.keys(this.defenseCooldown) as DefenseKind[]) this.defenseCooldown[kind] = n(r.defenseCooldown[kind], `defenseCooldown.${kind}`);
+    this.defenseManual = r.defenseManual;
+    this.perfectSerial = n(r.perfectSerial, 'perfectSerial');
+    this.dodgedSerial = n(r.dodgedSerial, 'dodgedSerial');
+    this.weaveSide = r.weaveSide;
+    this.buffer = r.buffer ? { button: r.buffer.button, frames: n(r.buffer.frames, 'buffer.frames') } : null;
+    this.target = r.target === null ? null : fighterById(ctx.fighters, r.target, this.id);
+    this.combo = n(r.combo, 'combo');
+    this.framesSinceBlock = n(r.framesSinceBlock, 'framesSinceBlock');
+    this.framesSinceHit = n(r.framesSinceHit, 'framesSinceHit');
+    this.framesSinceLanded = n(r.framesSinceLanded, 'framesSinceLanded');
+    this.framesSinceDefend = n(r.framesSinceDefend, 'framesSinceDefend');
+    this.misreadSerial = n(r.misreadSerial, 'misreadSerial');
+    this.lockedOn = r.lockedOn;
+    this.minHp = n(r.minHp, 'minHp');
+    this.stamina = n(r.stamina, 'stamina');
+    this.pickupRequest = n(r.pickupRequest, 'pickupRequest');
+    const pt = r.pickupTarget;
+    if (pt) {
+      // The drop it lies in, when that is still there: the pickup finds it by its pos and weapon objects.
+      const drop = pt.drop === null ? undefined : ctx.drops?.find((x) => x.id === pt.drop);
+      this.pickupTarget = {
+        pos: drop ? drop.pos : readV3(pt.pos, new Vector3(), 'pickupTarget.pos'),
+        weapon: drop ? drop.weapon : weaponFromRecord(pt.weapon),
+        grabAt: n(pt.grabAt, 'pickupTarget.grabAt'),
+      };
+    } else this.pickupTarget = null;
+    this.ammo = r.ammo ? { weapon: weaponFromRecord(r.ammo.weapon), count: n(r.ammo.count, 'ammo.count') } : null;
+    readV3(r.airStep, this.airStep, 'airStep');
+    this.weapon = r.weapon ? weaponFromRecord(r.weapon) : null;
+    this.wounds.length = 0;
+    for (const wr of r.wounds) this.wounds.push(woundFromRecord(wr));
+    this.severed.clear();
+    for (const b of r.severed) this.severed.add(b);
+    this.torn.clear();
+    for (const t of r.torn) this.torn.add(t);
+    for (const b of Object.keys(this.limbDamage) as BoneName[]) delete this.limbDamage[b];
+    for (const [b, v] of r.limbDamage) this.limbDamage[b] = n(v, `limbDamage.${b}`);
+    this.hitReaction = r.hitReaction;
+    this.autoDefense = r.autoDefense;
+    this.readSkill = n(r.readSkill, 'readSkill');
+    this.repeatCount = n(r.repeatCount, 'repeatCount');
+    this.lastMoveId = r.lastMoveId;
+    this.sinceMoveStart = n(r.sinceMoveStart, 'sinceMoveStart');
+    this.swingStamina = n(r.swingStamina, 'swingStamina');
+    this.wasBlocked = r.wasBlocked;
+    for (const key of Object.keys(DEFAULT_STATS) as (keyof FighterStats)[]) this.stats[key] = n(r.stats[key], `stats.${key}`);
+    this.swingJitter = [n(r.swingJitter[0], 'swingJitter[0]'), n(r.swingJitter[1], 'swingJitter[1]'), n(r.swingJitter[2], 'swingJitter[2]')];
+    this.swingViaMid = r.swingViaMid;
+    this.swingDy = n(r.swingDy, 'swingDy');
+    this.anim.restoreRecord(r.anim);
+    this.footwork.restoreRecord(r.footwork);
+    this.idle.restoreRecord(r.idle);
+    for (const key of Object.keys(this.motion) as (keyof MotionProfile)[]) this.motion[key] = n(r.motion[key], `motion.${key}`);
+    this.lookPitch = n(r.lookPitch, 'lookPitch');
+    this.bank = n(r.bank, 'bank');
+    this.breathPhase = n(r.breathPhase, 'breathPhase');
+    this.heldBreath = n(r.heldBreath, 'heldBreath');
+    this.headTrack = n(r.headTrack, 'headTrack');
+    this.moveBlend = n(r.moveBlend, 'moveBlend');
+    poseFromRecord(r.pose, this.pose);
+    this.massKg = r.massKg === null ? null : n(r.massKg, 'massKg');
+    this.baseMassKg = n(r.baseMassKg, 'baseMassKg');
+    if (r.boneShare.length !== BONES.length) throw new Error(`Fighter.restoreRecord: fighter ${this.id}'s boneShare has ${r.boneShare.length} bones, not ${BONES.length}`);
+    const share = {} as Record<BoneName, number>;
+    for (const [b, v] of r.boneShare) share[b] = n(v, `boneShare.${b}`);
+    this.boneShare = share;
+    this.toughnessJ = n(r.toughnessJ, 'toughnessJ');
+    this.species = r.species;
+    this.playerId = r.playerId;
+    const k = r.lastKnock;
+    this.lastKnock = k ? { tick: n(k.tick, 'lastKnock.tick'), cause: causeFromRecord(k.cause), by: k.by === null ? null : n(k.by, 'lastKnock.by') } : null;
+    const armour: Partial<Record<HurtZone, number>> = {};
+    for (const [z, v] of r.armour) armour[z] = n(v, `armour.${z}`);
+    this.armour = armour;
+    this.inventory = inventoryFromRecord(r.inventory);
+    this.load = r.load ? { massKg: n(r.load.massKg, 'load.massKg'), mode: r.load.mode } : null;
+    const dr = r.drive;
+    this.drive = dr ? { heading: n(dr.heading, 'drive.heading'), speed: n(dr.speed, 'drive.speed'), accel: n(dr.accel, 'drive.accel'), climb: dr.climb } : null;
+    this.posture = r.posture ? { id: r.posture.id, weight: n(r.posture.weight, 'posture.weight') } : null;
+    this.work = r.work ? workFromRecord(r.work) : null;
+    this.verbRequest = r.verbRequest ? { cmd: cloneCommand(r.verbRequest.cmd), frames: n(r.verbRequest.frames, 'verbRequest.frames') } : null;
+    this.verbAim = r.verbAim ? readV3(r.verbAim, new Vector3(), 'verbAim') : null;
+    const ta = r.throwAim;
+    this.throwAim = ta ? { dir: readV3(ta.dir, new Vector3(), 'throwAim.dir'), speedFrac: n(ta.speedFrac, 'throwAim.speedFrac'), techSpeed: n(ta.techSpeed, 'throwAim.techSpeed') } : null;
+    this.moveFlags = n(r.moveFlags, 'moveFlags');
+    this.jumpRequest = n(r.jumpRequest, 'jumpRequest');
+    this.idlePaused = r.idlePaused;
+    // Set from idlePaused before every tick anyway; kept in step so the restored fighter reads the same at once.
+    this.idle.paused = this.idlePaused;
+    forwardKinematics(this.pose, this.rig, this.pos, this.yaw, this.scale);
+  }
+
+  /** The move in progress as its table, key and tempo bucket (timed() is pure: the key rebuilds the same frame data). */
+  private moveRecord(): MoveRefRecord | null {
+    const m = this.move;
+    if (!m) return null;
+    const tables = moveTables(this);
+    // Under its own id first (every table today keys a move by its id), then anywhere in the tables.
+    for (const [source, table] of tables) {
+      const base = own(table, m.id);
+      const tempoKey = base ? timedKeyOf(base, m) : undefined;
+      if (tempoKey !== undefined) return { source, id: m.id, tempoKey };
+    }
+    for (const [source, table] of tables) {
+      for (const id of Object.keys(table)) {
+        const tempoKey = timedKeyOf(table[id], m);
+        if (tempoKey !== undefined) return { source, id, tempoKey };
+      }
+    }
+    throw new Error(`Fighter.toRecord: fighter ${this.id}'s move ${m.id} is in neither its move table nor WEAPON_MOVES`);
+  }
+
+  private moveFromRecord(r: MoveRefRecord | null): MoveDef | null {
+    if (!r) return null;
+    const base = own(r.source === 'weapon' ? WEAPON_MOVES : this.moves, r.id);
+    if (!base) throw new Error(`Fighter.restoreRecord: fighter ${this.id} has no ${r.source} move ${r.id}`);
+    if (r.tempoKey === null) return base;
+    const m = timed(base, Number(r.tempoKey));
+    if (timedKeyOf(base, m) !== r.tempoKey) throw new Error(`Fighter.restoreRecord: move ${r.id} at tempo ${r.tempoKey} doesn't rebuild`);
+    return m;
+  }
+
+  /** The aim (an object of some move's `aims`, shared by its timed copies) as that move and the aim's id. */
+  private aimRecord(): AimRecord | null {
+    const a = this.aim;
+    if (!a) return null;
+    for (const [source, table] of moveTables(this)) {
+      for (const move of Object.keys(table)) {
+        const aims = table[move].aims;
+        if (aims && aims.includes(a) && aims.find((x) => x.id === a.id) === a) return { source, move, id: a.id };
+      }
+    }
+    throw new Error(`Fighter.toRecord: fighter ${this.id}'s aim ${a.id} is in no move of its tables`);
+  }
+
+  private aimFromRecord(r: AimRecord | null): Aim | null {
+    if (!r) return null;
+    const a = own(r.source === 'weapon' ? WEAPON_MOVES : this.moves, r.move)?.aims?.find((x) => x.id === r.id);
+    if (!a) throw new Error(`Fighter.restoreRecord: fighter ${this.id} has no aim ${r.id} on its ${r.source} move ${r.move}`);
+    return a;
+  }
 }
 
 // Keyed by the move itself: different moves can share an id (the player's hook and an
@@ -1456,4 +1797,284 @@ function targetHeight(t: Fighter, h: Height): number {
   if (h === 'high') return r.head.pos.y + 0.13 * t.scale;
   if (h === 'mid') return (r.chest.pos.y + r.abdomen.pos.y) / 2 + 0.06 * t.scale;
   return (r.thighL.pos.y + r.thighR.pos.y) / 2 - 0.25 * t.scale;
+}
+
+// ---------------------------------------------------------------------------
+// Fighter records (docs/M1-DESIGN.md §8.3 FighterRecV1, P04; MAP gap-7 §3.4-3.7)
+// ---------------------------------------------------------------------------
+
+/**
+ * The move in progress by reference (§8.3): its table ('own': the fighter's moves; 'weapon': WEAPON_MOVES), its key
+ * there, and the tempo bucket of its timed copy (`tempo.toFixed(2)`; null: the table's own object, untimed).
+ */
+export type MoveRefRecord = { source: 'own' | 'weapon'; id: string; tempoKey: string | null };
+
+/** The aim of the current (or last) strike: a move whose `aims` hold it, and its id there. */
+export type AimRecord = { source: 'own' | 'weapon'; move: string; id: string };
+
+/**
+ * A weapon: its id, and its definition by value when the fighter's weapon isn't the shared WEAPONS[id] object (a tool
+ * the world synthesised from an entity, §5.2); null: the WEAPONS entry itself, whose identity the sim relies on.
+ */
+export type WeaponRecord = { id: WeaponId; def: WeaponDef | null };
+
+/** What Fighter.restoreRecord re-links against: every fighter of the sim, and its drops. */
+export type FighterRestoreContext = { fighters: readonly Fighter[]; drops?: readonly Drop[] };
+
+/**
+ * A fighter's saved state (Fighter.toRecord; the save's FighterRecV1, §8.3), in this key order. Vectors are V3, sets
+ * and maps are arrays in their live (insertion) order, poses and animation keys are by value.
+ */
+export type FighterRecord = {
+  id: number;
+  /** The move table the fighter was made with: PLAYER_MOVES, ENEMY_MOVES, or null for another table. */
+  moves: 'player' | 'enemy' | null;
+  pos: WorldV3;
+  vel: WorldV3;
+  moveInput: WorldV3;
+  walkVel: WorldV3;
+  yaw: number;
+  scale: number;
+  hp: number;
+  guard: number;
+  poise: number;
+  state: FighterState;
+  stateFrame: number;
+  stunFrames: number;
+  move: MoveRefRecord | null;
+  attackEnd: number;
+  stuckUntil: number;
+  attackSerial: number;
+  hitThisAttack: boolean;
+  isCounterAttack: boolean;
+  perfectCounter: boolean;
+  isPerfectCounter: boolean;
+  aim: AimRecord | null;
+  strikeHeight: Height;
+  /** `def` is DEFENSES[kind]. */
+  defense: { kind: DefenseKind; threatSerial: number; phase: ActiveDefense['phase']; success: boolean; side: 1 | -1 } | null;
+  counter: { kind: DefenseKind; frames: number } | null;
+  lastDefendedSerial: number;
+  defenseCooldown: Record<DefenseKind, number>;
+  defenseManual: boolean;
+  perfectSerial: number;
+  dodgedSerial: number;
+  weaveSide: 1 | -1;
+  buffer: { button: Button; frames: number } | null;
+  /** Fighter id. */
+  target: number | null;
+  combo: number;
+  framesSinceBlock: number;
+  framesSinceHit: number;
+  framesSinceLanded: number;
+  framesSinceDefend: number;
+  misreadSerial: number;
+  lockedOn: boolean;
+  minHp: number;
+  stamina: number;
+  pickupRequest: number;
+  /** `drop`: the id of the drop whose pos it is (null: none any more). */
+  pickupTarget: { drop: number | null; pos: WorldV3; weapon: WeaponRecord; grabAt: number } | null;
+  ammo: { weapon: WeaponRecord; count: number } | null;
+  airStep: WorldV3;
+  weapon: WeaponRecord | null;
+  wounds: { bone: BoneName; local: [number, number, number]; angle: number; length: number; bleed: number; floor: number; stump: BoneName | null }[];
+  severed: BoneName[];
+  torn: string[];
+  limbDamage: [BoneName, number][];
+  hitReaction: PoseName;
+  autoDefense: boolean;
+  readSkill: number;
+  repeatCount: number;
+  lastMoveId: string;
+  sinceMoveStart: number;
+  swingStamina: number;
+  wasBlocked: boolean;
+  /** In DEFAULT_STATS' key order. */
+  stats: FighterStats;
+  swingJitter: [number, number, number];
+  swingViaMid: boolean;
+  swingDy: number;
+  anim: AnimatorRecord;
+  footwork: FootworkRecord;
+  idle: IdleRecord;
+  motion: MotionProfile;
+  lookPitch: number;
+  bank: number;
+  breathPhase: number;
+  heldBreath: number;
+  headTrack: number;
+  moveBlend: number;
+  pose: PoseRecord;
+  // The world fields (§1.5.3, §8.3).
+  massKg: number | null;
+  baseMassKg: number;
+  /** In the key order of boneMassShares() (BONES order). */
+  boneShare: [BoneName, number][];
+  toughnessJ: number;
+  species: SpeciesId | null;
+  playerId: string | null;
+  lastKnock: { tick: number; cause: ImpactCause; by: number | null } | null;
+  armour: [HurtZone, number][];
+  inventory: Inventory | null;
+  load: { massKg: number; mode: 'carry' | 'drag' | 'rope' } | null;
+  drive: Drive | null;
+  posture: Posture | null;
+  work: { kind: Work['kind']; frames: number; actAt: number; faceAt: WorldV3; keys: TrackKeyRecord[]; cmd: VerbCommand | null } | null;
+  verbRequest: { cmd: VerbCommand; frames: number } | null;
+  verbAim: WorldV3 | null;
+  throwAim: { dir: WorldV3; speedFrac: number; techSpeed: number } | null;
+  moveFlags: number;
+  jumpRequest: number;
+  idlePaused: boolean;
+};
+
+function movesKey(m: Readonly<Record<string, MoveDef>>): 'player' | 'enemy' | null {
+  return m === PLAYER_MOVES ? 'player' : m === ENEMY_MOVES ? 'enemy' : null;
+}
+
+/** The tables a fighter's moves come from (as moveDef reads them: weapon techniques, then its own). */
+function moveTables(f: Fighter): readonly (readonly ['weapon' | 'own', Readonly<Record<string, MoveDef>>])[] {
+  return [
+    ['weapon', WEAPON_MOVES],
+    ['own', f.moves],
+  ];
+}
+
+/** An own property of a table (a move or weapon id never reaches the prototype). */
+function own<T>(table: Readonly<Record<string, T>>, key: string): T | undefined {
+  return Object.prototype.hasOwnProperty.call(table, key) ? table[key] : undefined;
+}
+
+/** null: `m` is `base` itself; a key: `m` is base's timed copy in that tempo bucket; undefined: neither. */
+function timedKeyOf(base: MoveDef, m: MoveDef): string | null | undefined {
+  if (m === base) return null;
+  const byTempo = _timed.get(base);
+  if (byTempo) for (const [key, t] of byTempo) if (t === m) return key;
+  return undefined;
+}
+
+function fighterById(fighters: readonly Fighter[], id: number, of: number): Fighter {
+  const f = fighters.find((o) => o.id === id);
+  if (!f) throw new Error(`Fighter.restoreRecord: fighter ${of}'s target ${id} is not among the sim's fighters`);
+  return f;
+}
+
+/** A deep copy of plain data (numbers, strings, booleans, arrays, plain objects); undefined fields are left out. */
+function clonePlain<T>(v: T): T {
+  if (Array.isArray(v)) return v.map((x) => clonePlain(x)) as T;
+  if (v !== null && typeof v === 'object') {
+    const o: Record<string, unknown> = {};
+    for (const k of Object.keys(v)) {
+      const x = (v as Record<string, unknown>)[k];
+      if (x !== undefined) o[k] = clonePlain(x);
+    }
+    return o as T;
+  }
+  return v;
+}
+
+function weaponRecord(w: WeaponDef): WeaponRecord {
+  return { id: w.id, def: own(WEAPONS, w.id) === w ? null : clonePlain(w) };
+}
+
+function weaponFromRecord(r: WeaponRecord): WeaponDef {
+  if (r.def) return clonePlain(r.def);
+  const w = own(WEAPONS, r.id);
+  if (!w) throw new Error(`save record: no weapon ${r.id}`);
+  return w;
+}
+
+function woundRecord(w: Wound): FighterRecord['wounds'][number] {
+  return { bone: w.bone, local: [w.local[0], w.local[1], w.local[2]], angle: w.angle, length: w.length, bleed: w.bleed, floor: w.floor, stump: w.stump ?? null };
+}
+
+function woundFromRecord(r: FighterRecord['wounds'][number]): Wound {
+  const n = numFromRecord;
+  const w: Wound = {
+    bone: r.bone,
+    local: [n(r.local[0], 'wound.local[0]'), n(r.local[1], 'wound.local[1]'), n(r.local[2], 'wound.local[2]')],
+    angle: n(r.angle, 'wound.angle'),
+    length: n(r.length, 'wound.length'),
+    bleed: n(r.bleed, 'wound.bleed'),
+    floor: n(r.floor, 'wound.floor'),
+  };
+  if (r.stump !== null) w.stump = r.stump;
+  return w;
+}
+
+/** A partial map of numbers as [key, value] pairs in its key order. */
+function entriesRecord<K extends string>(o: Readonly<Partial<Record<K, number>>>): [K, number][] {
+  const out: [K, number][] = [];
+  for (const k of Object.keys(o) as K[]) {
+    const v = o[k];
+    if (v !== undefined) out.push([k, v]);
+  }
+  return out;
+}
+
+/** A copy of a flat record in the key order of `order` (a table of defaults, or the object itself). */
+function fieldsRecord<T extends object>(o: T, order: T): T {
+  const out: Record<string, unknown> = {};
+  for (const k of Object.keys(order)) out[k] = (o as Record<string, unknown>)[k];
+  return out as T;
+}
+
+/** A plain V3 read back from a record (for fields that hold a V3, not a Vector3 the fighter owns). */
+function plainV3(r: WorldV3, field: string): WorldV3 {
+  return { x: numFromRecord(r.x, `${field}.x`), y: numFromRecord(r.y, `${field}.y`), z: numFromRecord(r.z, `${field}.z`) };
+}
+
+function nullableNum(v: number | null, field: string): number | null {
+  return v === null ? null : numFromRecord(v, field);
+}
+
+function causeRecord(c: ImpactCause): ImpactCause {
+  return { kind: c.kind, entityId: c.entityId, fighterId: c.fighterId, credit: [...c.credit], held: c.held, feature: c.feature };
+}
+
+function causeFromRecord(c: ImpactCause): ImpactCause {
+  return {
+    kind: c.kind,
+    entityId: nullableNum(c.entityId, 'cause.entityId'),
+    fighterId: nullableNum(c.fighterId, 'cause.fighterId'),
+    credit: [...c.credit],
+    held: c.held,
+    feature: c.feature,
+  };
+}
+
+function inventoryRecord(inv: Inventory | null): Inventory | null {
+  if (!inv) return null;
+  const h = inv.hands;
+  return {
+    hands: h ? { entity: h.entity, mode: h.mode, grip: v3Record(h.grip), twoHanded: h.twoHanded, joint: h.joint } : null,
+    belt: [inv.belt[0], inv.belt[1], inv.belt[2]],
+    back: inv.back,
+  };
+}
+
+function inventoryFromRecord(r: Inventory | null): Inventory | null {
+  if (!r) return null;
+  const h = r.hands;
+  return {
+    hands: h
+      ? { entity: numFromRecord(h.entity, 'hands.entity'), mode: h.mode, grip: plainV3(h.grip, 'hands.grip'), twoHanded: h.twoHanded, joint: nullableNum(h.joint, 'hands.joint') }
+      : null,
+    belt: [nullableNum(r.belt[0], 'belt[0]'), nullableNum(r.belt[1], 'belt[1]'), nullableNum(r.belt[2], 'belt[2]')],
+    back: nullableNum(r.back, 'back'),
+  };
+}
+
+function workFromRecord(r: NonNullable<FighterRecord['work']>): Work {
+  const n = numFromRecord;
+  const w: Work = {
+    kind: r.kind,
+    frames: n(r.frames, 'work.frames'),
+    actAt: n(r.actAt, 'work.actAt'),
+    faceAt: plainV3(r.faceAt, 'work.faceAt'),
+    keys: r.keys.map(trackKeyFromRecord),
+  };
+  if (r.cmd) w.cmd = cloneCommand(r.cmd);
+  return w;
 }
