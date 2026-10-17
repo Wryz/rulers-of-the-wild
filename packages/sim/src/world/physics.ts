@@ -242,6 +242,11 @@ export class PhysicsWorld {
     return this.owners.get(handle) ?? this.removed.get(handle)?.owner ?? null;
   }
 
+  /** Whether the collider `handle` is registered now (not removed since). */
+  isRegistered(handle: number): boolean {
+    return this.owners.has(handle);
+  }
+
   /** The owner key of a registered collider, or null. */
   keyOf(handle: number): string | null {
     return this.keys.get(handle) ?? this.removed.get(handle)?.key ?? null;

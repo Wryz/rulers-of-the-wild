@@ -693,6 +693,7 @@ const INVENTORY: Record<string, Record<string, string>> = {
     graceUntil: 'saved: contactGrace',
     resync: 'not saved: the restored groups still touching, from a load to its first phase 9 (null at every tick end); a load sets it again from contacts[].touching',
     restarts: "not saved: the load's own narrow-phase starts, held from a load to its first phase 9 (null at every tick end); a load makes them again",
+    loadStarts: "not saved: the load's narrow-phase starts of contacts the save didn't hold, held from a load to its first phase 9 (null at every tick end); a load makes them again",
     scored: 'not saved: a dev read-out (impacts scored so far), never read by the sim',
     unscored: 'not saved: dev read-outs (pairs and episodes left unscored, by reason), never read by the sim',
   },
@@ -1434,6 +1435,70 @@ describe('the loader (core-fix)', () => {
     expect(l.contacts.graceRecord().some(([id]) => id === g.id)).toBe(false);
     // And a save of the loaded world holds the same graces.
     expect((parsed(serializeWorld(l)) as unknown as SaveV1).contactGrace).toEqual(s.contactGrace);
+  });
+
+  it('a contact whose first step is the first step after a load still lands: a log on a lying player, saved on any tick before it', async () => {
+    // A 300 kg log dropped 8 m onto a player held lying. The loader's zero-length step raises the start of a contact
+    // the saved world's next step would have raised (the log already within reach of the slab at the save); the first
+    // real step raises it no more. It is a new contact on that tick, scored as the original scores it.
+    const hold = (p: Fighter) => {
+      p.stunFrames = p.stateFrame + 1000;
+    };
+    const stage = async (): Promise<{ w: World; id: number }> => {
+      const w = await make({ seed: 7 });
+      const p = w.player!;
+      for (let t = 0; t < 5; t++) w.step();
+      const sim = w.combat;
+      const orig = sim.stepBody;
+      sim.stepBody = function (this: typeof sim) {
+        sim.stepBody = orig;
+        const ev = orig.call(sim);
+        p.vel.set(0.5, 0, 0);
+        p.enterKnockdown();
+        ev.push({ type: 'hit', attacker: p, defender: p, move: { lift: 0 }, knockdown: true, ko: false } as never);
+        return ev;
+      };
+      for (let t = 0; t < 120; t++) {
+        w.step();
+        hold(p);
+      }
+      const hip = w.downed.hip(p.id)!;
+      const id = spawnLog(w, { p: { x: hip.x, y: hip.y + 8, z: hip.z }, length: 3, mass: 300 });
+      return { w, id };
+    };
+    type Hit = { tick: number; damage: number; energy: number };
+    const hitsUntil = (w: World, id: number, end: number): Hit[] => {
+      const out: Hit[] = [];
+      const p = w.player!;
+      while (w.tick < end) {
+        const r = w.step();
+        hold(p);
+        for (const e of r.world) if (e.type === 'impact' && e.defender === p && e.cause.kind === 'entity' && e.cause.entityId === id) out.push({ tick: e.tick, damage: e.damage, energy: e.energy });
+      }
+      return out;
+    };
+    const a = await stage();
+    const want = hitsUntil(a.w, a.id, a.w.tick + 200);
+    // (The log lands on the body at T and, after it, once more on its way off.)
+    expect(want.length).toBeGreaterThanOrEqual(1);
+    expect(want[0].damage).toBeGreaterThan(30);
+    const T = want[0].tick;
+    // Saved on each of the ticks before the impact's (the contact's first step is T's): the loaded world scores it on
+    // the same tick with the same HP (a load is not bit-exact for Rapier's solver state: within 0.1 %). Saved on T
+    // itself: it is not scored again.
+    for (let s = T - 4; s <= T; s++) {
+      const b = await stage();
+      expect(hitsUntil(b.w, b.id, s)).toEqual(want.filter((h) => h.tick <= s));
+      const l = await load(serializeWorld(b.w));
+      const got = hitsUntil(l, b.id, T + 10);
+      if (s === T) {
+        expect(got, `saved at tick ${s}`).toEqual([]);
+        continue;
+      }
+      expect(got, `saved at tick ${s}`).toHaveLength(1);
+      expect(got[0].tick, `saved at tick ${s}`).toBe(T);
+      expect(Math.abs(got[0].damage / want[0].damage - 1), `saved at tick ${s}: ${got[0].damage} HP`).toBeLessThan(1e-3);
+    }
   });
 });
 

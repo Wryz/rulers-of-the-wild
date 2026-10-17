@@ -31,13 +31,16 @@
 //    rig or rebuilds it at the pre-13a position (P04's note on Fighter.restoreRecord);
 // 6. contacts first: ContactSystem.restoreRecord replaces every runtime map with the save's, its graces included (so a
 //    grace the making of the fighters opened goes); then bodies: controllers, slabs (with the standing zones on or off
-//    beside them, DownedBodies.restoreRecord) and ruler bodies from their records; the standing zones' pose history is
-//    reset, which opens §4.3's load grace (the physics world's pre-step store is not restorable: every owner's next
-//    store reads carryV 0, as after a teleport); felling, deaths and corpses; the queued impulses;
+//    beside them, DownedBodies.restoreRecord) and ruler bodies from their records; the pose history of the standing
+//    zones that are on is reset, which opens §4.3's load grace for their fighters (the physics world's pre-step store is
+//    not restorable: every owner's next store reads carryV 0, as after a teleport); felling, deaths and corpses; the
+//    queued impulses;
 // 7. the world RNG streams and the id counters; the navmesh built over the loaded ground and its dirty queue restored;
 // 8. every collider the load made put into the scene queries by PhysicsWorld.refreshQueries (a zero-length Rapier step
 //    that moves nothing, so the first tick's queries before its phase-7 step see the world the save saw), its starts
-//    handed to the contact pipeline so the restored episodes keep their counts; the events construction pushed cleared.
+//    handed to the contact pipeline so the restored episodes keep their counts and the contacts the saved world's next
+//    step would have started start on the first tick (ContactSystem.restoredStarts); the events construction pushed
+//    cleared.
 // Rapier's body order after a load differs from the saving world's (restored bodies are made after the generated ones
 // kept), so a loaded world matches the saved one within SPEC:730's 1 cm and 1° at rest, not bit for bit; two loads of
 // one save are bit-identical to each other.
@@ -255,8 +258,15 @@ function restoreWorld(w: World, s: SaveV1): void {
   w.kcc.restoreRecord(kcc);
   w.downed.restoreRecord(slabs);
   w.rulers.restoreRecord(rulers);
-  // §4.3: a load resets the pose history, with a contact grace (after the restored graces, so the later window wins).
-  for (const f of [...w.combat.fighters].sort(byId)) if (!f.ruler) w.zones.resetHistory(f);
+  // §4.3: a load resets the standing zones' pose history, with a contact grace (after the restored graces, so the later
+  // window wins). DEVIATION (§4.3 resets and graces every fighter at a load; core-fix): not for zones that are off (a
+  // fighter down on its slab, or just handed back): they aren't in the world, and the phase 4a that turns them on
+  // resets them with a grace of its own; the grace would only keep the slab's new contacts from scoring (a log landing
+  // on a lying player just after a load was recorded but never scored).
+  // TODO(core-fix): a standing fighter's new contacts in the zoneGraceTicks after a load are still never scored (§4.3's
+  // load grace); restoring bodies[].zonesHistory into the physics world's pre-step store instead of resetting it would
+  // make the grace unnecessary.
+  for (const f of [...w.combat.fighters].sort(byId)) if (!f.ruler && w.zones.enabled(f)) w.zones.resetHistory(f);
   w.felling.restoreRecord(s.felling);
   w.deaths.restoreRecord(s.deaths, s.corpses);
   s.impulses.forEach((q, i) => {
@@ -285,11 +295,12 @@ function restoreWorld(w: World, s: SaveV1): void {
  * ops and teleports (phase 1c), minds' perception rays (2), the movers' supportAt (3). The saved world had every one of
  * these colliders in its broad phase, so without this a load would change those outcomes (a giant standing on a
  * restored pit cover would read the pit floor). So: PhysicsWorld.refreshQueries, one Rapier step of zero length that
- * moves nothing (it checks that and fails the load loudly otherwise). Its events never reach phase 9 as new contacts
- * (pairs already touching at the save start no new contact on the first tick, as in the saved world): its starts are
- * the rebuilt narrow phase re-raising every pair that still overlaps, and go to ContactSystem.restoredStarts, which
- * counts them toward the restored episodes only, so the counts the save holds carry on (the first step raises them no
- * more).
+ * moves nothing (it checks that and fails the load loudly otherwise). Its starts are the rebuilt narrow phase raising
+ * every pair that overlaps, and go to ContactSystem.restoredStarts (the first step raises them no more): those of a
+ * group the save holds as touching count toward it only (pairs already touching at the save start no new contact on
+ * the first tick, as in the saved world), so the counts the save holds carry on; the others are the contacts the saved
+ * world's next step would have started, and start on the first tick (core-fix: they were dropped, and an impact due on
+ * that tick never happened).
  */
 function refreshQueries(w: World): void {
   w.contacts.restoredStarts(w.physics.refreshQueries());
