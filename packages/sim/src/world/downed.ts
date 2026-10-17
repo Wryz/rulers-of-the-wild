@@ -11,6 +11,14 @@
 //   pop (liftBase + liftPerLift × the move's lift) when a melee blow put it down this tick, and any queued Δv; it topples
 //   at toppleRadS/√scale about up × dir. f.vel and f.walkVel go to 0 (the body owns the momentum); the controller and the
 //   zones are disabled; a `launch` event carries the velocities to the client's ragdoll.
+// - Clear of dynamic bodies (core-fix): a slab is never solved against a dynamic body that is inside it. In every phase
+//   4a each active slab lists the dynamic bodies (entities, other slabs, a tripped ruler) that reach its spine (its long
+//   axis thickened to the core's half-thickness, halfThick × scale: the body's centre line), and the step leaves those
+//   pairs out (PhysicsWorld.addPairFilter) until they are clear of it. A slab enabled where the fighter stood inside a
+//   falling log no longer has Rapier throw the log out of it (a 300 kg log that pressed the player from 4 m went back up
+//   at +4.95 m/s, AC-6 part 2): the log falls on through to the ground, as it fell through the standing zones, and the
+//   body falls against it once they are apart. Fixed bodies and the terrain are always solid to it, and a body touching
+//   the slab or overlapping only its edge is solved as usual.
 // - Phase 13a: f.pos follows the slab's hip (x, z; y = the support under it). On the frame before the getup a slab
 //   still moving faster than settleSpeed holds the fighter down (at most settleMaxHold frames); then the stand-spot
 //   search finds where the standing capsule fits, the slab is disabled and the controller is teleported there. The
@@ -23,7 +31,7 @@ import type { SlabRecV1 } from '../save/schema';
 import type { Fighter } from '../sim/fighter';
 import { defineTuning } from '../tuning/registry';
 import { CHARACTER_TUNING } from './characters';
-import { collisionGroups, kccQueryGroups, solverGroups } from './groups';
+import { collisionGroups, GROUP, kccQueryGroups, solverGroups } from './groups';
 import { ownerKey } from './physics';
 import type { Quat, V3 } from './types';
 import type { World } from './world';
@@ -93,17 +101,28 @@ interface Slab {
   handedBack: boolean;
   /** Δv queued by world impacts (applied in the next phase 4a). */
   dv: V3 | null;
+  /**
+   * The handles of the dynamic bodies that reached the slab's spine at the last phase 4a (or at the load): the step
+   * leaves those pairs out. Derived from the poses (never saved): empty while the slab is off.
+   */
+  clearOf: Set<number>;
 }
 
 const IDENTITY = Object.freeze({ x: 0, y: 0, z: 0, w: 1 });
+/** The groups of dynamic bodies a slab collides with (entities, other slabs, a tripped ruler's solid bones). */
+const COLLIDES_DOWNED_DYNAMIC = GROUP.ENTITY | GROUP.DOWNED | GROUP.RULER_SOLID;
 const DOWN = Object.freeze({ x: 0, y: -1, z: 0 });
 
 export class DownedBodies {
   readonly world: World;
   private readonly byId = new Map<number, Slab>();
 
+  /** Body handle of an active slab with bodies it isn't clear of → that slab (the pair filter's index). */
+  private readonly ghosts = new Map<number, Slab>();
+
   constructor(world: World) {
     this.world = world;
+    world.physics.addPairFilter((b1, b2) => this.ghostPair(b1, b2) || this.ghostPair(b2, b1));
   }
 
   /** The slab, disabled, standing where the fighter stands. */
@@ -134,13 +153,14 @@ export class DownedBodies {
     );
     const owner = { kind: 'fighter' as const, id: f.id, part: 'slab' as const };
     physics.register(col, owner);
-    this.byId.set(f.id, { f, body, col, halfLen, key: ownerKey(owner), active: false, hold: 0, handedBack: false, dv: null });
+    this.byId.set(f.id, { f, body, col, halfLen, key: ownerKey(owner), active: false, hold: 0, handedBack: false, dv: null, clearOf: new Set() });
   }
 
   remove(f: Fighter): void {
     const s = this.byId.get(f.id);
     if (!s) return;
     this.byId.delete(f.id);
+    this.ghosts.delete(s.body.handle);
     this.world.physics.unregister(s.col);
     this.world.physics.rapier.removeRigidBody(s.body);
   }
@@ -169,14 +189,15 @@ export class DownedBodies {
         if (down) this.launch(w, f, s, lifts?.get(f) ?? null);
         // A Δv meant for a standing fighter is CombatSim's (f.vel); one left over from a launch that didn't happen goes.
         else s.dv = null;
-        continue;
+      } else {
+        if (s.dv) {
+          const v = s.body.linvel();
+          s.body.setLinvel({ x: v.x + s.dv.x, y: v.y + s.dv.y, z: v.z + s.dv.z }, true);
+          s.dv = null;
+        }
+        if (!down) this.standUp(w, f, s);
       }
-      if (s.dv) {
-        const v = s.body.linvel();
-        s.body.setLinvel({ x: v.x + s.dv.x, y: v.y + s.dv.y, z: v.z + s.dv.z }, true);
-        s.dv = null;
-      }
-      if (!down) this.standUp(w, f, s);
+      this.updateClear(s, false);
     }
   }
 
@@ -211,6 +232,31 @@ export class DownedBodies {
     }
   }
 
+  /**
+   * World.teleport of a fighter that is down on its active slab (knocked down or KO'd): the slab goes with it, at rest,
+   * turned by `turn` (rad) about the vertical, its hip over (x, z) and its lowest point on `y` (the support World.teleport
+   * found there); its pose history is reset (§4.3, RF-1; World.teleport opens the contact grace). Phase 13a then reads
+   * f.pos from it there. Returns false, moving nothing, for a fighter not down on its slab (a standing one is the
+   * controller's; one that went down this tick gets its slab where f.pos is in the next phase 4a).
+   */
+  teleport(f: Fighter, x: number, y: number, z: number, turn: number): boolean {
+    const s = this.byId.get(f.id);
+    if (!s || !s.active || (f.state !== 'knockdown' && f.state !== 'ko')) return false;
+    const T = DOWNED_TUNING;
+    const sc = f.scale;
+    const q0 = s.body.rotation();
+    const q = mulQuat(yawQuat(turn), { x: q0.x, y: q0.y, z: q0.z, w: q0.w });
+    const toHip = rotate(q, { x: 0, y: T.boneBands[1] * sc - s.halfLen, z: 0 });
+    const down = verticalExtent(q, T.halfWidth * sc, T.halfLength * sc, T.halfThick * sc) + T.border * sc;
+    s.body.setTranslation({ x: x - toHip.x, y: y + down, z: z - toHip.z }, true);
+    s.body.setRotation(q, true);
+    s.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+    s.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    s.dv = null;
+    this.world.physics.resetHistory(s.key);
+    return true;
+  }
+
   /** A world impact's Δv for a downed or launched fighter (applied in the next phase 4a). */
   queueDv(f: Fighter, dv: V3): void {
     const s = this.byId.get(f.id);
@@ -230,6 +276,18 @@ export class DownedBodies {
   /** Whether the fighter's slab is in the world. */
   active(f: Fighter): boolean {
     return this.byId.get(f.id)?.active ?? false;
+  }
+
+  /**
+   * The ids of the entities the step leaves out of the fighter's active slab this tick (they reached its spine at the
+   * last phase 4a, or at the load), in id order; [] when it is clear of every body.
+   */
+  notClearOf(f: Fighter): number[] {
+    const s = this.byId.get(f.id);
+    if (!s || s.clearOf.size === 0) return [];
+    const out: number[] = [];
+    for (const e of this.world.entities.all()) if (e.body && s.clearOf.has(e.body.handle)) out.push(e.id);
+    return out;
   }
 
   /** The active slab's linear and angular velocity (f32), else null. */
@@ -291,7 +349,11 @@ export class DownedBodies {
       });
   }
 
-  /** Puts each listed fighter's slab back as recorded (the fighters were added to the world first). */
+  /**
+   * Puts each listed fighter's slab back as recorded (the fighters were added to the world first), with the standing
+   * zones as they are at a tick end beside it: off exactly while the slab is active, and until the phase 4a after it was
+   * handed back (syncDown); on otherwise (ZoneBodies.setEnabled(true) resets their history and opens a grace, RF-1).
+   */
   restoreRecord(r: { fighter: number; slab: SlabRecV1 }[]): void {
     for (const { fighter, slab } of r) {
       const s = this.byId.get(fighter);
@@ -307,7 +369,11 @@ export class DownedBodies {
       const dv = slab.dv as V3 | null | undefined;
       s.dv = dv ? { x: dv.x, y: dv.y, z: dv.z } : null;
       this.world.physics.resetHistory(s.key);
+      this.world.zones.setEnabled(s.f, !(s.active || s.handedBack));
     }
+    // What the slabs aren't clear of, from the restored poses (the loader's zero-length step then leaves those pairs
+    // out, as the saved world's next step would).
+    for (const { fighter } of r) this.updateClear(this.byId.get(fighter)!, true);
   }
 
   // -------------------------------------------------------------------------
@@ -358,6 +424,56 @@ export class DownedBodies {
     w.kcc.setEnabled(f, false);
     w.zones.setEnabled(f, false);
     w.events.push({ type: 'launch', f, vel: lin, angVel: ang });
+  }
+
+  /**
+   * The dynamic bodies that reach the active slab's spine now (a capsule along its long axis, of the core's half-thickness:
+   * inside the body, not at its surface), whose pairs with it the step leaves out (see the top of this file); none while
+   * it is off. By the scene queries
+   * (phase 4a: they see every body as of the last step), or, at a load, by testing every collider (a restored one is in
+   * no query until the loader's zero-length step). Fixed and kinematic bodies, sensors, and anything the slab doesn't
+   * collide with are never listed.
+   */
+  private updateClear(s: Slab, everyCollider: boolean): void {
+    s.clearOf.clear();
+    if (s.active) {
+      const T = DOWNED_TUNING;
+      const sc = s.f.scale;
+      const core = new RAPIER.Capsule((T.halfLength - T.halfThick) * sc, T.halfThick * sc);
+      const p = s.body.translation();
+      const q = s.body.rotation();
+      const filter = COLLIDES_DOWNED_DYNAMIC;
+      const take = (c: RAPIER.Collider): void => {
+        const b = c.parent();
+        if (!b || b.handle === s.body.handle || !b.isDynamic() || !b.isEnabled() || c.isSensor() || !c.isEnabled()) return;
+        if ((c.collisionGroups() >>> 16) & filter) s.clearOf.add(b.handle);
+      };
+      const rapier = this.world.physics.rapier;
+      if (everyCollider) {
+        rapier.colliders.forEach((c) => {
+          if (core.intersectsShape(p, q, c.shape, c.translation(), c.rotation())) take(c);
+        });
+      } else {
+        rapier.intersectionsWithShape(p, q, core, (c) => {
+          take(c);
+          return true;
+        }, RAPIER.QueryFilterFlags.ONLY_DYNAMIC | RAPIER.QueryFilterFlags.EXCLUDE_SENSORS, collisionGroups('DOWNED'), s.col, s.body);
+      }
+    }
+    if (s.clearOf.size > 0) this.ghosts.set(s.body.handle, s);
+    else this.ghosts.delete(s.body.handle);
+    // The collider's hook flag follows, set only on an enabled slab and only when it changes: setting a collider's
+    // flags puts it back into the broad phase even while its body is disabled (measured: a disabled slab set each tick
+    // met the falling log and took 2 m/s off the AC-6 press). A disabled slab keeps its flag; its pairs are solved as
+    // usual (it has none while off) and the phase 4a that enables it sets the flag again before the step.
+    if (!s.active) return;
+    const want = s.clearOf.size > 0 ? RAPIER.ActiveHooks.FILTER_CONTACT_PAIRS : RAPIER.ActiveHooks.NONE;
+    if (s.col.activeHooks() !== want) s.col.setActiveHooks(want);
+  }
+
+  /** The pair filter: `slab` is an active slab's body and `other` a body it isn't clear of. */
+  private ghostPair(slab: number, other: number): boolean {
+    return this.ghosts.get(slab)?.clearOf.has(other) ?? false;
   }
 
   /** Keep the fighter down one more tick (CombatSim gets it up when stateFrame reaches stunFrames). */
@@ -456,6 +572,21 @@ function rotate(q: Quat, v: V3): V3 {
     y: v.y + q.w * ty + (q.z * tx - q.x * tz),
     z: v.z + q.w * tz + (q.x * ty - q.y * tx),
   };
+}
+
+/** a·b (b applied first). */
+function mulQuat(a: Quat, b: Quat): Quat {
+  return {
+    x: a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+    y: a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+    z: a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+    w: a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+  };
+}
+
+/** The half-height along world y of a box of half extents (hx, hy, hz) turned by q. */
+function verticalExtent(q: Quat, hx: number, hy: number, hz: number): number {
+  return Math.abs(rotate(q, { x: hx, y: 0, z: 0 }).y) + Math.abs(rotate(q, { x: 0, y: hy, z: 0 }).y) + Math.abs(rotate(q, { x: 0, y: 0, z: hz }).y);
 }
 
 /** v rotated by the inverse of unit quaternion q. */
