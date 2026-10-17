@@ -88,6 +88,7 @@ export const RULER_BODY_TUNING = defineTuning(
     climbLookM: 3,
     deflectAxisMinXZ: 0.5,
     getupShoveMps: 2,
+    riseBlendFrames: 40,
   },
   {
     tripSpeed: { unit: 'm/s (root horizontal)', source: 'SPEC:782, 879; D-10' },
@@ -120,6 +121,11 @@ export const RULER_BODY_TUNING = defineTuning(
     getupShoveMps: {
       unit: 'm/s',
       source: "NEW: §4.7 get-up: light bodies resting on the ruler are shoved off at this speed before its colliders turn to sensors (MAP gap-3 §3.5)",
+    },
+    riseBlendFrames: {
+      unit: 'frames',
+      source:
+        "NEW: the blend from the rise's last key into the ruler's own stance (DS's 4-frame fade swings a 5.5× arm at 88 m/s, over AC-5's 30 m/s; 40 frames keep it under 9 m/s)",
     },
   },
 );
@@ -350,6 +356,9 @@ export class RulerBodies {
         }
         if (f.stateFrame >= f.stunFrames && !r.pinned) this.getUp(w, f, rb, load.entities);
       } else {
+        // The rise's last frame: into the ruler's own stance over riseBlendFrames instead of DS's 4-frame fade (which
+        // CombatSim's advance would start next tick), so the end of the rise is as slow as the rise (AC-5's 30 m/s).
+        if (f.state === 'getup' && f.stateFrame >= f.stunFrames - 1) f.enterLocomotion(RULER_BODY_TUNING.riseBlendFrames);
         this.updatePit(w, f, rb, r);
         if (f.state !== 'ko') this.coverFailure(w, f, rb);
       }
@@ -540,6 +549,8 @@ export class RulerBodies {
     // The feet set down this tick are counted from here (the footwork runs in updatePose, after the mover).
     f.footwork.landed.length = 0;
     const T = RULER_BODY_TUNING;
+    // A support gone since the last tick (removed before this phase 3) is a cover break for the ledge rule below.
+    this.vanishedSupports(this.world, rb);
     const prev = { x: rb.last.x, y: rb.last.y, z: rb.last.z };
     let dx = f.pos.x - prev.x;
     let dz = f.pos.z - prev.z;
@@ -689,7 +700,10 @@ export class RulerBodies {
       r.deflectedHeading = Math.atan2(t.x, t.z);
       const tick = this.world.tick;
       const d = rb.deflect;
-      if (!d || d.entity !== e.id || tick - d.tick > 1) this.world.events.push({ type: 'deflect', ruler: f, along: { x: t.x, y: 0, z: t.z } });
+      // One event per slide: a new obstacle, or the same one after a gap longer than a bounce (impactCooldownTicks).
+      if (!d || d.entity !== e.id || tick - d.tick > DAMAGE_TUNING.impactCooldownTicks) {
+        this.world.events.push({ type: 'deflect', ruler: f, along: { x: t.x, y: 0, z: t.z } });
+      }
       rb.deflect = { entity: e.id, tick };
       return end;
     }
@@ -1084,8 +1098,11 @@ export class RulerBodies {
   }
 
   /**
-   * §4.7 "In a pit" (RR-1): both planted feet (while dynamic: the pelvis) more than pitDownDepthFrac × knee height below
-   * the original ground, from the rig (a stepping foot doesn't count while another is planted); a `pit` event on change.
+   * §4.7 "In a pit" (RR-1): the ruler's ground (while dynamic: the pelvis) more than pitDownDepthFrac × knee height below
+   * the original ground; a `pit` event on change.
+   * INTERPRETATION (§4.7 says "both planted feet"): the ground the root stands on, which the feet stand around. A 5.5×
+   * stride plants a foot on the rim while the body still stands at the foot of the pit wall (the root stops there,
+   * step 2), and by the feet it would be out of the pit (and recovering) with its body still in it.
    */
   private updatePit(w: World, f: Fighter, rb: RulerBody, r: RulerState): void {
     const depth = RULER_BODY_TUNING.pitDownDepthFrac * rulerKneeM(f);
@@ -1094,14 +1111,7 @@ export class RulerBodies {
       const p = f.rig.pelvis.pos;
       inPit = w.terrain.originalHeightAt(p.x, p.z) - p.y > depth;
     } else {
-      const ankle = rulerAnkleM(f);
-      let feet = SIDES.filter((s) => !(f.free && f.footwork.foot(s).stepping));
-      if (feet.length === 0) feet = [...SIDES];
-      inPit = feet.every((s) => {
-        const shin: BoneName = s === 'L' ? 'shinL' : 'shinR';
-        bonePoint(f.rig, shin, SKELETON[shin].length, _a);
-        return w.terrain.originalHeightAt(_a.x, _a.z) - (_a.y - ankle) > depth;
-      });
+      inPit = w.terrain.originalHeightAt(f.pos.x, f.pos.z) - f.pos.y > depth;
     }
     if (inPit !== r.inPit) {
       r.inPit = inPit;
@@ -1182,8 +1192,33 @@ export class RulerBodies {
    */
   private coverFailure(w: World, f: Fighter, rb: RulerBody): void {
     const T = RULER_BODY_TUNING;
+    for (const v of this.vanishedSupports(w, rb)) {
+      if (!v.recent) continue;
+      const limit = T.ledgeTripDropFrac * rulerKneeM(f);
+      const ankle = rulerAnkleM(f);
+      let drop = f.pos.y - this.groundAt(f, f.pos.x, f.pos.z, f.pos.y + T.stepUpMaxM, f.pos.y, null, [v.id]).y;
+      for (const side of SIDES) {
+        if (f.free && f.footwork.foot(side).stepping) continue;
+        const shin: BoneName = side === 'L' ? 'shinL' : 'shinR';
+        bonePoint(f.rig, shin, SKELETON[shin].length, _a);
+        const footY = _a.y - ankle;
+        drop = Math.max(drop, footY - this.groundAt(f, _a.x, _a.z, footY + T.stepUpMaxM, footY, null, [v.id]).y);
+      }
+      if (drop > limit) this.requestTrip(f, 'cover', v.cause);
+    }
+  }
+
+  /**
+   * The supports of the last coverTripWindowTicks that are gone (a load break split them, or they were removed), each
+   * now the ruler's cover break (a ledge trip within the window is that cover's trip, step 7), by id, with whether it
+   * held the ruler up in the last tick; supports seen longer ago than the window are forgotten. Checked by the mover
+   * (a support gone before phase 3) and in phase 13b (a load break of phase 11-12).
+   */
+  private vanishedSupports(w: World, rb: RulerBody): { id: number; cause: ImpactCause; recent: boolean }[] {
+    const T = RULER_BODY_TUNING;
     const tick = w.tick;
     if (rb.coverBreak && tick - rb.coverBreak.tick > T.coverTripWindowTicks) rb.coverBreak = null;
+    const out: { id: number; cause: ImpactCause; recent: boolean }[] = [];
     for (const id of [...rb.supports.keys()].sort((a, b) => a - b)) {
       const s = rb.supports.get(id)!;
       if (w.entities.get(id)) {
@@ -1193,19 +1228,9 @@ export class RulerBodies {
       rb.supports.delete(id);
       const cause: ImpactCause = { kind: 'entity', entityId: id, fighterId: null, credit: [...s.credit], held: false, feature: 'cover' };
       rb.coverBreak = { tick, cause };
-      if (tick - s.tick > 1) continue;
-      const limit = T.ledgeTripDropFrac * rulerKneeM(f);
-      const ankle = rulerAnkleM(f);
-      let drop = f.pos.y - this.groundAt(f, f.pos.x, f.pos.z, f.pos.y + T.stepUpMaxM, f.pos.y, null, [id]).y;
-      for (const side of SIDES) {
-        if (f.free && f.footwork.foot(side).stepping) continue;
-        const shin: BoneName = side === 'L' ? 'shinL' : 'shinR';
-        bonePoint(f.rig, shin, SKELETON[shin].length, _a);
-        const footY = _a.y - ankle;
-        drop = Math.max(drop, footY - this.groundAt(f, _a.x, _a.z, footY + T.stepUpMaxM, footY, null, [id]).y);
-      }
-      if (drop > limit) this.requestTrip(f, 'cover', cause);
+      out.push({ id, cause, recent: tick - s.tick <= 1 });
     }
+    return out;
   }
 }
 
@@ -1294,7 +1319,11 @@ function legBand(f: Fighter, groundY: number): { ankle: number; knee: number } {
 
 /**
  * The horizontal unit direction a ruler deflects along off `e` (§4.7 step 6.1): its shape's long axis in the world,
- * projected to xz; a round obstacle (an axis steeper than deflectAxisMinXZ, or a ball) gives the tangent ⟂ n̂.
+ * projected to xz, when it meets the obstacle's long side; a round obstacle (an axis steeper than deflectAxisMinXZ, or a
+ * ball), and the end or a corner of a long one, give the tangent ⟂ n̂.
+ * INTERPRETATION (§4.7 says the long axis for every non-round obstacle): met at its end or a corner (n̂ more than
+ * deflectMaxDeg off perpendicular to the axis), sliding along the axis would push the ruler into the obstacle's end, so
+ * it slides round the corner instead; on the long side the two are the same direction.
  */
 function deflectAxis(e: Entity, nx: number, nz: number): { x: number; z: number } {
   const ax = principalAxis(e.shape);
@@ -1303,7 +1332,11 @@ function deflectAxis(e: Entity, nx: number, nz: number): { x: number; z: number 
   _a.set(ax.dir.x, ax.dir.y, ax.dir.z).applyQuaternion(_q);
   const h = Math.hypot(_a.x, _a.z);
   const long = e.shape.kind !== 'ball' && ax.max - ax.min > 2 * ax.crossHalf;
-  if (long && h >= RULER_BODY_TUNING.deflectAxisMinXZ) return { x: _a.x / h, z: _a.z / h };
+  if (long && h >= RULER_BODY_TUNING.deflectAxisMinXZ) {
+    const tx = _a.x / h;
+    const tz = _a.z / h;
+    if (Math.abs(tx * nx + tz * nz) <= Math.sin(RULER_BODY_TUNING.deflectMaxDeg * DEG)) return { x: tx, z: tz };
+  }
   return { x: -nz, z: nx };
 }
 
