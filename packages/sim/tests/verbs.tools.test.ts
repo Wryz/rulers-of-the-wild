@@ -15,7 +15,8 @@ import { prismRForMass, spawnRopeCoil, spawnStarterAxe, spawnStick, spawnStone, 
 import { FELL_TUNING } from '../src/world/felling';
 import { PHYSICS_TUNING, physicsReady } from '../src/world/physics';
 import { principalAxis } from '../src/world/shapes';
-import type { Anchor, JointRecord, V3 } from '../src/world/types';
+import { getPose, POSE_SPECS } from '../src/body/poses';
+import type { Anchor, JointRecord, PostureId, V3 } from '../src/world/types';
 import {
   canCut,
   canShape,
@@ -287,6 +288,21 @@ describe('the tool WeaponIds (§1.2 weapons.ts, §5.2, §5.11)', () => {
     const ts = WEAPON_MOVES.throwSpear;
     expect(ts.throw).toEqual({ release: WEAPON_MOVES.throwOne.throw!.release, speed: 20, spin: 0 });
     expect(ts.noHit).toBe(true);
+  });
+});
+
+describe('the M1 poses (§1.2 body/poses.ts)', () => {
+  it('every posture a fighter can hold is a key pose that resolves to finite joints (the giant’s included)', () => {
+    const postures: PostureId[] = ['crouch', 'carryFront', 'carryShoulder', 'dragBack', 'haulRope', 'workLow', 'workKnap', 'digScoop', 'aimThrow', 'headLow', 'sniff', 'climbOut'];
+    for (const id of postures) {
+      expect(Object.prototype.hasOwnProperty.call(POSE_SPECS, id), id).toBe(true);
+      const p = getPose(id);
+      const nums = [p.root.x, p.root.y, p.root.z, p.blade.x, p.blade.y, p.blade.z, ...Object.values(p.rot).flatMap((q) => [q.x, q.y, q.z, q.w])];
+      expect(nums.every(Number.isFinite), id).toBe(true);
+      // A body, not a heap: the hips stay between the knees' and the head's heights.
+      expect(p.root.y, id).toBeGreaterThan(0.4);
+      expect(p.root.y, id).toBeLessThan(1.1);
+    }
   });
 });
 
