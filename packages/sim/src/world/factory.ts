@@ -18,11 +18,14 @@
 //   creation steps (a joint added, a rope tied) are part of generation, so a generated entity leaves the factory
 //   untouched.
 // - Spawned things carry no credit (§11.0 RT-19: an entity only spawned has `credit: []`).
-// - Rope entities have no body once tied (SPEC:265). A rope is made as a coil (`ropeCoilShape`, the same coil P10's
-//   joint store makes of a rope whose ends are both loose), handed to the joint store, and then tied.
+// - Rope entities have no body once tied (SPEC:265). A rope is made as a coil (`ropeCoilShape`, exported so the joint
+//   store can coil a rope whose ends are both loose the same way, §2.4), handed to the joint store, and then tied.
 //
 // The joint store is P10's: `spawnTree` with a vine calls `joints.rope` and `spawnStarterAxe` calls `joints.lash`, which
 // throw until P10 lands (the factory's side of both is tested with a stand-in joint store).
+//
+// Imports: CLEARING_TUNING (the snags' sharpness) comes from clearing.ts, which will import these factories (P21). The
+// cycle is safe because neither module reads the other at load time; keep it that way.
 //
 // No randomness here: generation draws every choice from its own stream and passes the result in.
 import { defineTuning } from '../tuning/registry';
