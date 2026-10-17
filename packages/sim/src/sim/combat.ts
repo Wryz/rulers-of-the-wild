@@ -431,19 +431,6 @@ export class CombatSim {
     for (const f of this.fighters) f.ground = g === FLAT_GROUND ? null : g;
   }
 
-  /**
-   * @deprecated alias of physicsOwnsDowned (RF-8). Its last writer is the integration branch's client
-   * (apps/client/src/game/game.ts:181, `this.sim.externalKnockdown = true`), which still compiles against it; P31's
-   * client rewrite drops that write. TODO(P31): delete this accessor pair, and its test in tests/seams.test.ts, once
-   * P31 has merged.
-   */
-  get externalKnockdown(): boolean {
-    return this.physicsOwnsDowned;
-  }
-  set externalKnockdown(v: boolean) {
-    this.physicsOwnsDowned = v;
-  }
-
   add(f: Fighter, ai?: Brain) {
     this.fighters.push(f);
     if (this.groundQuery !== FLAT_GROUND) f.ground = this.groundQuery;

@@ -210,14 +210,11 @@ describe('the tick split: beginTick and stepBody', () => {
 });
 
 describe('the seams', () => {
-  it('externalKnockdown is a deprecated alias of physicsOwnsDowned: one flag', () => {
+  it('physicsOwnsDowned is the one flag: DungeonStyle\'s externalKnockdown is gone (MAP gap-7 §3.1, RF-8)', () => {
     const sim = new CombatSim();
     expect(sim.physicsOwnsDowned).toBe(false);
-    expect(sim.externalKnockdown).toBe(false);
-    sim.externalKnockdown = true;
-    expect(sim.physicsOwnsDowned).toBe(true);
-    sim.physicsOwnsDowned = false;
-    expect(sim.externalKnockdown).toBe(false);
+    // Neither an own field nor an accessor on the prototype: a write to it would be a new, ignored property.
+    expect('externalKnockdown' in sim).toBe(false);
   });
 
   it('defaults to DungeonStyle: no mover, no world, flat ground, the fighter-id reading of commands', () => {
