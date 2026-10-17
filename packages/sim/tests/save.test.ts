@@ -100,12 +100,14 @@ function commandsFor(tick: number, rng: Rng): Command[] {
   return out;
 }
 
+/** Lets the worker answer Vitest between long stretches of stepping (a loaded machine times its RPC out otherwise). */
+const yieldNow = (): Promise<void> => new Promise((res) => setImmediate(res));
+
 /** Steps `n` ticks feeding the command log (pushed for the tick about to run). */
-function run(w: World, n: number, rng: Rng, each?: (t: number) => void): void {
+function run(w: World, n: number, rng: Rng): void {
   for (let i = 0; i < n; i++) {
     for (const c of commandsFor(w.tick + 1, rng)) w.commands.push(c);
     w.step();
-    each?.(w.tick);
   }
 }
 
@@ -265,9 +267,14 @@ describe('determinism', () => {
     const w = await make({ seed });
     populate(w);
     const out: { save: string; body: Uint8Array }[] = [];
-    run(w, ticks, new Rng(99), (t) => {
-      if (t % 60 === 0) out.push({ save: text(serializeWorld(w)), body: bodyStateBytes(w) });
-    });
+    const rng = new Rng(99);
+    for (let i = 0; i < ticks; i++) {
+      run(w, 1, rng);
+      if (w.tick % 60 === 0) {
+        out.push({ save: text(serializeWorld(w)), body: bodyStateBytes(w) });
+        await yieldNow();
+      }
+    }
     w.dispose();
     return out;
   }
@@ -301,6 +308,7 @@ describe('determinism', () => {
       if (w1.tick % 60 === 0) {
         expect(text(serializeWorld(w1)) === text(serializeWorld(w2))).toBe(true);
         expect(firstDiff(bodyStateBytes(w1), bodyStateBytes(w2))).toBe(-1);
+        await yieldNow();
       }
     }
   });
@@ -837,6 +845,7 @@ describe('save → load → save', () => {
       if (l2.tick % 60 === 0) {
         expect(firstDiff(bodyStateBytes(l2), bodyStateBytes(l3))).toBe(-1);
         expect(text(serializeWorld(l2)) === text(serializeWorld(l3))).toBe(true);
+        await yieldNow();
       }
     }
     expect(l2.tick).toBe(60 + 300);
@@ -875,15 +884,16 @@ describe('save → load → save', () => {
     expect(canonicalJson(sb.bodies.map((b) => [b.kcc, b.slab]))).toBe(canonicalJson(sa.bodies.map((b) => [b.kcc, b.slab])));
     for (const k of EXACT) expect(canonicalJson(sb[k]) === canonicalJson(sa[k]), `section ${k}`).toBe(true);
     // Both get up (the slab settles, hands back, the zones come back); the loaded one within a few ticks of the other.
-    const upAt = (x: World): number => {
+    const upAt = async (x: World): Promise<number> => {
       for (let t = 0; t < 900; t++) {
         x.step();
         if (!x.downed.active(x.player!) && x.kcc.isEnabled(x.player!) && x.zones.enabled(x.player!)) return x.tick;
+        if (t % 60 === 59) await yieldNow();
       }
       return -1;
     };
-    const t1 = upAt(w);
-    const t2 = upAt(l);
+    const t1 = await upAt(w);
+    const t2 = await upAt(l);
     expect(t1).toBeGreaterThan(0);
     expect(t2).toBeGreaterThan(0);
     expect(Math.abs(t1 - t2)).toBeLessThanOrEqual(3);
@@ -935,7 +945,10 @@ describe('a world at rest', () => {
     spawnLog(w, { p: { x: 0, y: 1.2, z: -3 }, length: 1.6, r: 0.08 });
     spawnStone(w, { p: { x: 4, y: 0.4, z: 4 }, mass: 8, proto: 2 });
     spawnLog(w, { p: { x: -4, y: 0.3, z: 4 }, length: 3, mass: 60 });
-    for (let i = 0; i < 240; i++) w.step();
+    for (let i = 0; i < 240; i++) {
+      w.step();
+      if (i % 60 === 59) await yieldNow();
+    }
     const moving = w.entities.all().filter((e) => e.body && e.body.isEnabled() && e.body.isDynamic() && e.restTicks < 30);
     expect(moving.map((e) => e.id)).toEqual([]);
     const l = await load(serializeWorld(w));
@@ -945,6 +958,7 @@ describe('a world at rest', () => {
       w.step();
       l.step();
       if (t % 60 !== 0) continue;
+      await yieldNow();
       for (const e of w.entities.all()) {
         const f = l.entities.get(e.id)!;
         worstM = Math.max(worstM, dist(e.pose.p, f.pose.p));
