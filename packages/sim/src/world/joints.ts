@@ -498,12 +498,13 @@ export class JointStore implements TripwireSink {
    * Above the strand group's strength (ropeKN × 1000 per strand) every strand snaps; otherwise each end takes half of p
    * along the rope toward the crossing point, capped at m_end × |v·n̂| × tripwireEndSpeedMul: a dynamic end body as an
    * impulse queued for the next phase 4d (RF-2), an anchored end whose capacity the load beats pulled loose with its
-   * share, a fixed one into the ground. A `tripwire` event says what happened.
+   * share, a fixed one into the ground. A `tripwire` event says what happened, and where: the crossing point on the rope.
+   * Exempt: the rope's own end entities, ropes the crosser holds, and a crosser working on the rope or an entity at its
+   * ends (its work target in 'pickup', its tug, or its focus while in 'attack').
    * DEVIATION (orchestrator decision on P10's reported risk; replaces §4.9's "every dynamic end body gets an equal share
    * of impulse `p` along the rope toward the crossing point"): uncapped, an ape at 4 m/s puts 195 N·s on a 2.3 kg stake
    * it pulls loose, which leaves at ≈ 85 m/s and shatters; a rope can't throw its end faster than the body crossing it
-   * moves across it, so each end's share is at most its mass × the crosser's speed across the rope. Exempt: the rope's own end entities, ropes the crosser holds, and a crosser working on the
-   * rope or an entity at its ends (its work target in 'pickup', its tug, or its focus while in 'attack').
+   * moves across it, so each end's share is at most its mass × the crosser's speed across the rope.
    */
   tripwire(w: World, joint: number, by: Owner): void {
     const j = this.byId.get(joint);
@@ -547,11 +548,12 @@ export class JointStore implements TripwireSink {
     for (const s of strands) strength += this.strengthOf(s);
     const loosed: number[] = [];
     let snapped = false;
+    // The crossing point: the rope's point nearest the crosser (the event's point; the shares pull toward it).
+    const c = nearestOnSegment(ends.a, ends.b, at);
     if (load > strength) {
       snapped = true;
       for (const s of strands) this.remove(s.id, 'snap');
     } else {
-      const c = nearestOnSegment(ends.a, ends.b, at);
       // The crosser's speed across the rope (p = M·|v·n̂|): no end is sent off faster than this × tripwireEndSpeedMul.
       const across = p / M;
       for (const [an, P, Q] of [
@@ -574,7 +576,7 @@ export class JointStore implements TripwireSink {
         }
       }
     }
-    w.events.push({ type: 'tripwire', joint, by: copyOwner(by), loadN: load, snapped, loosed });
+    w.events.push({ type: 'tripwire', joint, by: copyOwner(by), loadN: load, snapped, loosed, point: copy3(c) });
   }
 
   /**

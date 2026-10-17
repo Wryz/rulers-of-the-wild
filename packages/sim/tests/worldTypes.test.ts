@@ -127,7 +127,7 @@ describe('world types', () => {
       { type: 'trip', f, at: v3(), why: 'cover', cause },
       { type: 'rise', f },
       { type: 'pit', f, on: true },
-      { type: 'tripwire', joint: 1, by: owners[2], loadN: 3902, snapped: false, loosed: [] },
+      { type: 'tripwire', joint: 1, by: owners[2], loadN: 3902, snapped: false, loosed: [], point: v3() },
       { type: 'pinned', f, on: true },
       { type: 'shove', ruler: f, entity: 3 },
       { type: 'deflect', ruler: f, along: v3(1) },

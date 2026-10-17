@@ -449,7 +449,7 @@ describe('dev panel: read-outs', () => {
       cause: { kind: 'entity', entityId: 17, fighterId: null, credit: ['p1'], held: false, feature: 'falling' },
     } as unknown as WorldEvent;
     panel.handle(impact, world);
-    panel.handle({ type: 'tripwire', joint: 4, by: { kind: 'fighter', id: 9, part: 'kcc' }, loadN: 812, snapped: true, loosed: [21] } as WorldEvent, world);
+    panel.handle({ type: 'tripwire', joint: 4, by: { kind: 'fighter', id: 9, part: 'kcc' }, loadN: 812, snapped: true, loosed: [21], point: { x: 0, y: 0.3, z: 0 } } as WorldEvent, world);
     panel.refresh(world);
     expect(text('impacts')).toMatch(/entity #17 \(falling\) 230 J → 12\.3 HP env \[p1\]/);
     expect(text('tripwires')).toMatch(/rope #4 by fighter#9: 812 N SNAPPED loosed 21/);
@@ -466,7 +466,7 @@ describe('dev panel: read-outs', () => {
     const { pane, panel } = setup();
     const ro = pane.folderAt(['Read-outs (live)'])!;
     loop.advance(1);
-    world.events.push({ type: 'tripwire', joint: 2, by: { kind: 'terrain' }, loadN: 50, snapped: false, loosed: [] } as WorldEvent);
+    world.events.push({ type: 'tripwire', joint: 2, by: { kind: 'terrain' }, loadN: 50, snapped: false, loosed: [], point: { x: 0, y: 0.3, z: 0 } } as WorldEvent);
     panel.refresh(world);
     panel.refresh(world); // the same tick is read once
     const trip = String(ro.bindings.find((b) => b.key === 'tripwires')!.value);

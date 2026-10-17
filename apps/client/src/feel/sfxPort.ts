@@ -277,7 +277,8 @@ export class SfxAdapter implements SfxPort {
         return;
       }
       case 'joint': {
-        const where = this.jointPoint(e.joint, world);
+        // Where it happened (a snapped or cut joint is gone from the world by now).
+        const where = e.point;
         if (e.what === 'snap') this.at(where, L.snap, () => s.snap());
         else if (e.what === 'cut') {
           this.at(where, L.snap, () => {
@@ -288,7 +289,8 @@ export class SfxAdapter implements SfxPort {
         return;
       }
       case 'tripwire': {
-        const where = this.jointPoint(e.joint, world);
+        // The crossing point on the rope (a snapped one is gone from the world by now).
+        const where = e.point;
         if (e.snapped) this.at(where, L.snap, () => s.snap());
         else this.at(where, L.creak, () => s.creak(0.6));
         return;
@@ -596,12 +598,6 @@ export class SfxAdapter implements SfxPort {
     const h = f.inventory?.hands;
     if (!h || h.mode !== 'wield') return null;
     return world.entities.get(h.entity)?.material ?? null;
-  }
-
-  /** The middle of a rope (from the ropes' view), or null (heard at the ears). */
-  private jointPoint(joint: number, world: World): V3 | null {
-    const r = world.joints.view().find((v) => v.joint === joint);
-    return r ? { x: (r.a.x + r.b.x) / 2, y: (r.a.y + r.b.y) / 2, z: (r.a.z + r.b.z) / 2 } : null;
   }
 
   private nearestRuler(world: World, at: V3): Fighter | null {

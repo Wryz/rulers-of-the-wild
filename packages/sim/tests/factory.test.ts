@@ -8,6 +8,7 @@
 // calls are checked against a stand-in that records them (P10 tests the rope and the lashing themselves).
 //
 // Scene numbers (sizes, masses, positions) are test constants, never tuning (§9).
+import RAPIER from '@dimforge/rapier3d-compat';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { resetTuning, setTuningValue, TUNING, tuningLeaves } from '../src/tuning/registry';
 import { CLEARING_TUNING } from '../src/world/clearing';
@@ -37,7 +38,7 @@ import {
 import { FELL_TUNING } from '../src/world/felling';
 import { MATERIALS } from '../src/world/materials';
 import { PHYSICS_TUNING, physicsReady } from '../src/world/physics';
-import { cylinderPoints, principalAxis, shapeVolume, taperEnd, triangulate } from '../src/world/shapes';
+import { cylinderPoints, flatPrism, principalAxis, shapeVolume, taperEnd, triangulate } from '../src/world/shapes';
 import type { Anchor, Entity, MaterialId, Pose3, Quat, Shape, V3 } from '../src/world/types';
 import { TOOL_TUNING, VERB_TUNING } from '../src/world/verbs/tuning';
 import { createWorld, type World, type WorldOptions } from '../src/world/world';
@@ -475,6 +476,122 @@ describe('rope coils', () => {
     expect(sinew.mass).toBeCloseTo(MATERIALS.sinew.density * Math.PI * 1e-4 * 10, 9);
     expect(() => spawnRopeCoil(w, { at: { x: 0, y: 0, z: 0 }, material: 'dryWood' as 'vine', lengthM: 5 })).toThrow(/rope-like/);
     expect(() => spawnRopeCoil(w, { at: { x: 0, y: 0, z: 0 }, material: 'vine', lengthM: 0 })).toThrow(/positive/);
+  });
+
+  /**
+   * 30 drops of `make` from 0.2-1 m over terrain `h`, stepped 6 s: how many end below the ground (their lowest vertex
+   * more than 5 cm under it) and the worst depth (m).
+   */
+  async function drops(h: (x: number, z: number) => number, make1: (w: World, x: number, y: number, z: number, i: number) => number) {
+    const w = await make({ size: 50 });
+    w.terrain.generate(h);
+    const ids: number[] = [];
+    for (let i = 0; i < 30; i++) {
+      const x = -18 + (i % 6) * 7 + 0.37 * (i % 5);
+      const z = -18 + Math.floor(i / 6) * 8 + 0.29 * (i % 7);
+      ids.push(make1(w, x, w.terrain.heightAt(x, z) + 0.2 + (0.8 * (i % 4)) / 3, z, i));
+    }
+    for (let t = 0; t < 360; t++) w.step();
+    let sunk = 0;
+    let worst = -Infinity;
+    for (const id of ids) {
+      const e = ent(w, id);
+      const depth = w.entities.depthBelowGround(e.shape, e.pose);
+      worst = Math.max(worst, depth);
+      if (depth > 0.05) sunk++;
+    }
+    return { sunk, worst };
+  }
+  const SLOPE2 = (x: number): number => 0.02 * x;
+  const ROUGH = (x: number, z: number): number => 0.6 * Math.sin(0.31 * x) * Math.cos(0.23 * z) + 0.25 * Math.sin(1.7 * x + 0.4) + 0.2 * Math.cos(1.3 * z);
+
+  it("a coil is a flat prism, so its collider is Rapier's cylinder of its volume (shapes.ts colliderDesc): its body weighs what its record does", async () => {
+    const w = await make();
+    const e = ent(w, spawnRopeCoil(w, { at: { x: 1, y: 0, z: 2 }, material: 'vine', lengthM: 20 }));
+    expect(flatPrism(e.shape as Extract<Shape, { kind: 'cylinder' }>)).toBe(true);
+    expect(e.collider!.shape.type).toBe(RAPIER.ShapeType.Cylinder);
+    expect(e.body!.mass()).toBeCloseTo(e.mass, 4);
+    // A stick, a log and a trunk lie on their sides: hulls of their prisms.
+    expect(flatPrism(stickPrism(2.4, 0.07))).toBe(false);
+    expect(flatPrism(logPrism(4.4, 0.23))).toBe(false);
+    expect(flatPrism(trunkPrism(0.3, 15))).toBe(false);
+    const stick = ent(w, spawnStick(w, { p: { x: 4, y: 0.1, z: 2 }, length: 2.4, r: 0.07 }));
+    expect(stick.collider!.shape.type).toBe(RAPIER.ShapeType.ConvexPolyhedron);
+  });
+
+  it.each([
+    ['a 2 % slope', SLOPE2],
+    ['rough terrain', ROUGH],
+  ] as const)('30 vine coils dropped on %s all come to rest on it (none sinks through the heightfield)', async (_, h) => {
+    const r = await drops(h, (w, x, y, z, i) => spawnRopeCoil(w, { at: { x, y, z }, material: 'vine', lengthM: 8 + 2 * (i % 7) }));
+    expect(r.sunk).toBe(0);
+    expect(r.worst).toBeLessThan(0.02);
+  });
+
+  it('30 flat 8-gon discs (cross-cut rounds) dropped tumbling on a 2 % slope and on flat ground come to rest on it', async () => {
+    for (const h of [SLOPE2, () => 0]) {
+      const r = await drops(h, (w, x, y, z, i) => {
+        const a = 0.7 * i;
+        const q = { x: Math.sin(a) * Math.sin(0.4 * i), y: 0, z: Math.cos(a) * Math.sin(0.4 * i), w: Math.cos(0.4 * i) };
+        return w.entities.create({ material: 'dryWood', shape: { kind: 'cylinder', halfHeight: 0.08, r: 0.33, sides: 8 }, p: { x, y: y + 0.3, z }, q, look: 'round' }).id;
+      });
+      expect(r.sunk).toBe(0);
+      expect(r.worst).toBeLessThan(0.02);
+    }
+  });
+});
+
+describe('stones, grass and coils tilted to the ground (q)', () => {
+  it('take a rotation, and set down tilted flush on a 15 % slope they rest where they were put; unrotated, they tip', async () => {
+    const w = await make({ size: 50 });
+    w.terrain.generate((x) => 0.15 * x);
+    // The slope's normal (−0.15, 1, 0)/|…| as a rotation of +y onto it (about z).
+    const a = Math.atan(0.15);
+    const tilt: Quat = { x: 0, y: 0, z: Math.sin(a / 2), w: Math.cos(a / 2) };
+    const rotate = (q: Quat, v: V3): V3 => {
+      const tx = 2 * (q.y * v.z - q.z * v.y);
+      const ty = 2 * (q.z * v.x - q.x * v.z);
+      const tz = 2 * (q.x * v.y - q.y * v.x);
+      return { x: v.x + q.w * tx + (q.y * tz - q.z * ty), y: v.y + q.w * ty + (q.z * tx - q.x * tz), z: v.z + q.w * tz + (q.x * ty - q.y * tx) };
+    };
+    const place = (z: number, q: Quat | undefined) => {
+      const at = (x: number) => ({ x, y: 0, z });
+      const stoneShape = stoneHull(12, 1, 'stone');
+      const sp = at(-6);
+      sp.y = groundRestY(w, sp.x, sp.z, stoneShape, q);
+      const stone = spawnStone(w, { p: sp, q, mass: 12, proto: 1, generated: true });
+      const gp = at(0);
+      gp.y = groundRestY(w, gp.x, gp.z, grassBox(2, FACTORY_TUNING.materials.grass), q);
+      const grass = spawnGrass(w, { p: gp, q, mass: 2, generated: true });
+      const coilShape = ropeCoilShape(16);
+      const c = at(6);
+      c.y = groundRestY(w, c.x, c.z, coilShape, q);
+      const up = rotate(q ?? { x: 0, y: 0, z: 0, w: 1 }, { x: 0, y: coilShape.halfHeight, z: 0 });
+      const coil = spawnRopeCoil(w, { at: { x: c.x - up.x, y: c.y - up.y, z: c.z - up.z }, q, material: 'vine', lengthM: 16, generated: true });
+      // The coil's centre is where it was asked to rest, and every one carries the rotation.
+      expect(ent(w, coil).pose.p.y).toBeCloseTo(c.y, 5);
+      for (const id of [stone, grass, coil]) {
+        const e = ent(w, id);
+        const want = q ?? { x: 0, y: 0, z: 0, w: 1 };
+        expect(Math.abs(e.pose.q.x * want.x + e.pose.q.y * want.y + e.pose.q.z * want.z + e.pose.q.w * want.w)).toBeCloseTo(1, 6);
+      }
+      return [stone, grass, coil];
+    };
+    const tilted = place(-5, tilt);
+    const flat = place(5, undefined);
+    const start = new Map([...tilted, ...flat].map((id) => [id, { ...ent(w, id).pose.p }]));
+    for (let t = 0; t < 120; t++) w.step();
+    const moved = (id: number): number => {
+      const p = ent(w, id).pose.p;
+      const s = start.get(id)!;
+      return Math.hypot(p.x - s.x, p.y - s.y, p.z - s.z);
+    };
+    for (const id of tilted) {
+      expect(moved(id), ent(w, id).look).toBeLessThan(0.01);
+      expect(ent(w, id).touched, ent(w, id).look).toBe(false);
+    }
+    // The control: set down unrotated on the slope, they settle (tip flush) and are touched (saved).
+    expect(flat.filter((id) => ent(w, id).touched).length).toBeGreaterThan(0);
   });
 });
 

@@ -156,16 +156,28 @@ export class Terrain implements GroundQuery {
 
   /**
    * Sets the generated heights from `h(x, z)` at every vertex (both `original` and the current heights, as float32),
-   * clears the dug mask, and refreshes every tile. Used by generation (generateClearing) before any edit.
+   * clears the dug mask, and refreshes every tile. Used by generation (generateClearing) before any edit. `h` must be a
+   * pure function of (x, z): it is read tile by tile, each tile's copy of a seam vertex at the same world (x, z) (from
+   * its global vertex index, minX + gi·spacing), so the copies match exactly.
    */
   generate(h: (x: number, z: number) => number): void {
-    for (let gj = 0; gj < this.vz; gj++) {
-      for (let gi = 0; gi < this.vx; gi++) {
-        const v = Math.fround(h(this.minX + gi * this.spacing, this.minZ + gj * this.spacing));
-        this.forEachCopy(gi, gj, (t, i) => {
-          this.original[t][i] = v;
-          this.heights[t][i] = v;
-        });
+    const n = this.cells;
+    const n1 = n + 1;
+    const sp = this.spacing;
+    for (let tz = 0; tz < this.tilesZ; tz++) {
+      for (let tx = 0; tx < this.tilesX; tx++) {
+        const t = tz * this.tilesX + tx;
+        const O = this.original[t];
+        const H = this.heights[t];
+        for (let c = 0; c <= n; c++) {
+          const x = this.minX + (tx * n + c) * sp;
+          const col = c * n1;
+          for (let r = 0; r <= n; r++) {
+            const v = Math.fround(h(x, this.minZ + (tz * n + r) * sp));
+            O[col + r] = v;
+            H[col + r] = v;
+          }
+        }
       }
     }
     for (const d of this.dug) d.fill(0);

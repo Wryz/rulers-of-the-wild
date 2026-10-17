@@ -371,9 +371,13 @@ export function spawnSapling(w: World, o: { at: XZ; diameter: number; height: nu
   return rooted(w, o, FACTORY_TUNING.materials.sapling, 'sapling').id;
 }
 
-/** A coil of vine or sinew rope `lengthM` long (ropeCoilShape), lying flat on a support at `at`. */
-export function spawnRopeCoil(w: World, o: { at: V3; material: 'vine' | 'sinew'; lengthM: number } & SpawnFlags): number {
-  return w.entities.create(coilSpec(o.material, o.lengthM, o.at, o.generated)).id;
+/**
+ * A coil of vine or sinew rope `lengthM` long (ropeCoilShape), lying flat on a support at `at`: `at` is the middle of
+ * its underside. `q` (default unrotated) tilts it, about that point, e.g. to the slope it lies on (its centre at
+ * at + q·(0, halfHeight, 0)).
+ */
+export function spawnRopeCoil(w: World, o: { at: V3; q?: Quat; material: 'vine' | 'sinew'; lengthM: number } & SpawnFlags): number {
+  return w.entities.create(coilSpec(o.material, o.lengthM, o.at, o.generated, o.q)).id;
 }
 
 /**
@@ -438,11 +442,11 @@ export function spawnLog(
   return create(w, { material, shape, p: o.p, q, state: o.state ?? 'free', sharpPoints, look: n > 0 ? 'snag' : 'log' }, o.generated).id;
 }
 
-/** A stone (or flint, or any material) hull: stone prototype `proto` (default 0) scaled to `mass`, unrotated. */
-export function spawnStone(w: World, o: { p: V3; mass: number; proto?: 0 | 1 | 2 | 3; material?: MaterialId } & SpawnFlags): number {
+/** A stone (or flint, or any material) hull: stone prototype `proto` (default 0) scaled to `mass`, at `p` rotated by `q` (default unrotated). */
+export function spawnStone(w: World, o: { p: V3; q?: Quat; mass: number; proto?: 0 | 1 | 2 | 3; material?: MaterialId } & SpawnFlags): number {
   const material = o.material ?? FACTORY_TUNING.materials.stone;
   const shape = stoneHull(o.mass, o.proto ?? 0, material);
-  return create(w, { material, shape, p: o.p, look: material }, o.generated).id;
+  return create(w, { material, shape, p: o.p, q: o.q, look: material }, o.generated).id;
 }
 
 /** A box of full extents `size` (scaffolding, a hide bait…). */
@@ -455,10 +459,10 @@ export function spawnBox(
   return create(w, { material: o.material, shape, p: o.p, q: o.q, state: o.state ?? 'free', look: o.look }, o.generated).id;
 }
 
-/** A grass bundle: a flat box of leaves and dry grass (grassBox) weighing `mass`. */
-export function spawnGrass(w: World, o: { p: V3; mass: number; size?: [number, number, number] } & SpawnFlags): number {
+/** A grass bundle: a flat box of leaves and dry grass (grassBox) weighing `mass`, at `p` rotated by `q` (default unrotated). */
+export function spawnGrass(w: World, o: { p: V3; q?: Quat; mass: number; size?: [number, number, number] } & SpawnFlags): number {
   const material = FACTORY_TUNING.materials.grass;
-  return create(w, { material, shape: grassBox(o.mass, material, o.size), p: o.p, look: 'grass' }, o.generated).id;
+  return create(w, { material, shape: grassBox(o.mass, material, o.size), p: o.p, q: o.q, look: 'grass' }, o.generated).id;
 }
 
 /**
@@ -553,13 +557,16 @@ function checkVine(v: VineSpec, treeHeight: number): void {
 }
 
 /** A rope coil's spec: `material` must be rope-like; it lies flat on a support at `at`. */
-function coilSpec(material: MaterialId, lengthM: number, at: V3, generated: boolean | undefined): EntitySpec {
+function coilSpec(material: MaterialId, lengthM: number, at: V3, generated: boolean | undefined, q?: Quat): EntitySpec {
   if (!isRopeLike(materialOf(material))) throw new Error(`factory: ${material} is not rope-like`);
   finite('x', at.x);
   finite('y', at.y);
   finite('z', at.z);
   const shape = ropeCoilShape(lengthM);
-  return { material, shape, p: { x: at.x, y: at.y + shape.halfHeight, z: at.z }, rope: { lengthM }, look: 'coil', generated: generated ?? false };
+  if (!q) return { material, shape, p: { x: at.x, y: at.y + shape.halfHeight, z: at.z }, rope: { lengthM }, look: 'coil', generated: generated ?? false };
+  const u = unitQuat(q);
+  const up = rotate(u, { x: 0, y: shape.halfHeight, z: 0 });
+  return { material, shape, p: { x: at.x + up.x, y: at.y + up.y, z: at.z + up.z }, q: u, rope: { lengthM }, look: 'coil', generated: generated ?? false };
 }
 
 /**

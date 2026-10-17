@@ -97,6 +97,45 @@ describe("an entity's integrity at its effective mass at the contact point (orch
     expect(pointMass(m, rod(m, L), Q0, { x: 0, y: L / 2, z: 0 }, { x: -1, y: 0, z: 0 })).toBeCloseTo(m / 4, 9);
   });
 
+  it('pointMass reads the world inertia R·diag(I)·Rᵀ: an asymmetric body at a non-axis-aligned rotation (and not its inverse)', () => {
+    const m = 50;
+    const I = { x: 2, y: 5, z: 9 };
+    // The principal frame's world rotation: 0.7 rad about (1, 2, 3)/|…|.
+    const k = 1 / Math.hypot(1, 2, 3);
+    const h = 0.35;
+    const q = { x: Math.sin(h) * k, y: 2 * Math.sin(h) * k, z: 3 * Math.sin(h) * k, w: Math.cos(h) };
+    const r = { x: 0.3, y: -0.8, z: 0.5 };
+    const nl = Math.hypot(0.2, 0.9, -0.4);
+    const n = { x: 0.2 / nl, y: 0.9 / nl, z: -0.4 / nl };
+    /** 1/(1/m + (r×n)ᵀ (R diag(I) Rᵀ)⁻¹ (r×n)) with R the matrix of `rot`, by plain 3 × 3 algebra. */
+    const direct = (rot: typeof q): number => {
+      const { x, y, z, w } = rot;
+      const R = [
+        [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+        [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+        [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
+      ];
+      const d = [I.x, I.y, I.z];
+      const Iw = [0, 1, 2].map((i) => [0, 1, 2].map((j) => R[i][0] * d[0] * R[j][0] + R[i][1] * d[1] * R[j][1] + R[i][2] * d[2] * R[j][2]));
+      const [[a, b, c], [dd, e, f], [g, hh, ii]] = Iw;
+      const det = a * (e * ii - f * hh) - b * (dd * ii - f * g) + c * (dd * hh - e * g);
+      const inv = [
+        [(e * ii - f * hh) / det, (c * hh - b * ii) / det, (b * f - c * e) / det],
+        [(f * g - dd * ii) / det, (a * ii - c * g) / det, (c * dd - a * f) / det],
+        [(dd * hh - e * g) / det, (b * g - a * hh) / det, (a * e - b * dd) / det],
+      ];
+      const u = [r.y * n.z - r.z * n.y, r.z * n.x - r.x * n.z, r.x * n.y - r.y * n.x];
+      let quad = 0;
+      for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) quad += u[i] * inv[i][j] * u[j];
+      return 1 / (1 / m + quad);
+    };
+    const want = direct(q);
+    near(pointMass(m, I, q, r, n), want, 1e-9);
+    // The inverse rotation gives another answer: the test tells the frame from its inverse.
+    const other = direct({ x: -q.x, y: -q.y, z: -q.z, w: q.w });
+    expect(Math.abs(other - want) / want).toBeGreaterThan(0.05);
+  });
+
   it('integrityMeff: the reduced mass of the two sides at the point; static sides and the terrain infinite, a creature its bone', () => {
     const log = { kind: 'entity' as const, massKg: 738, static: false, pointKg: 738 / 4 };
     const other = { kind: 'entity' as const, massKg: 300, static: false, pointKg: 120 };

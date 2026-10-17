@@ -322,6 +322,103 @@ describe('spoil: raise and the spoil search (§4.13, RT-2)', () => {
   });
 });
 
+describe('generate', () => {
+  beforeAll(async () => {
+    await physicsReady();
+  });
+
+  /**
+   * The heights generate() wrote before its tile-by-tile loop (SIM-fix2): every world vertex (gi, gj) read once, in
+   * rows of z then x, at (minX + gi·spacing, minZ + gj·spacing), as float32, into every tile that holds it (the old
+   * forEachCopy). Returns [original, heights] per tile.
+   */
+  function reference(t: Terrain, h: (x: number, z: number) => number): Float32Array[][] {
+    const n = t.cells;
+    const tiles = t.tilesX * t.tilesZ;
+    const O = Array.from({ length: tiles }, () => new Float32Array((n + 1) * (n + 1)));
+    const H = Array.from({ length: tiles }, () => new Float32Array((n + 1) * (n + 1)));
+    const vx = t.tilesX * n + 1;
+    const vz = t.tilesZ * n + 1;
+    for (let gj = 0; gj < vz; gj++) {
+      for (let gi = 0; gi < vx; gi++) {
+        const v = Math.fround(h(t.minX + gi * t.spacing, t.minZ + gj * t.spacing));
+        const xs: [number, number][] = [];
+        const zs: [number, number][] = [];
+        const tx = Math.floor(gi / n);
+        if (gi % n === 0 && tx > 0) xs.push([tx - 1, n]);
+        if (tx < t.tilesX) xs.push([tx, gi - tx * n]);
+        const tz = Math.floor(gj / n);
+        if (gj % n === 0 && tz > 0) zs.push([tz - 1, n]);
+        if (tz < t.tilesZ) zs.push([tz, gj - tz * n]);
+        for (const [z, r] of zs) {
+          for (const [x, c] of xs) {
+            O[z * t.tilesX + x][r + c * (n + 1)] = v;
+            H[z * t.tilesX + x][r + c * (n + 1)] = v;
+          }
+        }
+      }
+    }
+    return [O, H];
+  }
+
+  /** A seeded height function: a sum of 6 sines with random wave vectors, phases and amplitudes. */
+  function seeded(seed: number): (x: number, z: number) => number {
+    const rng = new Rng(seed);
+    const waves = Array.from({ length: 6 }, () => ({ kx: rng.range(-2, 2), kz: rng.range(-2, 2), ph: rng.range(0, 6.3), a: rng.range(0.01, 3) }));
+    return (x, z) => waves.reduce((s, q) => s + q.a * Math.sin(q.kx * x + q.kz * z + q.ph), 0);
+  }
+
+  /** The first byte where two float32 arrays differ, or -1 (byte for byte: −0 against 0 and NaN payloads count). */
+  function firstDiff(a: Float32Array, b: Float32Array): number {
+    const x = new Uint8Array(a.buffer, a.byteOffset, a.byteLength);
+    const y = new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
+    if (x.length !== y.length) return Math.min(x.length, y.length);
+    for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return i;
+    return -1;
+  }
+
+  it('fills the 200 m Clearing terrain (64 tiles of 101²) in ≤ 20 ms of its own time (the best of 5; the per-vertex version took 66 ms)', () => {
+    const p = new PhysicsWorld();
+    try {
+      const t = new Terrain(p, 200);
+      expect(t.tileCount).toBe(64);
+      const flat = (): number => 0;
+      let best = Infinity;
+      for (let k = 0; k < 5; k++) {
+        const a = performance.now();
+        t.generate(flat);
+        best = Math.min(best, performance.now() - a);
+      }
+      console.info(`terrain: generate(h ≡ 0) over 64 tiles, best of 5: ${best.toFixed(1)} ms`);
+      expect(best).toBeLessThanOrEqual(20);
+    } finally {
+      p.free();
+    }
+  });
+
+  it('writes byte for byte the heights the per-vertex version wrote, for seeded and awkward height functions', () => {
+    const fns: [string, (x: number, z: number) => number][] = [
+      ...[1, 2, 3, 20261017].map((s): [string, (x: number, z: number) => number] => [`seed ${s}`, seeded(s)]),
+      ['bumpy', bumpy],
+      ['exact bits', (x, z) => x * z * 1e-3 + 1 / 3 + x / 7],
+      ['steps', (x, z) => (Math.floor(x * 1.3) % 2 === 0 ? 0.5 : -0.25) + Math.floor(z / 3.7)],
+      ['large', (x, z) => 1e4 + x * 123.456 - z * z * 0.789],
+    ];
+    for (const size of [200, 75]) {
+      for (const [name, h] of fns) {
+        const t = new Terrain(null, size);
+        t.generate(h);
+        const [O, H] = reference(t, h);
+        expect(t.original.length).toBe(O.length);
+        for (let k = 0; k < O.length; k++) {
+          expect(firstDiff(t.original[k], O[k]), `${name}, ${size} m, tile ${k} original`).toBe(-1);
+          expect(firstDiff(t.heights[k], H[k]), `${name}, ${size} m, tile ${k} heights`).toBe(-1);
+        }
+      }
+    }
+  });
+});
+
 describe('seams and the save', () => {
   it('writes tile-edge vertices identically in every tile that has them, through generation and edits', () => {
     const t = new Terrain(null, 100);
