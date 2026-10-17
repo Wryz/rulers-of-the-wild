@@ -50,7 +50,8 @@ const BLOBS: readonly [number, number, number, number][] = [
 export function crownGeometry(): BufferGeometry {
   const parts: BufferGeometry[] = [];
   BLOBS.forEach(([x, y, z, r], b) => {
-    const g = new IcosahedronGeometry(r, 1).toNonIndexed();
+    // (A polyhedron is already non-indexed: one vertex per face corner, so flat faces keep their own colours.)
+    const g = new IcosahedronGeometry(r, 1);
     const pos = g.getAttribute('position');
     for (let i = 0; i < pos.count; i++) {
       const k = 1 + 0.12 * (hash2(b * 997 + Math.round(pos.getX(i) * 50), Math.round(pos.getY(i) * 50) * 31 + Math.round(pos.getZ(i) * 50)) - 0.5);

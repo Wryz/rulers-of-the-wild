@@ -380,8 +380,8 @@ export function notchedPrism(
 }
 
 /**
- * How deep a notch of `g` (a notchedPrism) is at local y (m in from the undisplaced cross-section's extent along
- * (fx, fz)): what the eye reads as the notch, measured from the vertices (tests).
+ * How deep a notch of `g` (a notchedPrism) is at local y: how far in from the uncut cross-section's extent along
+ * (fx, fz) the drawn cross-section at that height reaches, measured from the vertices (what the eye reads; tests).
  */
 export function notchDepthAt(g: BufferGeometry, y: number, fx: number, fz: number, r: number, sides: number): number {
   const pos = g.getAttribute('position');
@@ -390,12 +390,12 @@ export function notchDepthAt(g: BufferGeometry, y: number, fx: number, fz: numbe
     const a = ((k + 0.5) * Math.PI * 2) / sides;
     e = Math.max(e, r * (Math.cos(a) * fx + Math.sin(a) * fz));
   }
-  let lo = Infinity;
+  let hi = -Infinity;
   for (let i = 0; i < pos.count; i++) {
     if (Math.abs(pos.getY(i) - y) > 1e-6) continue;
-    lo = Math.min(lo, pos.getX(i) * fx + pos.getZ(i) * fz);
+    hi = Math.max(hi, pos.getX(i) * fx + pos.getZ(i) * fz);
   }
-  return Number.isFinite(lo) ? e - lo : 0;
+  return Number.isFinite(hi) ? e - hi : 0;
 }
 
 /** A rope coil: a flat ring (axis +y) filling the unit disc, half-height 1 (scaled to the coil's prism). */
@@ -463,8 +463,26 @@ function normalHull(points: readonly number[]): { pts: number[]; k: number } {
 
 const rotten = (e: Entity) => e.material === 'rottenWood';
 
+/** protoOf's answers by shape object (a shape is replaced, never edited, when it changes), then look and material. */
+const PROTOS = new WeakMap<Shape, Map<string, Proto>>();
+
 /** The shared geometry an entity is drawn with and the scale that fits it to the entity's shape. */
 export function protoOf(e: Entity): Proto {
+  const k = `${e.look}|${rotten(e) ? 'rot' : ''}`;
+  let byLook = PROTOS.get(e.shape);
+  if (!byLook) {
+    byLook = new Map();
+    PROTOS.set(e.shape, byLook);
+  }
+  let p = byLook.get(k);
+  if (!p) {
+    p = makeProto(e);
+    byLook.set(k, p);
+  }
+  return p;
+}
+
+function makeProto(e: Entity): Proto {
   const s = e.shape;
   const rot = rotten(e) ? ':rot' : '';
   switch (s.kind) {
@@ -638,13 +656,7 @@ export class EntityViews {
     for (const i of this.instancers.values()) i.end();
     this.sharp.end();
     this.cracks.end();
-    for (const [id, v] of this.own) {
-      if (seen.has(id)) continue;
-      v.mesh.removeFromParent();
-      v.mesh.geometry.dispose();
-      (v.mesh.material as MeshStandardMaterial).dispose();
-      this.own.delete(id);
-    }
+    for (const id of [...this.own.keys()]) if (!seen.has(id)) this.dropOwn(id);
     for (const id of this.drawn.keys()) if (!seen.has(id)) this.drawn.delete(id);
     // An instancer nothing has used for a minute goes (a fractured piece's one-off hull).
     for (const [k, i] of this.instancers) {
@@ -696,8 +708,16 @@ export class EntityViews {
     _m.copy(M).multiply(_m2.makeScale(p.sx, p.sy, p.sz));
     this.slots.set(e.id, { inst, index: inst.count });
     inst.push(_m, _col);
-    const own = this.own.get(e.id);
-    if (own) own.mesh.visible = false;
+    this.dropOwn(e.id);
+  }
+
+  private dropOwn(id: number): void {
+    const v = this.own.get(id);
+    if (!v) return;
+    v.mesh.removeFromParent();
+    v.mesh.geometry.dispose();
+    (v.mesh.material as MeshStandardMaterial).dispose();
+    this.own.delete(id);
   }
 
   /**
@@ -706,6 +726,7 @@ export class EntityViews {
    */
   private bendOf(e: Entity, capacity: number | null): { m: number; dir: V3; key: string } | null {
     const T = RENDER_TUNING;
+    if (e.integrity >= T.integritySag && capacity === null) return null;
     const ax = principalAxis(e.shape);
     const len = ax.max - ax.min;
     let amount = 0;
@@ -737,11 +758,7 @@ export class EntityViews {
     const key = `${shapeKey(e.shape)}|${cc ? `${cc.axisT.toFixed(3)}:${cc.remaining.toFixed(3)}:${cc.fromDir.x.toFixed(2)},${cc.fromDir.y.toFixed(2)},${cc.fromDir.z.toFixed(2)}` : '-'}|${bend?.key ?? '-'}|${_col.getHexString()}`;
     let v = this.own.get(e.id);
     if (!v || v.key !== key) {
-      if (v) {
-        v.mesh.removeFromParent();
-        v.mesh.geometry.dispose();
-        (v.mesh.material as MeshStandardMaterial).dispose();
-      }
+      this.dropOwn(e.id);
       const mesh = new Mesh(ownGeometry(e, bend, _col), flatMaterial({ vertexColors: true, roughness: materialLook(e.material).roughness }));
       mesh.castShadow = true;
       mesh.receiveShadow = true;
@@ -751,7 +768,6 @@ export class EntityViews {
       v = { mesh, key };
       this.own.set(e.id, v);
     }
-    v.mesh.visible = true;
     v.mesh.matrix.copy(M);
     v.mesh.matrixWorldNeedsUpdate = true;
   }
