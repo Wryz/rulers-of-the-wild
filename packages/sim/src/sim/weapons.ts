@@ -13,7 +13,10 @@ import type { Aim, DefenseKind, Key, MoveDef } from './moves';
 export type WeaponId =
   | 'cleaver' | 'machete' | 'gladius' | 'pan' | 'axe' | 'bat' | 'chair' | 'club'
   | 'crowbar' | 'sledgehammer' | 'cue' | 'bottle' | 'katana' | 'bokken' | 'pipe' | 'fireaxe'
-  | 'ninjato' | 'kunai';
+  | 'ninjato' | 'kunai'
+  // The Wild's primitive tools (docs/M1-DESIGN.md §5.2, P14): the tool class of a held object, read from its properties
+  // (world/verbs/tools.ts toolClass), never a recipe (rule 1). Same names as ToolClass.
+  | 'stick' | 'sharpStick' | 'spear' | 'stoneAxe' | 'longAxe' | 'cudgel' | 'stone' | 'flintBlade';
 export type WeaponStyle = 'oneHand' | 'twoHand';
 
 export interface WeaponDef {
@@ -80,7 +83,41 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
   // A throwing knife: a stab in the hand, but made to fly point first.
   kunai: { id: 'kunai', name: 'Kunai', style: 'oneHand', edge: 'blade', length: 0.26, strikeFrom: 0.08, radius: 0.03, damageMul: 1.3, cut: 0.7, cleave: 0, bite: 4, tempo: 0.8, mass: 0.2, choke: 0, light: 'hack', heavy: 'hack', chain: { hack: 'hack' } },
   fireaxe: { id: 'fireaxe', name: 'Fire Axe', style: 'twoHand', edge: 'blade', length: 0.9, strikeFrom: 0.68, radius: 0.09, damageMul: 1.5, cut: 1, cleave: 0.95, bite: 16, tempo: 1.1, mass: 2.8, choke: 0.42, ...TWO_HAND },
+  // The Wild's primitive tools (docs/M1-DESIGN.md §5.2, P14): the DS template each tool class starts from (SPEC:391-398).
+  // In a world a tool's WeaponDef is always made by synthWeapon (world/verbs/tools.ts) from the held object: its length,
+  // strike point, radius, mass and sharpness from the object, damageMul, cut, cleave, bite, tempo and choke from
+  // TOOL_TUNING; these rows give the rest (name, style, edge, techniques) and stand in where no object exists.
+  stick: { id: 'stick', name: 'Stick', style: 'twoHand', edge: 'blunt', length: 0.95, strikeFrom: 0.3, radius: 0.05, damageMul: 1, cut: 0, cleave: 0, bite: 0, tempo: 0.9, mass: 0.6, choke: 0, sharpness: 0, ...TWO_HAND },
+  // "Thrust only once sharpened" (SPEC:393); the committed overhead keeps it the digging stick (RR-9).
+  sharpStick: { id: 'sharpStick', name: 'Sharpened Stick', style: 'twoHand', edge: 'blade', length: 1.0, strikeFrom: 0.85, radius: 0.03, damageMul: 1, cut: 0.4, cleave: 0, bite: 4, tempo: 0.9, mass: 0.76, choke: 0.1, sharpness: 0.6, light: 'thrust', heavy: 'overhead', chain: { thrust: 'thrust' } },
+  // Gladius techniques, longer (SPEC:394).
+  spear: { id: 'spear', name: 'Spear', style: 'oneHand', edge: 'blade', length: 1.82, strikeFrom: 1.67, radius: 0.03, damageMul: 1.3, cut: 0.85, cleave: 0, bite: 8, tempo: 1, mass: 1.58, choke: 0, sharpness: 0.6, light: 'thrust', heavy: 'thrust', chain: { thrust: 'thrust' } },
+  // A machete's cuts (SPEC:395).
+  stoneAxe: { id: 'stoneAxe', name: 'Stone Axe', style: 'oneHand', edge: 'blade', length: 0.47, strikeFrom: 0.4, radius: 0.06, damageMul: 1.2, cut: 0.7, cleave: 0.45, bite: 10, tempo: 1, mass: 1.15, choke: 0, sharpness: 0.9, ...ONE_HAND_CUTS },
+  // A fire axe's two-handed swings.
+  longAxe: { id: 'longAxe', name: 'Long Axe', style: 'twoHand', edge: 'blade', length: 1.2, strikeFrom: 1.02, radius: 0.08, damageMul: 1.4, cut: 0.9, cleave: 0.8, bite: 14, tempo: 1.1, mass: 2.4, choke: 0.4, sharpness: 0.9, ...TWO_HAND },
+  // A bat (SPEC:396).
+  cudgel: { id: 'cudgel', name: 'Cudgel', style: 'twoHand', edge: 'blunt', length: 0.88, strikeFrom: 0.3, radius: 0.07, damageMul: 1.45, cut: 0, cleave: 0, bite: 0, tempo: 1, mass: 2.6, choke: 0.12, sharpness: 0, ...TWO_HAND },
+  // A bottle in the hand, a thrown stone in the air (SPEC:397).
+  stone: { id: 'stone', name: 'Stone', style: 'oneHand', edge: 'blunt', length: 0.2, strikeFrom: 0.08, radius: 0.06, damageMul: 1.1, cut: 0, cleave: 0, bite: 0, tempo: 0.85, mass: 1, choke: 0, sharpness: 0, light: 'hack', heavy: 'chop', chain: { hack: 'hack' } },
+  // A kunai: a stab and a slice.
+  flintBlade: { id: 'flintBlade', name: 'Flint Blade', style: 'oneHand', edge: 'blade', length: 0.15, strikeFrom: 0.05, radius: 0.03, damageMul: 1.2, cut: 0.8, cleave: 0, bite: 4, tempo: 0.8, mass: 0.3, choke: 0, sharpness: 0.9, light: 'hack', heavy: 'hack', chain: { hack: 'hack' } },
 };
+
+/** The primitive tools' WeaponIds (docs/M1-DESIGN.md §5.2; world/verbs/tools.ts ToolClass). */
+export const TOOL_WEAPON_IDS = ['stick', 'sharpStick', 'spear', 'stoneAxe', 'longAxe', 'cudgel', 'stone', 'flintBlade'] as const satisfies readonly WeaponId[];
+
+// WEAPONS enumerates the weapons that exist on their own: DungeonStyle's drops and loadouts, each drawn by the client's
+// buildWeapon from its id. A tool never exists on its own: its WeaponDef is synthesised from the entity in the hands,
+// which the client draws from the entity's shapes (§5.2). So a tool's template is a WEAPONS entry by id (WEAPONS[id],
+// own-property lookups, GORE) but is not enumerated with the weapons.
+// DEVIATION (P14): §1.2 appends the templates to WEAPONS, and apps/client/tests/weaponModels.test.ts asks buildWeapon
+// (render/weaponView.ts, P32) for a model of every enumerated WEAPONS entry, which a tool can only get from its entity.
+// So Object.keys/values/entries(WEAPONS) list only DungeonStyle's weapons, though its type is Record<WeaponId, …>.
+// TODO(P32-fix): give buildWeapon a model for each TOOL_WEAPON_IDS entry (or draw the held entity), then delete this
+// loop together with the assertion that pins it, tests/verbs.tools.test.ts ("A tool exists only as an entity: its
+// template is not enumerated", the `not.toContain(id)` line), which fails as soon as the loop goes.
+for (const id of TOOL_WEAPON_IDS) Object.defineProperty(WEAPONS, id, { enumerable: false });
 
 /**
  * What a weapon can actually do to a body beyond hurting it, weapon by weapon — not
@@ -132,6 +169,16 @@ export const GORE: Record<WeaponId, Gore> = {
   cue: NO_GORE,
   bottle: NO_GORE,
   bokken: NO_GORE,
+  // The Wild's primitive tools (docs/M1-DESIGN.md §5.2, P14): an axe's edge cuts as a machete's does; a point or a small
+  // blade stabs and slices; a heavy blunt branch caves a skull in like a club; a light stick or a stone only bruises.
+  stoneAxe: { crown: 'cleft', sever: 'forearms', decap: false, tear: true },
+  longAxe: { crown: 'cleft', sever: 'forearms', decap: false, tear: true },
+  spear: { crown: null, sever: 'none', decap: false, tear: true },
+  sharpStick: { crown: null, sever: 'none', decap: false, tear: true },
+  flintBlade: { crown: null, sever: 'none', decap: false, tear: true },
+  cudgel: { crown: 'crush', sever: 'none', decap: false, tear: false },
+  stick: NO_GORE,
+  stone: NO_GORE,
 };
 
 
@@ -395,6 +442,13 @@ Object.assign(WEAPON_MOVES, {
       { at: ['r', 1], pose: 'wGuard1', ease: 'inOut' },
     ],
   }),
+} satisfies Record<string, MoveDef>);
+
+// ---- The Wild (docs/M1-DESIGN.md §5.11, P14) ----------------------------------
+Object.assign(WEAPON_MOVES, {
+  // A spear thrown overarm, point first (spin 0: it lines up with its flight). The throw verb aims it and sets its speed
+  // (launchSpeed of VERB_TUNING.smallThrowSpeed, D-29); `speed` here is DS move data for an unaimed throw.
+  throwSpear: { ...WEAPON_MOVES.throwOne, id: 'throwSpear', name: 'Spear Throw', throw: { release: 16, speed: 20, spin: 0 } },
 } satisfies Record<string, MoveDef>);
 
 /**
