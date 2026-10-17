@@ -42,9 +42,12 @@ import { loadWorld, migrate, readSave } from '../src/save/load';
 import { SAVE_V1_KEYS, type SaveV1 } from '../src/save/schema';
 import { commandRecord, saveRecord, serializeWorld } from '../src/save/serialize';
 import { type Command, moveCommand, setTuningCommand, type VerbCommand } from '../src/sim/commands';
-import { IdCounter, LEGACY_IDS } from '../src/sim/fighter';
+import { createEnemy } from '../src/sim/enemies';
+import { type Fighter, IdCounter, LEGACY_IDS } from '../src/sim/fighter';
 import { Rng } from '../src/sim/math';
 import { createBrawler } from '../src/sim/roster';
+import { newRulerState } from '../src/sim/ruler';
+import { SPECIES_BODY } from '../src/sim/species';
 import { defineTuning, getTuningValue, resetTuning, setTuningValue, tuningSnapshot } from '../src/tuning/registry';
 import { spawnBox, spawnGrass, spawnLog, spawnRopeCoil, spawnStick, spawnStone } from '../src/world/factory';
 import { physicsReady } from '../src/world/physics';
@@ -142,6 +145,23 @@ function rulerSample(): RulerState {
     deflectedHeading: -0.5,
     pendingTrip: { why: 'cover', tick: 41, cause: { kind: 'terrain', entityId: null, fighterId: null, credit: [], held: false, feature: 'fall' } },
   };
+}
+
+/**
+ * A giant ape with its ruler body (the way world/creatures/factory.ts makes one, without a mind: P19's), standing at
+ * (x, z): scale 5.5, 14 t, a fresh RulerState.
+ */
+function addGiant(w: World, x: number, z: number): Fighter {
+  const ids = w.ids.fighter;
+  const { fighter: g } = createEnemy('bruiser', new Rng(4), {}, {}, { ids, rngSeed: w.rngs.fighterSeed(ids.next) });
+  g.scale = SPECIES_BODY.giantApe.scale;
+  g.massKg = SPECIES_BODY.giantApe.massKg;
+  g.species = 'giantApe';
+  g.ruler = newRulerState(SPECIES_BODY.giantApe.maxHp);
+  g.pos.set(x, w.terrain.heightAt(x, z), z);
+  w.addFighter(g, null);
+  w.teleport(g, x, z);
+  return g;
 }
 
 const text = (bytes: Uint8Array): string => new TextDecoder().decode(bytes);
@@ -619,7 +639,28 @@ const INVENTORY: Record<string, Record<string, string>> = {
     handedBack: 'saved: bodies[].slab.handedBack',
     dv: 'saved: bodies[].slab.dv',
   },
-  RulerBodies: { world: 'not saved: a link', mover: 'not saved: code (RulerMover)' },
+  RulerBodies: {
+    world: 'not saved: a link',
+    mover: 'not saved: code (RulerMover)',
+    byId: 'saved: bodies (each RulerBody as bodies[].ruler)',
+    shoves: 'not saved: shoves the mover queued in phase 3, applied in phase 4d of the same tick (empty at a tick end)',
+  },
+  RulerBody: {
+    f: 'not saved: the fighter (a link)',
+    body: 'not saved: the ruler body, rebuilt (its pose and velocities are in bodies[].ruler)',
+    cols: 'not saved: the bone colliders, rebuilt (posed from the rig standing, from the frozen pose in bodies[].ruler when dynamic)',
+    offs: 'not saved: derived from the scale',
+    keys: 'not saved: owner keys',
+    dynamic: 'saved: bodies[].ruler (its dynamic flag)',
+    local: 'saved: bodies[].ruler (its local frozen pose)',
+    hist: 'saved: bodies[].ruler (its history)',
+    jump: 'saved: bodies[].ruler (its jump flag)',
+    last: "not saved: the root after the last resolve, the fighter's position at a tick end (a load sets it from the fighter's record)",
+    climbFloor: 'saved: bodies[].ruler (its climbFloor)',
+    deflect: 'saved: bodies[].ruler (its deflect)',
+    supports: 'saved: bodies[].ruler (its supports)',
+    coverBreak: 'saved: bodies[].ruler (its coverBreak)',
+  },
   ContactSystem: {
     world: 'not saved: a link',
     episodes:
@@ -725,7 +766,7 @@ const AWAITING: Record<string, string> = {
 
 describe('completeness (RR-19)', () => {
   /** Every inventoried object of a populated world, by inventory entry. */
-  function systems(w: World, e: number): Record<string, object> {
+  function systems(w: World, e: number, giant: number): Record<string, object> {
     const rt = (w.entities as unknown as { rt: Map<number, object> }).rt;
     const byId = (system: object): Map<number, object> => (system as { byId: Map<number, object> }).byId;
     return {
@@ -753,6 +794,7 @@ describe('completeness (RR-19)', () => {
       DownedBodies: w.downed,
       Slab: byId(w.downed).get(1)!,
       RulerBodies: w.rulers,
+      RulerBody: byId(w.rulers).get(giant)!,
       ContactSystem: w.contacts,
       Deaths: w.deaths,
       VerbSystem: w.verbs,
@@ -766,8 +808,10 @@ describe('completeness (RR-19)', () => {
   it('every runtime field of every world system is saved, a system, or not saved for a reason', async () => {
     const w = await make({ nav: 'full' });
     const ids = populate(w);
+    // A ruler (P11's RulerBody is reached through it), away from the scene.
+    const giant = addGiant(w, -15, 15);
     run(w, 20, new Rng(4));
-    const sys = systems(w, ids.log);
+    const sys = systems(w, ids.log, giant.id);
     const diffs: { entry: string; notInInventory: string[]; notOnObject: string[] }[] = [];
     for (const [name, o] of Object.entries(sys)) {
       const have = Object.keys(o).sort();

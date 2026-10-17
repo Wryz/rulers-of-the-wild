@@ -370,8 +370,8 @@ export class World implements WorldPort {
    */
   teleport(f: Fighter, x: number, z: number, yaw?: number): void {
     const ground = this.terrain.heightAt(x, z);
-    // TODO(P11): pass the ruler's ankle height as maxAboveTerrainM, as RulerMover does (§4.7 step 1).
-    const y = this.supportAt(x, z, f.ruler ? ground : ground + WORLD_TUNING.teleportProbeM);
+    // A ruler stands on nothing higher than its ankle above the terrain (§4.7 step 1, as RulerMover does).
+    const y = f.ruler ? this.supportAt(x, z, ground, { maxAboveTerrainM: this.rulers.ankleM(f) }) : this.supportAt(x, z, ground + WORLD_TUNING.teleportProbeM);
     f.pos.set(x, y, z);
     if (yaw !== undefined) f.yaw = yaw;
     f.vel.set(0, 0, 0);
