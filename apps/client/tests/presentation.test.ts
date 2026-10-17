@@ -204,6 +204,13 @@ describe('downed bodies follow the sim (§10.5)', () => {
     ticks(w, pw, 120);
     expect(ape.state).toBe('ko');
     expect(dist(pw.ragdollOf(ape)!.pelvisPos(), w.downed.hip(ape.id)!)).toBeLessThan(0.35);
+    // The world shoves the corpse (a log's Δv on the slab, §4.5): the limp body goes with it (a free root stays put).
+    const before = { ...w.downed.hip(ape.id)! };
+    w.downed.queueDv(ape, { x: 3, y: 1, z: 2 });
+    ticks(w, pw, 90);
+    expect(ape.state).toBe('ko');
+    expect(dist(w.downed.hip(ape.id)!, before)).toBeGreaterThan(0.6);
+    expect(dist(pw.ragdollOf(ape)!.pelvisPos(), w.downed.hip(ape.id)!)).toBeLessThan(0.35);
   });
 
   it('the launch is the sim’s: the body’s bulk motion becomes the slab’s velocity and spin (no presentation throw)', async () => {
@@ -348,14 +355,33 @@ describe('level of detail (SPEC:655-656)', () => {
     expect(pw.ragdollCount).toBe(8);
   });
 
-  it('never gives the giant a ragdoll (its rig is the sim’s body, §10.5)', async () => {
+  it('never gives the giant a ragdoll, nor a place in the level of detail (its rig is the sim’s body, §10.5)', async () => {
     const w = await make({ seed: 9 });
-    const pw = present(w);
+    const p = w.player!;
+    // A stand-in ruler in the world's fighters (spawnCreature('giantApe') arrives with P11/P19; until then rulerTick
+    // throws, so only the presentation world steps with it here).
+    // TODO(P11/P19): a real giant from spawnCreature('giantApe'), stepped with the world.
     const { fighter: giant } = createEnemy('bruiser', new Rng(1), {}, {}, { ids: w.ids.fighter, rngSeed: 1 });
     giant.scale = 5.5;
     giant.ruler = {} as RulerState;
+    giant.pos.set(p.pos.x + 6, p.pos.y, p.pos.z);
+    w.addFighter(giant, null);
+    // The camera at the giant, one ragdoll: the giant is the nearest fighter, and still the player gets it.
+    const cam = { x: giant.pos.x, y: giant.pos.y + 2, z: giant.pos.z };
+    const pw = present(w, () => cam);
+    PRESENTATION_TUNING.maxRagdolls = 1;
+    for (let i = 0; i < 3; i++) pw.step(w);
+    expect(pw.ragdollOf(giant)).toBeNull();
+    expect(pw.ragdollOf(p)).not.toBeNull();
     expect(pw.attachRagdoll(giant)).toBeNull();
     expect(pw.bodyPose(giant)).toBeNull();
+    // Tripped or killed, it is still drawn from its rig (no ragdoll, no slab pose).
+    giant.enterKO();
+    PRESENTATION_TUNING.maxRagdolls = 8;
+    for (let i = 0; i < 3; i++) pw.step(w);
+    expect(pw.ragdollOf(giant)).toBeNull();
+    expect(pw.bodyPose(giant)).toBeNull();
+    w.removeFighter(giant);
   });
 
   it('a downed fighter beyond the level of detail is drawn as its rig laid on the slab', async () => {
@@ -502,6 +528,58 @@ describe('respawn (§10.8)', () => {
     expect(dist(rd.pelvisPos(), stale)).toBeGreaterThan(5);
     tick(w, pw);
     expect(Math.hypot(rd.pelvisPos().x - 8, rd.pelvisPos().z + 6)).toBeLessThan(0.3);
+  });
+
+  it('a body respawned from its corpse is drawn at the spawn, not on the corpse slab the sim still holds that tick', async () => {
+    // As the game loop runs it: the world steps (Deaths revives and teleports the player in phase 15, after phase 3
+    // posed the rig at the corpse; the slab stays active until the next tick's phase 4a), the events reach the bodies,
+    // then the presentation world steps.
+    const run = async (ragdolls: boolean) => {
+      const w = await make({ seed: 20 });
+      const p = w.player!;
+      const pw = present(w);
+      PRESENTATION_TUNING.maxRagdolls = ragdolls ? 8 : 0;
+      ticks(w, pw, 5);
+      knock(w, p, { kb: 2, ko: true });
+      ticks(w, pw, 90);
+      expect(p.state).toBe('ko');
+      const corpse = w.downed.hip(p.id)!;
+      if (ragdolls) expect(dist(pw.ragdollOf(p)!.pelvisPos(), corpse)).toBeLessThan(0.35);
+      else expect(dist(pw.bodyPose(p)!.cur.pelvis.p, corpse)).toBeLessThan(1e-6);
+      // Phase 15's respawn (P09's Deaths): patched up and teleported to the spawn.
+      p.hp = p.stats.maxHp;
+      p.enterLocomotion();
+      w.teleport(p, 8, -6, 1);
+      expect(w.downed.active(p)).toBe(true);
+      expect(dist(p.rig.pelvis.pos, corpse)).toBeLessThan(1.5); // the rig is still the corpse's
+      pw.handle({ type: 'respawn', f: p, at: { x: 8, y: 0, z: -6 } } as WorldEvent, w);
+      pw.snapTo(p); // Game's beat
+      return { w, p, pw, corpse };
+    };
+    const off = (at: V3) => Math.hypot(at.x - 8, at.z + 6);
+
+    const a = await run(true);
+    const rd = a.pw.ragdollOf(a.p)!;
+    expect(off(rd.pelvisPos())).toBeLessThan(0.3);
+    a.pw.step(a.w); // the respawn tick's presentation step: the slab still active, the rig still the corpse's
+    expect(a.w.downed.active(a.p)).toBe(true);
+    expect(off(rd.pelvisPos())).toBeLessThan(0.3);
+    let worst = 0;
+    for (let t = 0; t < 30; t++) {
+      tick(a.w, a.pw);
+      worst = Math.max(worst, off(rd.pelvisPos()));
+    }
+    expect(a.w.downed.active(a.p)).toBe(false);
+    expect(worst).toBeLessThan(0.3);
+
+    // Beyond the level of detail: drawn from the rig at the spawn, never laid on the corpse.
+    const b = await run(false);
+    b.pw.step(b.w);
+    expect(b.w.downed.active(b.p)).toBe(true);
+    expect(b.pw.bodyPose(b.p)).toBeNull();
+    tick(b.w, b.pw);
+    expect(b.pw.bodyPose(b.p)).toBeNull();
+    expect(off(b.pw.pelvisOf(b.p)())).toBeLessThan(0.3);
   });
 });
 
@@ -670,7 +748,24 @@ describe('tuning', () => {
     expect({ ...RAGDOLL_TUNING }).toEqual({ muscleGain: 0.55, rootGain: 0.45, impulseMul: 1, dipMul: 1, limpStrength: 0.12, strikeGain: 0.92, downRootGain: 0.15 });
     const pres = TUNING.find((e) => e.name === 'PRESENTATION_TUNING')!;
     expect(pres.folder).toBe('Client › presentation');
+    expect(pres.table).toBe(PRESENTATION_TUNING);
     expect(PRESENTATION_TUNING.maxRagdolls).toBe(8);
     expect(PRESENTATION_TUNING.mirrorRadiusM).toBe(30);
+    // DS bodyLanding's numbers (game.ts) are live keys, not bare constants.
+    expect({ ...PRESENTATION_TUNING }).toEqual({
+      maxRagdolls: 8,
+      mirrorRadiusM: 30,
+      lodHysteresisM: 2,
+      bodyFallSpeed: 1.4,
+      bodyFallStopFrac: 0.35,
+      bodyFallNearM: 0.45,
+      bodyFallQuietSteps: 20,
+      bodyFallHardSpeed: 5,
+    });
+    for (const k of Object.keys(PRESENTATION_TUNING)) {
+      const meta = pres.fields[k] as { unit?: string; source?: string };
+      expect(meta.unit, k).toBeTruthy();
+      expect(meta.source, k).toBeTruthy();
+    }
   });
 });
