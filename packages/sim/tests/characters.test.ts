@@ -19,6 +19,7 @@ import { kccQueryGroups } from '../src/world/groups';
 import { MATERIALS } from '../src/world/materials';
 import { physicsReady } from '../src/world/physics';
 import { shapeVolume } from '../src/world/shapes';
+import type { KccRecV1 } from '../src/save/schema';
 import type { ImpactCause, MaterialId, Quat, Shape, V3, WorldEvent } from '../src/world/types';
 import { createWorld, type World, type WorldOptions } from '../src/world/world';
 
@@ -88,6 +89,27 @@ function move(w: World, x: number, z: number, flags = 0): void {
 }
 
 const hdist = (a: V3, b: V3): number => Math.hypot(a.x - b.x, a.z - b.z);
+
+/** Whether the fighter's capsule, where Rapier holds it, overlaps entity `id`. */
+function capsuleOverlaps(w: World, f: Fighter, id: number): boolean {
+  const c = w.kcc.capsulePose(f)!;
+  const r = CHARACTER_TUNING.capsuleR * f.scale;
+  const half = w.kcc.heightOf(f) / 2 - r;
+  const hit = w.physics.rapier.intersectionWithShape(
+    c.p,
+    c.q,
+    new RAPIER.Capsule(half, r),
+    RAPIER.QueryFilterFlags.EXCLUDE_SENSORS,
+    kccQueryGroups(),
+    undefined,
+    undefined,
+    (col) => {
+      const o = w.physics.ownerOf(col.handle);
+      return o?.kind === 'entity' && o.id === id;
+    },
+  );
+  return hit !== null;
+}
 
 // ---------------------------------------------------------------------------
 
@@ -203,18 +225,30 @@ describe('the controller resolves the proposal (§4.2)', () => {
   it('standing still, the controller never shoves the fighter sideways (a body it overlaps reaches it through zones and knockback)', async () => {
     const w = await make({ seed: 7 });
     const p = w.player!;
-    entity(w, 'stone', { kind: 'box', hx: 0.1, hy: 1, hz: 0.1 }, { x: 4, y: 1, z: 0 }, 'fixed');
+    const stake = entity(w, 'stone', { kind: 'box', hx: 0.1, hy: 1, hz: 0.1 }, { x: 4, y: 1, z: 0 }, 'fixed');
     w.step();
-    w.teleport(p, 4, 0);
-    for (let t = 0; t < 20; t++) w.step();
-    expect(p.pos.x).toBe(4);
+    // Beside the 2 m stake, not on it: 0.15 m from its axis, on the ground, the capsule (r 0.3) 0.25 m into it.
+    // Without the rule Rapier's overlap recovery shoves the fighter 0.27 m out in one tick.
+    w.teleport(p, 4.15, 0);
+    w.step();
+    const x0 = p.pos.x;
+    expect(x0).toBe(Math.fround(4.15));
     expect(p.pos.z).toBe(0);
+    expect(Math.abs(p.pos.y)).toBeLessThan(1e-3);
+    for (let t = 0; t < 20; t++) {
+      w.step();
+      expect(capsuleOverlaps(w, p, stake)).toBe(true);
+      expect(p.pos.x).toBe(x0);
+      expect(p.pos.z).toBe(0);
+    }
     // Moving, the sweep resolves the overlap and the fighter walks out of the stake.
     for (let t = 0; t < 60; t++) {
       move(w, 0, 1);
       w.step();
     }
     expect(p.pos.z).toBeGreaterThan(0.5);
+    expect(Math.abs(p.pos.y)).toBeLessThan(1e-3);
+    expect(capsuleOverlaps(w, p, stake)).toBe(false);
     expect(w.kcc.collidedEntities(p)).toEqual([]);
   });
 
@@ -249,6 +283,38 @@ describe('the controller resolves the proposal (§4.2)', () => {
     const light = await over(40, 'free');
     expect(light.moved).toBeGreaterThan(0.5);
     expect(light.maxY).toBeLessThan(0.05);
+  });
+
+  it('climbs a light log jammed against a fixed kerb (D-28): the first contact pushes, a log that doesn’t yield is stepped over', async () => {
+    const w = await make({ seed: 9 });
+    // The 40 kg hex log of AC-6 (0.23 m high), and right behind it a fixed 0.2 m kerb it can't slide past.
+    const r = prismR(40, 'dryWood', 2.2, 6);
+    const id = entity(w, 'dryWood', { kind: 'cylinder', halfHeight: 1.1, r, sides: 6 }, { x: 0, y: r + 0.02, z: 0 }, 'free', LYING_Z);
+    entity(w, 'stone', { kind: 'box', hx: 0.1, hy: 0.1, hz: 2 }, { x: r + 0.1, y: 0.1, z: 0 }, 'fixed');
+    const p = w.player!;
+    w.teleport(p, -1.2, 0, Math.PI / 2);
+    for (let t = 0; t < 60; t++) w.step();
+    const start = { ...w.entities.get(id)!.pose.p };
+    let firstPush = -1;
+    let lastPush = -1;
+    let maxY = 0;
+    for (let t = 0; t < 240; t++) {
+      move(w, 0.5, 0);
+      w.step();
+      if (w.kcc.pushedEntities(p).includes(id)) {
+        if (firstPush < 0) firstPush = t;
+        lastPush = t;
+      }
+      maxY = Math.max(maxY, p.pos.y);
+    }
+    // Walked into, the log is pushed first (a free log would slide: AC-6), meets the kerb and stops; the controller
+    // reads that it didn't yield and climbs it, then the kerb, within a fraction of a second.
+    expect(firstPush).toBeGreaterThanOrEqual(0);
+    expect(lastPush - firstPush).toBeLessThan(20);
+    expect(hdist(w.entities.get(id)!.pose.p, start)).toBeLessThan(0.05);
+    expect(maxY).toBeGreaterThan(0.15);
+    expect(p.pos.x).toBeGreaterThan(2);
+    expect(Math.abs(p.pos.y)).toBeLessThan(1e-3);
   });
 });
 
@@ -351,16 +417,26 @@ describe('the player push (SPEC:374, 881; AC-6 part 1)', () => {
       expect(w.kcc.pushedEntities(p)).toEqual([]);
     }
     expect(met).toBeGreaterThan(10);
-    // A free log against a fighter standing still: met by the sweep, never pushed.
+    // A free log dropped against a fighter standing still, into its capsule: the fighter isn't shoved sideways and the
+    // log isn't pushed. (Rapier's KCC reports no collision for a sweep with no motion, so on the ground what the rule
+    // adds is that the overlap is never resolved sideways: without it the fighter is shoved 0.05 m here. The log's
+    // round lifts the capsule onto its edge instead: up or down is the controller's.)
     const w2 = await make({ seed: 14 });
+    const p2 = w2.player!;
+    w2.teleport(p2, -0.3, 0, Math.PI / 2);
+    w2.step();
+    const x0 = p2.pos.x;
+    expect(Math.abs(p2.pos.y)).toBeLessThan(1e-3);
     const r = prismR(40, 'dryWood', 2.2, 6);
     const id = entity(w2, 'dryWood', { kind: 'cylinder', halfHeight: 1.1, r, sides: 6 }, { x: 0, y: r + 0.02, z: 0 }, 'free', LYING_Z);
-    const p2 = w2.player!;
-    w2.teleport(p2, -0.38, 0, Math.PI / 2);
     for (let t = 0; t < 60; t++) {
       w2.step();
+      if (t === 0) expect(capsuleOverlaps(w2, p2, id)).toBe(true);
       expect(w2.kcc.pushedEntities(p2)).toEqual([]);
+      expect(p2.pos.x).toBe(x0);
+      expect(p2.pos.z).toBe(0);
     }
+    expect(Math.abs(w2.entities.get(id)!.pose.p.x)).toBeLessThan(0.01);
     expect(w2.entities.get(id)!.restTicks).toBeGreaterThan(0);
   });
 
@@ -585,6 +661,37 @@ describe('crouch with headroom (§4.2, RT-4)', () => {
     expect(over === null || w.physics.ownerOf(over.handle)?.kind === 'terrain').toBe(true);
   });
 
+  it('the headroom cast starts at this tick’s resolved place: letting go of crouch on the tick it moves under a log’s edge', async () => {
+    const w = await make({ seed: 33, player: false });
+    entity(w, 'greenWood', { kind: 'box', hx: 0.12, hy: 0.12, hz: 3 }, { x: 0, y: 1.62, z: 0 }, 'fixed');
+    const ape = addApe(w, -2, 0, Math.PI / 2);
+    ape.moveFlags = MOVE_CROUCH;
+    w.step(); // the teleport's placement
+    w.step();
+    expect(w.kcc.crouched(ape)).toBe(true);
+    // The standing capsule (r 0.33) comes within the controller's skin (0.022 m) of the log's side once its axis is
+    // within 0.12 + 0.33 + 0.022 m of the log's.
+    const edge = -(0.12 + 0.33 + 0.022);
+    let dx = 0;
+    for (let t = 0; t < 600 && !(ape.pos.x + dx > edge); t++) {
+      const x = ape.pos.x;
+      ape.moveInput.set(1, 0, 0);
+      w.step();
+      dx = ape.pos.x - x;
+      expect(w.kcc.crouched(ape)).toBe(true);
+    }
+    // The next step crosses the edge: let go of crouch on it.
+    const before = ape.pos.x;
+    expect(before).toBeLessThan(edge);
+    ape.moveFlags = 0;
+    ape.moveInput.set(1, 0, 0);
+    w.step();
+    expect(ape.pos.x).toBeGreaterThan(edge);
+    // From last tick's place there was room; from this tick's there isn't: it stays crouched.
+    expect(w.kcc.crouched(ape)).toBe(true);
+    expect(w.kcc.heightOf(ape)).toBeCloseTo(0.7 * 1.98, 6);
+  });
+
   it('a stooped work posture and a tug script crouch the capsule too', async () => {
     const w = await make({ seed: 32 });
     const p = w.player!;
@@ -630,6 +737,51 @@ describe('records and footsteps', () => {
     w.kcc.restoreRecord(JSON.parse(text));
     expect(JSON.stringify(w.kcc.toRecord())).toBe(text);
     expect(() => w.kcc.restoreRecord([{ fighter: 99, kcc: rec[0].kcc }])).toThrow(/no controller/);
+  });
+
+  it('after restoreRecord the first sweep starts at the restored pose, not where the capsule was (a load, §8.3)', async () => {
+    const w = await make({ seed: 44 });
+    const p = w.player!;
+    // A fixed wall between the recorded place and the one the fighter is at when the record is restored: a sweep
+    // from the old pose would stop at it.
+    entity(w, 'stone', { kind: 'box', hx: 0.2, hy: 1, hz: 3 }, { x: 2, y: 1, z: 0 }, 'fixed');
+    for (let t = 0; t < 5; t++) w.step();
+    const text = JSON.stringify(w.kcc.toRecord());
+    const feet = { x: p.pos.x, y: p.pos.y, z: p.pos.z };
+    w.teleport(p, 4, 0);
+    for (let t = 0; t < 5; t++) w.step();
+    expect(p.pos.x).toBe(4);
+    const rec: { fighter: number; kcc: KccRecV1 }[] = JSON.parse(text);
+    w.kcc.restoreRecord(rec);
+    p.pos.set(feet.x, feet.y, feet.z); // the loader restores the fighter's own position (§8.3)
+    for (let t = 0; t < 10; t++) {
+      w.step(); // no input
+      expect({ x: p.pos.x, y: p.pos.y, z: p.pos.z }).toEqual(feet);
+      expect(w.kcc.capsulePose(p)).toEqual(rec[0].kcc.pose);
+    }
+    expect(JSON.stringify(w.kcc.toRecord().map((r) => r.kcc.pose))).toBe(JSON.stringify(rec.map((r) => r.kcc.pose)));
+  });
+
+  it('records the pushes of the last tick (read by the next sweep: did the body yield?) and restores them exactly', async () => {
+    const w = await make({ seed: 45 });
+    const r = prismR(40, 'dryWood', 2.2, 6);
+    const id = entity(w, 'dryWood', { kind: 'cylinder', halfHeight: 1.1, r, sides: 6 }, { x: 0, y: r + 0.02, z: 0 }, 'free', LYING_Z);
+    const p = w.player!;
+    w.teleport(p, -0.5, 0, Math.PI / 2);
+    for (let t = 0; t < 30; t++) w.step();
+    let rec: { fighter: number; kcc: KccRecV1 }[] | null = null;
+    for (let t = 0; t < 30 && !rec; t++) {
+      move(w, 1, 0);
+      w.step();
+      if (w.kcc.pushedEntities(p).includes(id)) rec = w.kcc.toRecord();
+    }
+    expect(rec).not.toBeNull();
+    const k = rec![0].kcc;
+    expect(k.pushTick).toBe(w.tick);
+    expect(k.pushes).toEqual([{ entity: id, x: expect.closeTo(1, 6), z: expect.closeTo(0, 6) }]);
+    const text = JSON.stringify(rec);
+    w.kcc.restoreRecord(JSON.parse(text));
+    expect(JSON.stringify(w.kcc.toRecord())).toBe(text);
   });
 
   it('footwork.landed holds the feet that touched down this tick only', async () => {

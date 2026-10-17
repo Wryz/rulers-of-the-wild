@@ -14,7 +14,8 @@
 // - Grounded, the sweep's dy is 0 (autostep only works without a downward component, MAP rapier finding 5) and the
 //   controller snaps itself down slopes (Rapier's own snap acts only on a sweep that already moves down); airborne,
 //   gravity integrates vy. Climbing (autostep, D-28) steps over static bodies and over dynamic ones the push can't
-//   shove; a light log is pushed instead (see resolve).
+//   shove (anchored, too heavy, or jammed: pushed last tick and not moving); a light log is pushed instead (see
+//   resolve).
 // - Built-in pushing is off (SPEC:374, MAP rapier finding 1). A computed collision with a dynamic, non-anchored entity
 //   queues pushN × DT along the horizontal −normal1, once per entity per controller per tick, applied in phase 4d
 //   through the entity store's impulse queue in entity id order; friction decides (a 40 kg log slides, an 800 kg hull
@@ -44,6 +45,9 @@ export const CHARACTER_TUNING = defineTuning(
   'Bodies › controllers',
   {
     pushN: 500,
+    // A body this controller pushed last tick that moves slower than this along the push has not yielded (jammed
+    // against a rock, a stake, a pile): the controller climbs it if it is low enough (D-28), as it would a fixed one.
+    pushYieldSpeed: 0.02,
     capsuleR: 0.3,
     capsuleHalfH: 0.6,
     kccOffset: 0.02,
@@ -73,6 +77,10 @@ export const CHARACTER_TUNING = defineTuning(
   },
   {
     pushN: { unit: 'N', source: 'SPEC:374, 881' },
+    pushYieldSpeed: {
+      unit: 'm/s',
+      source: 'NEW: a 40 kg log jammed against a kerb reads −0.01 m/s after a push, a free one 0.15 m/s (P08 review)',
+    },
     capsuleR: { unit: 'm × scale', source: 'DS (BODY_RADIUS)' },
     capsuleHalfH: { unit: 'm × scale', source: 'NEW: 1.8 m tall' },
     kccOffset: { unit: 'm × scale', source: 'NEW: MAP rapier §3' },
@@ -135,6 +143,12 @@ interface Controller {
   /** Entity ids the last sweep touched, and the ones it pushed (in contact order; read-outs for tests and AC-6). */
   readonly collided: number[];
   readonly pushed: number[];
+  /**
+   * The pushes this controller queued at tick `pushTick` (entity id, unit horizontal direction): the next tick's sweep
+   * reads whether each of those bodies yielded (see metUnyielding). Saved with the record.
+   */
+  lastPushes: PushDir[];
+  pushTick: number;
   params: Params;
 }
 
@@ -142,6 +156,13 @@ interface Controller {
 interface Push {
   entity: number;
   j: V3;
+}
+
+/** The direction of a push a controller queued (unit, horizontal). */
+interface PushDir {
+  entity: number;
+  x: number;
+  z: number;
 }
 
 export class CharacterControllers implements FighterMover {
@@ -190,6 +211,8 @@ export class CharacterControllers implements FighterMover {
       teleport: null,
       collided: [],
       pushed: [],
+      lastPushes: [],
+      pushTick: -1,
       params,
     });
   }
@@ -214,6 +237,11 @@ export class CharacterControllers implements FighterMover {
     f.footwork.landed.length = 0;
     c.collided.length = 0;
     c.pushed.length = 0;
+    // Last tick's pushes (a body pushed then and not moving now has not yielded); none after a gap or a teleport.
+    const tick = this.world.tick;
+    const prior = c.pushTick === tick - 1 ? c.lastPushes : [];
+    c.lastPushes = [];
+    c.pushTick = tick;
     // Standing again with the controller still off (a respawn, a revive): it comes back where the fighter is now; the
     // slab is handed back in phase 4a (world/downed.ts).
     if (!c.enabled) {
@@ -245,19 +273,20 @@ export class CharacterControllers implements FighterMover {
     const desired = { x: f.pos.x - t.x, y: dy, z: f.pos.z - t.z };
     const filter = this.heldFilter(f);
     // Climbing (D-28) steps over static bodies, and over a dynamic one only when the push can't shove it (a felled
-    // trunk, a staked log): a log the push moves is pushed, not climbed (AC-6 part 1). DEVIATION (§9 autostepDynamic):
-    // Rapier's autostep takes dynamic bodies all or none; with all, the controller climbs onto a 40 kg log instead of
-    // pushing it (measured: it moved 0.32 m walking, 0.06 m running, against AC-6's > 1 m; the C lab's 2.26 m was
-    // measured with dynamic bodies left out). So the sweep leaves them out, and is run again with them in only when it
-    // met a dynamic body that doesn't yield to the push.
+    // trunk, a staked log, a light log jammed against a rock): a log the push moves is pushed, not climbed (AC-6
+    // part 1). DEVIATION (§9 autostepDynamic): Rapier's autostep takes dynamic bodies all or none; with all, the
+    // controller climbs onto a 40 kg log instead of pushing it (measured: it moved 0.32 m walking, 0.06 m running,
+    // against AC-6's > 1 m; the C lab's 2.26 m was measured with dynamic bodies left out). So the sweep leaves them out,
+    // and is run again with them in only when it met a dynamic body that doesn't yield to the push.
     this.sweep(c, desired, filter, false);
-    if (c.params.stepDyn && this.metUnyielding(c)) this.sweep(c, desired, filter, true);
+    if (c.params.stepDyn && this.metUnyielding(c, prior)) this.sweep(c, desired, filter, true);
     const m = c.cc.computedMovement();
     // Standing still (no horizontal proposal), the controller moves the fighter only up or down (snap, fall, out of the
     // ground): it never shoves a fighter sideways that isn't going anywhere (a log rolled against it, a teleport next to
-    // a stake). A body that moves into a fighter reaches it through the zones and knockback (SPEC:375); the sweep
-    // resolves the overlap as soon as the fighter moves. Nor does a fighter standing still push anything (SPEC:374's
-    // push is a walk into a body).
+    // a stake). Rapier's KCC pushes a capsule out of an overlap even on a zero sweep, without reporting a collision
+    // (measured: 0.27 m in one tick, beside a stake 0.15 m from the capsule's axis). A body that moves into a fighter
+    // reaches it through the zones and knockback (SPEC:375); the sweep resolves the overlap as soon as the fighter
+    // moves. Nor does a fighter standing still push anything (SPEC:374's push is a walk into a body).
     const still = f.pos.x === t.x && f.pos.z === t.z;
     const x = still ? t.x : Math.fround(t.x + m.x);
     let y = Math.fround(t.y + m.y);
@@ -282,7 +311,7 @@ export class CharacterControllers implements FighterMover {
     const crouch = this.wantsCrouch(f);
     if (crouch !== c.crouched) {
       const half = crouch ? crouchHalf(c) : c.halfH;
-      if (crouch || this.headroom(c, f)) {
+      if (crouch || this.headroom(c, f, { x, y, z })) {
         y = Math.fround(y + (half - c.halfNow));
         c.col.setHalfHeight(half);
         c.halfNow = half;
@@ -306,6 +335,7 @@ export class CharacterControllers implements FighterMover {
     c.body.setEnabled(on);
     c.vy = 0;
     c.grounded = true;
+    c.lastPushes = [];
   }
 
   /** The next resolve places the capsule here (feet point) and skips the sweep (MAP gap-1 §3.6). */
@@ -395,12 +425,18 @@ export class CharacterControllers implements FighterMover {
           enabled: c.enabled,
           halfHeight: c.halfNow,
           teleport: c.teleport ? { ...c.teleport } : null,
+          pushes: c.lastPushes.map((p) => ({ entity: p.entity, x: p.x, z: p.z })),
+          pushTick: c.pushTick,
         };
         return { fighter: c.f.id, kcc };
       });
   }
 
-  /** Puts each listed fighter's controller back as recorded (the fighters were added to the world first). */
+  /**
+   * Puts each listed fighter's controller back as recorded (the fighters were added to the world first). The capsules'
+   * colliders are moved with their bodies at once (Rapier moves a collider with its body only at the next step), so the
+   * first sweep after a load starts where the record says, not where the capsule was before it.
+   */
   restoreRecord(r: { fighter: number; kcc: KccRecV1 }[]): void {
     for (const { fighter, kcc } of r) {
       const c = this.byId.get(fighter);
@@ -422,9 +458,13 @@ export class CharacterControllers implements FighterMover {
       c.grounded = kcc.grounded;
       const tp = kcc.teleport as V3 | null | undefined;
       c.teleport = tp ? { x: tp.x, y: tp.y, z: tp.z } : null;
+      const pushes = Array.isArray(kcc.pushes) ? (kcc.pushes as PushDir[]) : [];
+      c.lastPushes = pushes.map((p) => ({ entity: p.entity, x: p.x, z: p.z }));
+      c.pushTick = typeof kcc.pushTick === 'number' ? kcc.pushTick : -1;
       c.collided.length = 0;
       c.pushed.length = 0;
     }
+    this.world.physics.rapier.propagateModifiedBodyPositionsToColliders();
   }
 
   // -------------------------------------------------------------------------
@@ -449,9 +489,10 @@ export class CharacterControllers implements FighterMover {
     const had = c.params;
     if (sameParams(want, had)) return;
     if (want.offset !== had.offset) {
-      // The feet stay where they are: the centre moves with the offset.
+      // The feet stay where they are: the centre moves with the offset (and the collider with it now, for this sweep).
       const t = c.body.translation();
       c.body.setTranslation({ x: t.x, y: Math.fround(t.y + want.offset - had.offset), z: t.z }, true);
+      this.world.physics.rapier.propagateModifiedBodyPositionsToColliders();
     }
     configure(c.cc, want);
     c.params = want;
@@ -466,15 +507,16 @@ export class CharacterControllers implements FighterMover {
   }
 
   /**
-   * Room to stand up (§4.2): the crouched capsule cast straight up by the height it would gain, from where it is,
-   * meets nothing (terrain, entities, the tripped ruler; sensors, other fighters and the held entity left out). A cast
-   * that starts touching the ground below and moves away from it is not a hit (stopAtPenetration false).
+   * Room to stand up (§4.2): the crouched capsule cast straight up by the height it would gain, from `centre` (this
+   * tick's resolved centre), meets nothing (terrain, entities, the tripped ruler; sensors, other fighters and the held
+   * entity left out). A cast that starts touching the ground below and moves away from it is not a hit
+   * (stopAtPenetration false).
    */
-  private headroom(c: Controller, f: Fighter): boolean {
+  private headroom(c: Controller, f: Fighter, centre: V3): boolean {
     const rise = 2 * (c.halfH - c.halfNow);
     if (!(rise > 0)) return true;
     const hit = this.world.physics.rapier.castShape(
-      c.col.translation(),
+      centre,
       IDENTITY,
       UP,
       new RAPIER.Capsule(c.halfNow, c.r),
@@ -499,10 +541,14 @@ export class CharacterControllers implements FighterMover {
   }
 
   /**
-   * Whether the last sweep met a dynamic entity the push can't shove: anchored (lashed to a stake), or heavy enough that
-   * its friction (its material's coefficient × its weight) is at least pushN.
+   * Whether the last sweep met a dynamic entity the push can't shove: anchored (lashed to a stake); heavy enough that
+   * its friction (its material's coefficient × its weight) is at least pushN; or pushed by this controller last tick
+   * (`prior`) and moving slower than pushYieldSpeed along that push now (jammed: a light log against a rock or a kerb).
+   * The first contact always pushes, so a free log slides (AC-6); a jammed one is climbed from the next tick on. The
+   * speed is the body's velocity now, as last tick's step left it (saved with the entity, so a load reads it too), not
+   * the pre-step store (phase 5), which holds the push's own impulse (+0.20 m/s on a jammed 40 kg log).
    */
-  private metUnyielding(c: Controller): boolean {
+  private metUnyielding(c: Controller, prior: readonly PushDir[]): boolean {
     const physics = this.world.physics;
     const entities = this.world.entities;
     const n = c.cc.numComputedCollisions();
@@ -516,6 +562,11 @@ export class CharacterControllers implements FighterMover {
       if (!e || !b || !b.isEnabled() || !b.isDynamic()) continue;
       if (entities.isAnchored(e)) return true;
       if (MATERIALS[e.material].friction * e.mass * Math.abs(WORLD_TUNING.gravityY) >= CHARACTER_TUNING.pushN) return true;
+      const last = prior.find((p) => p.entity === e.id);
+      if (last) {
+        const v = b.linvel();
+        if (v.x * last.x + v.z * last.z < CHARACTER_TUNING.pushYieldSpeed) return true;
+      }
     }
     return false;
   }
@@ -582,6 +633,7 @@ export class CharacterControllers implements FighterMover {
       const J = CHARACTER_TUNING.pushN * DT;
       this.pending.push({ entity: o.id, j: { x: (hx / l) * J, y: 0, z: (hz / l) * J } });
       c.pushed.push(o.id);
+      c.lastPushes.push({ entity: o.id, x: hx / l, z: hz / l });
     }
   }
 
