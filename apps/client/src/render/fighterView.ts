@@ -1,3 +1,8 @@
+// DungeonStyle's fighter view (changed for M1, docs/M1-DESIGN.md §10.4): one group of faceted blocks per bone, posed from
+// the ragdoll or the rig. M1 adds the apes' looks (palette addons: a heavy brow, a silver back), persistent ruler wounds
+// drawn where they are (scar(): a scar, an open gash, a missing eye; SPEC:845), and the one gore level every
+// gore-bearing visual reads (`gore`, rule 12): 'full' as DS, 'stylised' without wet blood and trickles, 'off' with no
+// blood at all (wounds still show, as dark marks: rule 3 needs them visible).
 import { BoxGeometry, BufferGeometry, Color, Group, Matrix4, Mesh, MeshStandardMaterial, Vector3 } from 'three';
 import type { Ragdoll } from '../body/ragdoll';
 import { type BoneName, BONES, SKELETON } from '@wild/sim';
@@ -6,6 +11,13 @@ import type { WeaponDef, Wound } from '@wild/sim';
 import { buildWeapon } from './weaponView';
 import { WeaponEdge } from '@wild/sim';
 import { FIST_OFFSET } from '@wild/sim';
+import { RENDER_TUNING } from './terrainView';
+
+/** Rule 12's gore setting (the same union as game/ports.ts GoreLevel). */
+export type Gore = 'off' | 'stylised' | 'full';
+
+/** A ruler wound's mark (scar()). */
+export type ScarKind = 'scar' | 'gash' | 'eye';
 
 export interface Palette {
   skin: string;
@@ -31,6 +43,10 @@ export interface Palette {
     mask?: string;
     /** Hair tied up on top. */
     topknot?: boolean;
+    /** A heavy ridge over the eyes (apes). */
+    brow?: boolean;
+    /** A silver back: this colour over the back of the chest and abdomen (the giant ape). */
+    silverBack?: string;
   };
 }
 
@@ -122,8 +138,12 @@ export class FighterView {
     for (const m of this.skinMats) m.roughness = 0.72 - 0.42 * s;
   }
 
+  /** Rule 12: what gore-bearing visuals show ('full' by default; M1 reads one value, game.ts). */
+  gore: Gore = 'full';
+
   /** Blood picked up by a fist off a bleeding face. */
   bloodyFist(side: 'L' | 'R', amount: number) {
+    if (this.gore === 'off') return;
     this.gloveBlood[side] = Math.min(0.55, this.gloveBlood[side] + amount);
     const base = new Color(this.palette.gloves);
     for (const m of this.gloveMats[side]) m.color.copy(base).lerp(BLOODY, this.gloveBlood[side]);
@@ -131,6 +151,7 @@ export class FighterView {
 
   /** A blade / club that has gone into someone stays red. */
   bloodyWeapon(amount: number) {
+    if (this.gore === 'off') return;
     this.weaponBlood = Math.min(1, this.weaponBlood + amount);
     this.tintWeapon();
   }
@@ -227,6 +248,15 @@ export class FighterView {
       }
     }
     if (A.tail) this.add('pelvis', box(0.05, 0.05, 0.4), 'skin', [0, 0.0, -0.25]).rotation.set(-0.6, 0, 0);
+    if (A.brow) this.add('head', box(0.27, 0.055, 0.07), 'hair', [0, 0.232, 0.115]);
+    if (A.silverBack) {
+      const silver = new MeshStandardMaterial({ color: A.silverBack, flatShading: true, roughness: 0.8 });
+      this.mats.chest.push(silver);
+      const back = new MeshStandardMaterial({ color: A.silverBack, flatShading: true, roughness: 0.8 });
+      this.mats.abdomen.push(back);
+      addMesh('chest', box(0.44, 0.27, 0.035), silver, [0, 0.15, -0.125]);
+      addMesh('abdomen', box(0.31, 0.2, 0.03), back, [0, 0.1, -0.105]);
+    }
 
     for (const side of ['L', 'R'] as const) {
       const ua = `upperArm${side}` as const;
@@ -441,19 +471,22 @@ export class FighterView {
     g.position.set(p[0], p[1], p[2]);
     // Face the surface normal; the gash runs across it at the wound's angle.
     g.quaternion.setFromUnitVectors(_up.set(0, 0, 1), _n.set(n[0], n[1], n[2]));
-    const gash = new Mesh(new BoxGeometry(w.length, 0.024, 0.008), WOUND_MAT);
+    const gash = new Mesh(new BoxGeometry(w.length, 0.024, 0.008), this.gore === 'off' ? MARK_MAT : WOUND_MAT);
     gash.rotation.z = w.angle;
-    const wet = new Mesh(new BoxGeometry(w.length * 0.7, 0.01, 0.01), WET_MAT);
-    wet.rotation.z = w.angle;
-    wet.position.z = 0.002;
-    g.add(gash, wet);
-    // Trickle runs "down" the limb (toward -Y of the bone), on the surface.
-    const down = _n.set(0, -1, 0).applyQuaternion(g.quaternion.clone().invert());
-    const len = 0.04 + w.bleed * 0.08;
-    const trickle = new Mesh(new BoxGeometry(0.014, len, 0.005), WOUND_MAT);
-    trickle.position.set(down.x * len * 0.5, down.y * len * 0.5, 0.001);
-    trickle.rotation.z = Math.atan2(down.x, -down.y);
-    g.add(trickle);
+    g.add(gash);
+    if (this.gore === 'full') {
+      const wet = new Mesh(new BoxGeometry(w.length * 0.7, 0.01, 0.01), WET_MAT);
+      wet.rotation.z = w.angle;
+      wet.position.z = 0.002;
+      g.add(wet);
+      // Trickle runs "down" the limb (toward -Y of the bone), on the surface.
+      const down = _n.set(0, -1, 0).applyQuaternion(g.quaternion.clone().invert());
+      const len = 0.04 + w.bleed * 0.08;
+      const trickle = new Mesh(new BoxGeometry(0.014, len, 0.005), WOUND_MAT);
+      trickle.position.set(down.x * len * 0.5, down.y * len * 0.5, 0.001);
+      trickle.rotation.z = Math.atan2(down.x, -down.y);
+      g.add(trickle);
+    }
     this.bones[w.bone].add(g);
     this.woundGroups.push(g);
   }
@@ -484,6 +517,7 @@ export class FighterView {
    * leaves a raw red gouge. (The piece itself flies off as a gib.)
    */
   tear(piece: string, bone: BoneName, local: [number, number, number], size: number) {
+    if (this.gore === 'off') return;
     if (piece === 'earL' || piece === 'earR') {
       const ear = this.ears[piece === 'earL' ? 'L' : 'R'];
       ear.visible = false;
@@ -520,7 +554,7 @@ export class FighterView {
    * midline, and the halves fall open from the jaw — raw inside, bone at the edges.
    */
   splitHead() {
-    if (this.split) return;
+    if (this.split || this.gore === 'off') return;
     const head = this.bones.head;
     const pivotY = 0.04;
     const halves = [1, -1].map((s) => {
@@ -592,6 +626,7 @@ export class FighterView {
 
   /** Caved in from above: the top of the head crushed down, raw where it burst. */
   crushHead() {
+    if (this.gore === 'off') return;
     const head = this.bones.head;
     for (const child of head.children) {
       if (!(child instanceof Mesh) || child.position.y < 0.12) continue;
@@ -608,6 +643,7 @@ export class FighterView {
    * to back, open and red, bone either side — the head stays in one piece.
    */
   cleftHead() {
+    if (this.gore === 'off') return;
     const g = new Group();
     const slot = new Mesh(new BoxGeometry(0.04, 0.09, 0.22), SPLIT_MAT);
     slot.position.set(0, 0.265, 0.01);
@@ -650,6 +686,79 @@ export class FighterView {
     end.position.set(0, lost === 'head' ? 0.02 : -0.01, 0);
     this.bones[lost].add(end);
     this.woundMeshes.push(cap, bone, end);
+  }
+
+  /** The marks scar() has made. */
+  private readonly marks = new Set<Group>();
+
+  /**
+   * A ruler's wound drawn where it is (SPEC:845), on the surface of the bone's block nearest `local` (bone frame, as DS's
+   * Wound.local): a healed `scar` (a pale ridge), an open `gash` (dark, red and wet with gore on), or a missing `eye`
+   * (the eye nearest `local` gone, a dark socket). `size` × RENDER_TUNING.wounds' length. Returns the mark (removeMark
+   * takes it off again, e.g. when a gash heals into a scar).
+   */
+  scar(bone: BoneName, local: [number, number, number], kind: ScarKind, size = 1): Group {
+    const W = RENDER_TUNING.wounds;
+    const g = new Group();
+    g.userData.kind = kind;
+    if (kind === 'eye' && bone === 'head' && this.eyes.length > 0) {
+      // The eye on that side (a cyclops has one).
+      let eye = this.eyes[0];
+      for (const e of this.eyes) if (Math.abs(e.position.x - local[0]) < Math.abs(eye.position.x - local[0])) eye = e;
+      eye.visible = false;
+      g.userData.eye = eye;
+      const socket = new Mesh(new BoxGeometry(0.06, 0.06, 0.012), this.gore === 'off' ? MARK_MAT : SOCKET_MAT);
+      socket.position.copy(eye.position);
+      socket.position.z -= 0.004;
+      g.add(socket);
+      const ridge = new Mesh(new BoxGeometry(0.012, 0.11, 0.008), SCAR_MAT);
+      ridge.position.copy(eye.position).setZ(eye.position.z + 0.002);
+      ridge.rotation.z = 0.25;
+      g.add(ridge);
+      this.bones.head.add(g);
+      this.marks.add(g);
+      return g;
+    }
+    const { p, n } = surfacePoint(bone, local);
+    g.position.set(p[0], p[1], p[2]);
+    g.quaternion.setFromUnitVectors(_up.set(0, 0, 1), _n.set(n[0], n[1], n[2]));
+    // A stable slant from where it is, so no two wounds look stamped.
+    const slant = ((((local[0] * 73.1 + local[1] * 37.7 + local[2] * 91.3) % 1) + 1) % 1 - 0.5) * 1.6;
+    if (kind === 'scar') {
+      const m = new Mesh(new BoxGeometry(W.scarLengthM * size, 0.016, 0.007), SCAR_MAT);
+      m.rotation.z = slant;
+      g.add(m);
+    } else {
+      const len = W.gashLengthM * size;
+      const gash = new Mesh(new BoxGeometry(len, 0.03, 0.009), this.gore === 'off' ? MARK_MAT : WOUND_MAT);
+      gash.rotation.z = slant;
+      g.add(gash);
+      if (this.gore === 'full') {
+        const wet = new Mesh(new BoxGeometry(len * 0.7, 0.012, 0.011), WET_MAT);
+        wet.rotation.z = slant;
+        wet.position.z = 0.002;
+        g.add(wet);
+      }
+    }
+    this.bones[bone].add(g);
+    this.marks.add(g);
+    return g;
+  }
+
+  /** Takes a mark scar() made off again (an eye it hid comes back). */
+  removeMark(g: Group) {
+    if (!this.marks.delete(g)) return;
+    g.removeFromParent();
+    const eye = g.userData.eye as Mesh | undefined;
+    if (eye) eye.visible = true;
+    g.traverse((o) => {
+      if (o instanceof Mesh) o.geometry.dispose();
+    });
+  }
+
+  /** How many marks scar() has made and not removed. */
+  get markCount(): number {
+    return this.marks.size;
   }
 
   /** Uniform model scale (giants / small creatures). */
@@ -738,6 +847,12 @@ const WOUND_MAT = new MeshStandardMaterial({ color: '#5e0a0a', roughness: 0.35, 
 const WET_MAT = new MeshStandardMaterial({ color: '#b3121a', roughness: 0.15, metalness: 0.1, flatShading: true });
 const STUMP_MAT = new MeshStandardMaterial({ color: '#9e1016', roughness: 0.3, flatShading: true });
 const BONE_MAT = new MeshStandardMaterial({ color: '#efe6d2', roughness: 0.6, flatShading: true });
+/** A wound with gore off: a dark mark, no blood (rule 12; rule 3 still shows it). */
+const MARK_MAT = new MeshStandardMaterial({ color: '#2a2220', roughness: 0.8, flatShading: true });
+/** A healed scar: a pale ridge. */
+const SCAR_MAT = new MeshStandardMaterial({ color: '#b8a294', roughness: 0.7, flatShading: true });
+/** An empty eye socket. */
+const SOCKET_MAT = new MeshStandardMaterial({ color: '#3a0808', roughness: 0.4, flatShading: true });
 const SPLIT_MAT = new MeshStandardMaterial({ color: '#b3121a', emissive: '#3a0303', roughness: 0.25, metalness: 0.1, flatShading: true });
 const BRAIN_MAT = new MeshStandardMaterial({ color: '#c97f86', roughness: 0.4, flatShading: true });
 const _up = new Vector3();
