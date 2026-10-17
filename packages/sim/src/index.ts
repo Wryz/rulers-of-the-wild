@@ -3,6 +3,7 @@ export * from './arena/themes';
 export * from './body/animator';
 export * from './body/footwork';
 export * from './body/idle';
+export * from './body/mass';
 export * from './body/motion';
 export * from './body/poses';
 export * from './body/skeleton';

@@ -4,7 +4,7 @@ import type { HurtZone } from '@wild/sim';
 import type { Fighter } from '@wild/sim';
 import { DT, smoothstep } from '@wild/sim';
 import type { MoveDef, Weight } from '@wild/sim';
-import { type BoneName, BONES, SKELETON } from '@wild/sim';
+import { type BoneName, BONE_MASS, BONES, SKELETON } from '@wild/sim';
 
 type R = typeof RAPIER_NS;
 
@@ -30,21 +30,6 @@ export const RAGDOLL_TUNING = {
   limpStrength: 0.12,
   /** Muscle gain while throwing a strike: crisp, on-time technique. */
   strikeGain: 0.92,
-};
-
-const MASS: Record<BoneName, number> = {
-  pelvis: 10,
-  abdomen: 8,
-  chest: 15,
-  head: 5.5,
-  upperArmL: 2.2,
-  foreArmL: 1.7,
-  upperArmR: 2.2,
-  foreArmR: 1.7,
-  thighL: 9,
-  shinL: 4.5,
-  thighR: 9,
-  shinR: 4.5,
 };
 
 interface Dip {
@@ -159,7 +144,7 @@ export class Ragdoll {
         const half = Math.max(0.01, def.length / 2 - def.radius * 0.5) * sc;
         cd = RAPIER.ColliderDesc.capsule(half, def.radius * sc).setTranslation(0, (def.dir * def.length * sc) / 2, 0);
       }
-      cd.setMass(MASS[name] * Math.pow(sc, 2.5)).setFriction(0.9).setRestitution(0.05).setCollisionGroups(groups(GROUP_BODY | this.slot, GROUP_ENV));
+      cd.setMass(BONE_MASS[name] * Math.pow(sc, 2.5)).setFriction(0.9).setRestitution(0.05).setCollisionGroups(groups(GROUP_BODY | this.slot, GROUP_ENV));
       world.createCollider(cd, body);
       this.bodies[name] = body;
       this.prev[name] = { p: x.pos.clone(), q: x.rot.clone() };
