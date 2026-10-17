@@ -161,13 +161,14 @@ export class SfxAdapter implements SfxPort {
   private panting(dt: number): void {
     const p = this.player();
     if (!p) return;
-    const tired = Math.max(0, Math.min(1, (0.4 - p.stamina) / 0.35));
+    const B = FEEL_TUNING.breath;
+    const tired = Math.max(0, Math.min(1, (B.tiredBelow - p.stamina) / Math.max(1e-6, B.tiredSpan)));
     if (!p.alive || tired <= 0) return;
     this.breathT -= dt;
     if (this.breathT > 0) return;
     this.breathOut = !this.breathOut;
     this.sfx.pant(this.breathOut, 0.5 + tired);
-    this.breathT = this.breathOut ? 0.42 - tired * 0.12 : 0.3 - tired * 0.08;
+    this.breathT = this.breathOut ? B.outS - tired * B.outQuickerS : B.inS - tired * B.inQuickerS;
   }
 
   // ---------------------------------------------------------------------------
@@ -299,7 +300,7 @@ export class SfxAdapter implements SfxPort {
         this.at(e.point, L.chop, () => {
           s.chop(d, true);
           // The last chops before it goes: the trunk creaks (SPEC:581).
-          if (below > 0 && e.remaining <= below) s.later(0.12, () => s.creak(1 - e.remaining / below));
+          if (below > 0 && e.remaining <= below) s.later(FEEL_TUNING.creaks.chopCreakDelayS, () => s.creak(1 - e.remaining / below));
         });
         return;
       }
@@ -322,15 +323,18 @@ export class SfxAdapter implements SfxPort {
       case 'dig':
         this.at(e.point, L.dig, () => s.dig());
         return;
-      case 'shove':
-      case 'deflect': {
-        const r = e.ruler;
-        this.at(r.pos, L.crack, () => {
+      case 'shove': {
+        // A ruler shoves an entity aside: it scrapes and knocks, by the entity's mass and material.
+        const ent = world.entities.get(e.entity);
+        this.at(ent?.pose.p ?? e.ruler.pos, L.crack, () => {
           s.scrape();
-          s.thud(400, 'wood', 0.6);
+          if (ent) s.thud(ent.mass, SOUND_OF[ent.material], 0.6);
         });
         return;
       }
+      case 'deflect':
+        this.at(e.ruler.pos, L.crack, () => s.scrape());
+        return;
       case 'respawn':
         if (e.f === this.player()) s.chime();
         this.quiet(e.f, world);
@@ -360,7 +364,7 @@ export class SfxAdapter implements SfxPort {
     const s = this.sfx;
     const c = e.cause;
     const ent = c.kind === 'entity' && c.entityId !== null ? world.entities.get(c.entityId) : undefined;
-    const hard = Math.min(1, e.energy / Math.max(1, e.defender.mass * 10));
+    const hard = Math.min(1, e.energy / Math.max(1, e.defender.mass * FEEL_TUNING.thuds.impactHardJPerKg));
     this.at(e.point, FEEL_TUNING.loud.crash, () => {
       if (ent) {
         s.thud(ent.mass, SOUND_OF[ent.material], hard);
@@ -465,7 +469,7 @@ export class SfxAdapter implements SfxPort {
       const vy = dt > 0 ? (f.pos.y - t.y) / dt : t.vy;
       const air = f.isAirborne();
       const dsLanding = t.air && !air && f.state === 'attack';
-      const fellFast = t.vy < -T.steps.jumpLandSpeed && vy > t.vy * 0.35 && t.vy > -T.steps.teleportSpeed;
+      const fellFast = t.vy < -T.steps.jumpLandSpeed && vy > t.vy * T.steps.landStopFrac && t.vy > -T.steps.teleportSpeed;
       if ((dsLanding || fellFast) && !quiet) this.jumpLanding(world, f);
       if (Math.abs(vy) > T.steps.teleportSpeed) t.quietUntil = tick + 2;
       t.air = air;
