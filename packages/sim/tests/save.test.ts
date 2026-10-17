@@ -1150,6 +1150,14 @@ describe('broken saves', () => {
     refuse((s) => ((((s.rulers as unknown[][])[0][1] as Record<string, unknown>).wounds as Record<string, unknown>[])[0].zone = 'tail'), 'rulers[0][1].wounds[0].zone is "tail"');
   });
 
+  it("checks a fighter record's fields against the ones this build writes, and the kinds of its lists", () => {
+    refuse((s) => delete (s.fighters as Record<string, unknown>[])[0].stamina, 'fighters[0].stamina is missing, not there');
+    refuse((s) => ((s.fighters as Record<string, unknown>[])[0].mood = 'calm'), "fighters[0] has a field this version doesn't have: mood");
+    refuse((s) => ((s.fighters as Record<string, unknown>[])[0].wounds = {}), 'fighters[0].wounds is {}, not an array');
+    refuse((s) => ((s.fighters as Record<string, unknown>[])[0].anim = null), 'fighters[0].anim is null, not an object');
+    refuse((s) => ((s.fighters as Record<string, unknown>[])[0].species = 'yeti'), 'fighters[0].species is "yeti"');
+  });
+
   it('checks weapons stored by value and ids against the counters and each other', () => {
     refuse((s) => ((s.fighters as Record<string, unknown>[])[0].weapon = { id: 'lightsaber', def: null }), 'fighters[0].weapon.id is "lightsaber", not a weapon id');
     refuse((s) => ((s.fighters as Record<string, unknown>[])[0].weapon = { id: 'bat', def: { id: 'axe' } }), /fighters\[0\]\.weapon\.def\.name is missing/);

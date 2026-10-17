@@ -772,13 +772,30 @@ function anchor(v: unknown, p: string): JointRecV1['a'] {
 
 // Fighters, combat, minds, verbs, the spawner --------------------------------------------
 
+let fighterKeys: readonly string[] | null = null;
+
 /**
- * A fighter record: its identity fields are checked here (the loader makes the fighter from them) and every weapon it
- * holds by value; every other field is checked by P04's Fighter.restoreRecord, which reads each through a checking
- * reader. Returned as it is (a copy is made by restoreRecord).
+ * The keys of a fighter record as this build writes them (P04's FighterRecord), read off a fresh fighter's record once
+ * (made with its own id counter, so the process-wide legacy counter is untouched).
+ */
+function fighterRecordKeys(): readonly string[] {
+  fighterKeys ??= Object.keys(createPlayer({ ids: new IdCounter(1), rngSeed: 1 }).toRecord([]));
+  return fighterKeys;
+}
+
+/** Fighter record fields P04's reader walks as arrays or objects (so a wrong kind fails here, by name). */
+const FIGHTER_ARRAYS = ['wounds', 'severed', 'torn', 'limbDamage', 'boneShare', 'armour', 'swingJitter'] as const;
+const FIGHTER_OBJECTS = ['defenseCooldown', 'stats', 'anim', 'footwork', 'idle', 'motion', 'pose'] as const;
+
+/**
+ * A fighter record: exactly the fields this build writes; its identity fields are checked here (the loader makes the
+ * fighter from them), its lists and nested records for their kind, and every weapon it holds by value; every value is
+ * then read by P04's Fighter.restoreRecord through a checking reader. Returned as it is (restoreRecord copies).
  */
 function fighter(v: unknown, p: string): SaveV1['fighters'][number] {
-  const o = obj(v, p);
+  const o = exactKeys(obj(v, p), fighterRecordKeys(), p);
+  for (const k of FIGHTER_ARRAYS) arr(o[k], `${p}.${k}`);
+  for (const k of FIGHTER_OBJECTS) obj(o[k], `${p}.${k}`);
   nat(o.id, `${p}.id`);
   nullable(o.playerId, `${p}.playerId`, str);
   nullable(o.species, `${p}.species`, (x, q) => oneOf(x, { human: true, ape: true, giantApe: true }, q));
