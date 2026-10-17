@@ -127,10 +127,28 @@ const PATIENCE = 150;
 /** The heaviest a weapon can be (for its body) and still be worth fighting with. */
 export const MAX_HEFT = 4.6;
 
+/**
+ * What drives a non-player fighter, called by CombatSim once per tick after `advance` (docs/M1-DESIGN.md §1.2, §6.1):
+ * DungeonStyle's BrawlerAI, or a creature's mind (world/creatures/mind.ts).
+ */
+export interface Brain {
+  /** Read by CombatSim (a `passive` brain never defends); tests and the dev panel tune it live. */
+  readonly cfg: AIConfig;
+  /** Turn-taking shared by CombatSim's enemies; CombatSim.add fills it in when null. */
+  director: AIDirector | null;
+  /** Weapons lying around (CombatSim.add shares its list). */
+  drops: Drop[];
+  /** The brain chooses `f.target` itself, so CombatSim.retarget leaves the fighter alone (creature minds). */
+  readonly ownsTarget: boolean;
+  think(self: Fighter, target: Fighter | null, walkable: Walkable | null): void;
+}
+
 /** Simple brawler: keeps punching range, throws telegraphed attacks, sometimes blocks. */
 const _probe = new Vector3();
 
-export class BrawlerAI {
+export class BrawlerAI implements Brain {
+  /** DS targeting: CombatSim locks onto the nearest opponent for it. */
+  readonly ownsTarget = false;
   private cooldown = 40;
   private strafe = 0;
   private strafeTimer = 0;

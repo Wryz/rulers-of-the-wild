@@ -43,14 +43,27 @@ export function approachAngle(from: number, to: number, maxStep: number): number
   return from + clamp(d, -maxStep, maxStep);
 }
 
-/** Small deterministic PRNG so the sim (and tests) are reproducible. */
+/**
+ * Small deterministic PRNG so the sim (and tests) are reproducible (mulberry32).
+ *
+ * The state is a uint32 that wraps (docs/M1-DESIGN.md §1.2): every use of it below goes through a 32-bit integer
+ * conversion, so wrapping gives the same outputs as DungeonStyle's unwrapped counter for as long as that counter
+ * stayed exact (4,917,759 draws), and the state saves and restores as one exact number.
+ */
 export class Rng {
   private s: number;
   constructor(seed = 1) {
     this.s = seed >>> 0 || 1;
   }
+  /** The whole generator state (uint32): restoring it continues the same sequence. */
+  get state(): number {
+    return this.s;
+  }
+  set state(v: number) {
+    this.s = v >>> 0;
+  }
   next(): number {
-    let t = (this.s += 0x6d2b79f5);
+    let t = (this.s = (this.s + 0x6d2b79f5) >>> 0);
     t = Math.imul(t ^ (t >>> 15), t | 1);
     t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
@@ -70,4 +83,18 @@ export class Rng {
     }
     return items[items.length - 1][0];
   }
+}
+
+/**
+ * The seed of one named random stream of a world (docs/M1-DESIGN.md §8.1): FNV-1a of the stream name (its UTF-16
+ * code units), mixed with the world seed and an id ('fighter' and 'mind' streams are per fighter id). Never 0.
+ * Generation, combat and every creature draw from their own stream, so a change to one never shifts another.
+ */
+export function seedFor(worldSeed: number, stream: string, id = 0): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < stream.length; i++) h = Math.imul(h ^ stream.charCodeAt(i), 0x01000193) >>> 0;
+  h = Math.imul(h ^ worldSeed, 0x9e3779b1) >>> 0;
+  h = Math.imul(h ^ id, 0x85ebca6b) >>> 0;
+  h = (h ^ (h >>> 16)) >>> 0;
+  return h || 1;
 }

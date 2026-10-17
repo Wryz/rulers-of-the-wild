@@ -21,8 +21,21 @@ import {
   solveArm,
   solveLegs,
 } from '../body/skeleton';
+import { boneMassShares, humanoidMass } from '../body/mass';
+import type {
+  Drive,
+  GroundQuery,
+  Inventory,
+  KnockRecord,
+  Posture,
+  RulerState,
+  SpeciesId,
+  Work,
+} from '../world/types';
 import { bladeFrame, gripSlide, heft, sampleOffsets, SECOND_HAND, WEAPON_MOVES, type WeaponDef, weaponTempo, type Wound } from './weapons';
 import { bodyCapsules, type Capsule, closestOnSegment } from './bodyShapes';
+import type { HurtZone } from './combat';
+import type { VerbCommand } from './commands';
 
 export interface FighterStyle {
   footwork: FootworkStyle;
@@ -58,8 +71,16 @@ export type FighterState =
   | 'getup'
   | 'ko'
   | 'celebrate'
-  /** Bending down for a weapon on the floor (committed, and open to being hit). */
-  | 'pickup';
+  /**
+   * Bending down for a weapon on the floor (committed, and open to being hit), or any committed work action
+   * (`Fighter.work`: tying, shaping, digging by hand, docs/M1-DESIGN.md §5.0).
+   */
+  | 'pickup'
+  /**
+   * A ruler knocked off its feet: its body is a dynamic physics body (world/rulerBody.ts) that owns the rig;
+   * CombatSim only counts `stateFrame` and runs forward kinematics (§4.7). Never entered in legacy CombatSim.
+   */
+  | 'tripped';
 
 /** Attack inputs: left/right punch, left/right kick. */
 export type Button = 'lpunch' | 'rpunch' | 'lkick' | 'rkick';
@@ -111,10 +132,32 @@ export interface Counter {
 export const GETUP_FRAMES = 40;
 export const KNOCKDOWN_FRAMES = 70;
 
-let nextId = 1;
+/**
+ * Where fighter ids come from (docs/M1-DESIGN.md §1.5.3, §8.1). A world owns one and passes it to every fighter it
+ * makes, so two worlds in one process number their fighters alike; ids are never reused.
+ */
+export class IdCounter {
+  constructor(public next = 1) {}
+  take(): number {
+    return this.next++;
+  }
+}
+
+/**
+ * The process-wide counter DungeonStyle had (a module-level `nextId`), for fighters made without a world: the legacy
+ * tests keep their numbering through it. World code never touches it.
+ */
+export const LEGACY_IDS = new IdCounter(1);
+
+export interface FighterOpts {
+  /** Default LEGACY_IDS. */
+  ids?: IdCounter;
+  /** The fighter's own Rng seed; default `id * 7919 + 13` (DungeonStyle's). A world passes seedFor(seed, 'fighter', id). */
+  rngSeed?: number;
+}
 
 export class Fighter {
-  readonly id = nextId++;
+  readonly id: number;
   readonly pos = new Vector3();
   /** Knockback / slide velocity on the ground plane (m/s). */
   readonly vel = new Vector3();
@@ -226,6 +269,58 @@ export class Fighter {
   wasBlocked = false;
   stats: FighterStats;
 
+  // ---------------------------------------------------------------------------
+  // M1 (docs/M1-DESIGN.md §1.5.3). Every default reproduces DungeonStyle; the world sets the rest.
+  // ---------------------------------------------------------------------------
+
+  /** Body mass (kg); null: the humanoid body (`baseMassKg`) × scale³. */
+  massKg: number | null = null;
+  /**
+   * The humanoid body's mass at scale 1 (kg), from BODY_MASS_TUNING when the fighter is made, with `boneShare`: both
+   * are per-entity state fixed at creation (§1.5.11), so a live edit of the table reaches new fighters only and an
+   * existing one keeps bone masses that add up (its mass × its shares). Saved with the fighter (P04).
+   */
+  baseMassKg = humanoidMass();
+  /** Each bone's share of `mass` (m_eff of a struck bone, §4.3), from BODY_MASS_TUNING when the fighter is made. */
+  boneShare: Readonly<Record<BoneName, number>> = boneMassShares();
+  /** The species' hide (J), the toughness every zone has (0 for humans and apes; rulers use their zones). */
+  toughnessJ = 0;
+  species: SpeciesId | null = null;
+  /** The player id credit goes to ('p1' for the local player); null for creatures. */
+  playerId: string | null = null;
+  /** The last time something knocked this fighter about, and by whom (environmental kills, §4.4). */
+  lastKnock: KnockRecord | null = null;
+  /** J added per zone by worn items (Σ of their materials' armourJ), derived when the worn items change (RR-3). */
+  armour: Partial<Record<HurtZone, number>> = {};
+  ruler: RulerState | null = null;
+  /** The ground under this fighter (footwork plants the feet on it); set by CombatSim when not flat. */
+  ground: GroundQuery | null = null;
+  /** Hands, belt and back (players only). */
+  inventory: Inventory | null = null;
+  /** What the hands are hauling, derived by the verb system when the hands change. */
+  load: { massKg: number; mode: 'carry' | 'drag' | 'rope' } | null = null;
+  /** Locomotion written by a mind instead of moveInput (the giant, scripted charges). */
+  drive: Drive | null = null;
+  /** An upper-body pose blended over the animation. */
+  posture: Posture | null = null;
+  /** A committed work action (state 'pickup'); see startWork. */
+  work: Work | null = null;
+  /** A buffered verb, re-tried until it starts or its frames run out (§5.0). */
+  verbRequest: { cmd: VerbCommand; frames: number } | null = null;
+  /** A focused world point: strikes aim at it when not locked on. */
+  verbAim: Vector3 | null = null;
+  /** A throw's aim: release() launches at launchSpeed(m, techSpeed) × speedFrac along dir. */
+  throwAim: { dir: Vector3; speedFrac: number; techSpeed: number } | null = null;
+  /** MOVE_SPRINT | MOVE_CROUCH, from the last move command. */
+  moveFlags = 0;
+  /**
+   * Ticks left on a buffered jump press (MOVE_TUNING.jumpBufferFrames). CombatSim owns the countdown (one tick off
+   * after each mover call, in separate()); the character controller only reads it and zeroes it when it jumps.
+   */
+  jumpRequest = 0;
+  /** Idle life paused: no weight shift, look-around, feint or breathing (AC-5's "AI paused", §12.2 I16). */
+  idlePaused = false;
+
   readonly anim = new Animator();
   /** Final animated target pose (what hit detection and the ragdoll follow). */
   readonly pose = makePose();
@@ -251,9 +346,11 @@ export class Fighter {
     readonly moves: Record<string, MoveDef>,
     stats: Partial<FighterStats> = {},
     style: FighterStyle = OUTFIGHTER_STYLE,
+    opts: FighterOpts = {},
   ) {
+    this.id = (opts.ids ?? LEGACY_IDS).take();
     this.stats = { ...DEFAULT_STATS, ...stats };
-    this.rng = new Rng(this.id * 7919 + 13);
+    this.rng = new Rng(opts.rngSeed ?? this.id * 7919 + 13);
     this.anim.source = this.pose;
     this.footwork = new Footwork({ ...style.footwork });
     this.idle = new IdleBehavior({ ...style.idle }, this.rng);
@@ -266,6 +363,11 @@ export class Fighter {
 
   get alive() {
     return this.state !== 'ko';
+  }
+
+  /** Body mass (kg): `massKg`, or the humanoid body as it was when this fighter was made × scale³. */
+  get mass(): number {
+    return this.massKg ?? this.baseMassKg * this.scale ** 3;
   }
 
   /** Can act freely (walk / start an attack / start a defense). */
@@ -405,7 +507,10 @@ export class Fighter {
       this.stuckUntil = 0;
     }
     if (s !== 'defend') this.defense = null;
-    if (s !== 'pickup') this.pickupTarget = null;
+    if (s !== 'pickup') {
+      this.pickupTarget = null;
+      this.work = null;
+    }
   }
 
   /** The weapon being reached for, and when the hands close on it. */
@@ -418,6 +523,8 @@ export class Fighter {
    */
   startPickup(target: { pos: Vector3; weapon: WeaponDef }, frames: number) {
     this.setState('pickup');
+    // (A weapon pickup is no work action: setState keeps `work` within 'pickup'.)
+    this.work = null;
     this.pickupRequest = 0;
     this.stunFrames = frames;
     const grabAt = Math.round(frames * 0.5);
@@ -432,6 +539,20 @@ export class Fighter {
       // Heavier things come up slower: most of the effort is in the first half.
       { f: frames, pose: up, ease: 'inOut' },
     ]);
+  }
+
+  /**
+   * A committed work action (docs/M1-DESIGN.md §5.0): state 'pickup' for `w.frames` frames, playing `w.keys`; the
+   * verb's effect lands at stateFrame === w.actAt through the world (CombatSim.advancePickup), which re-validates it.
+   */
+  startWork(w: Work) {
+    this.setState('pickup');
+    this.pickupTarget = null;
+    this.pickupRequest = 0;
+    this.stunFrames = w.frames;
+    this.work = w;
+    this.idle.interrupt();
+    if (w.keys.length) this.anim.play(w.keys);
   }
 
   /** @param aimId force a specific aim (tests, scripted moves); otherwise one is picked. */
@@ -537,7 +658,8 @@ export class Fighter {
     const ox = t.pos.x - this.pos.x;
     const oz = t.pos.z - this.pos.z;
     const side = (ox * fz - oz * fx) / Math.max(0.01, Math.hypot(ox, oz));
-    const h = targetHeight(t, aim?.height ?? move.height) + (aim?.edgeDy ?? 0) * t.scale;
+    // The target's height above our own feet (docs/M1-DESIGN.md §4.1): on terrain the feet aren't at y = 0.
+    const h = targetHeight(t, aim?.height ?? move.height) + (aim?.edgeDy ?? 0) * t.scale - this.pos.y;
     return {
       target: [side * ahead * 0.5 / this.scale, h / this.scale, ahead / this.scale],
       strikeAt: Math.max(w.strikeFrom + 0.06, w.length - (w.edge === 'blade' && w.style === 'twoHand' ? 0.14 : 0.08)),
@@ -581,7 +703,8 @@ export class Fighter {
     const t = this.target;
     if (!t || !t.alive) return 0;
     const h = aim?.height ?? move.height;
-    const gap = targetHeight(t, h) / this.scale - AUTHORED_HEIGHT[h];
+    // Measured from our own feet (§4.1), so strikes fit the same on raised ground.
+    const gap = (targetHeight(t, h) - this.pos.y) / this.scale - AUTHORED_HEIGHT[h];
     return Math.abs(gap) < 0.1 ? 0 : gap - Math.sign(gap) * 0.1;
   }
 
@@ -655,15 +778,21 @@ export class Fighter {
     this.anim.play([{ f: 6, pose: getPose('limp'), ease: 'out' }]);
   }
 
-  enterGetup() {
+  /**
+   * Getting up. `frames` and `keys` default to DungeonStyle's 40-frame kneel-and-rise; the giant rises over 94
+   * frames on its own track (§4.7: a 1-frame kneel key would sweep its zones at 398.8 m/s).
+   */
+  enterGetup(frames = GETUP_FRAMES, keys?: TrackKey[]) {
     this.setState('getup');
-    this.stunFrames = GETUP_FRAMES;
+    this.stunFrames = frames;
     this.poise = this.stats.maxPoise;
-    this.anim.play([
-      { f: 1, pose: getPose('kneel') },
-      { f: Math.floor(GETUP_FRAMES * 0.55), pose: getPose('kneel') },
-      { f: GETUP_FRAMES, pose: getPose('guard'), ease: 'inOut' },
-    ]);
+    this.anim.play(
+      keys ?? [
+        { f: 1, pose: getPose('kneel') },
+        { f: Math.floor(frames * 0.55), pose: getPose('kneel') },
+        { f: frames, pose: getPose('guard'), ease: 'inOut' },
+      ],
+    );
   }
 
   enterKO() {
@@ -709,6 +838,12 @@ export class Fighter {
    * is used to keep stepping while pivoting.
    */
   updatePose(speed: number, localDirX: number, localDirZ: number, turnRate = 0) {
+    // Tripped: the ruler's physics body poses the rig (world/rulerBody.ts writes `pose` from it after each step);
+    // here only forward kinematics runs, which reproduces that rig (§4.7). No animation, footwork or idle life.
+    if (this.state === 'tripped') {
+      forwardKinematics(this.pose, this.rig, this.pos, this.yaw, this.scale);
+      return;
+    }
     this.breath += 1 / 60;
     this.turnRate = turnRate;
     const speedFrac = clamp(speed / Math.max(0.1, this.stats.walkSpeed), 0, 1);
@@ -720,6 +855,7 @@ export class Fighter {
     this.updateMotion(t, dist);
     const engaged = dist < 3.2;
     const still = this.state === 'idle' && speed < 0.25;
+    this.idle.paused = this.idlePaused;
     this.idle.tick(engaged, still);
 
     const handStrike = this.state === 'attack' && this.move?.layer === 'upper';
@@ -758,7 +894,7 @@ export class Fighter {
     }
     forwardKinematics(this.pose, this.rig, this.pos, this.yaw, this.scale);
     // Authored-leg animations (kicks, defense, reactions): feet are wherever the pose put them.
-    if (!driven) this.footwork.syncToRig(this.rig);
+    if (!driven) this.footwork.syncToRig(this.rig, this);
   }
 
   /**
@@ -783,10 +919,19 @@ export class Fighter {
 
   /** Chest rising and falling: slow and shallow when fresh, fast and heaving when gassed. */
   private breathing(): number {
+    // Paused idle life holds the breath where it is: the chest doesn't move, even as the wind comes back.
+    if (this.idlePaused) return this.heldBreath;
     const e = 1 - this.stamina;
     this.breathPhase += (2.2 + 4.5 * e) / 60;
-    return Math.sin(this.breathPhase) * (0.01 + 0.045 * e * e);
+    return (this.heldBreath = Math.sin(this.breathPhase) * (0.01 + 0.045 * e * e));
   }
+  /**
+   * The chest's last breathing offset (held while idle life is paused). Fighter state like `breathPhase`: a save
+   * made during a pause has to carry it, or the chest jumps on the first tick after loading.
+   * TODO(P04): include heldBreath (with breathPhase and IdleBehavior's clocks, timers and offsets) in
+   * Fighter.toRecord()/restoreRecord().
+   */
+  private heldBreath = 0;
 
   /**
    * A weapon can't pass through a body: if it would go through our own torso or head
@@ -893,7 +1038,8 @@ export class Fighter {
     smoothProfile(this.motion, this.motionTarget, threat ? 0.25 : 0.06);
     const M = this.motion;
     Object.assign(this.footwork.mods, { stance: M.stance, stepFrames: M.stepFrames, stepHeight: M.stepHeight, stride: M.stride, gait: M.gait });
-    Object.assign(this.idle.mods, { bounce: M.bounce, bounceHz: M.bounceHz, sway: M.sway, head: M.head, feints: M.feints, paws: M.paws });
+    // (Paused idle life keeps the amplitudes it had too, so nothing it adds changes.)
+    if (!this.idlePaused) Object.assign(this.idle.mods, { bounce: M.bounce, bounceHz: M.bounceHz, sway: M.sway, head: M.head, feints: M.feints, paws: M.paws });
 
     const info = this.motionInfo;
     info.zone = (Object.entries(weights) as [Zone, number][])

@@ -28,11 +28,8 @@ export const AIM_STEPS = 4096;
 /** World points (`verb.at`, `verb.at2`) are sent in whole centimetres. */
 export const CM_PER_M = 100;
 
-// TODO(P02a): add 'jump' here (docs/M1-DESIGN.md §1.5.3: `CommandButton = Button | 'pickup' | 'jump'`) in the same
-// change that makes combat.ts handle it (button 'jump' sets jumpRequest = MOVE_TUNING.jumpBufferFrames, §3 phase 1a).
-// HEAD's applyCommands (combat.ts) passes every button but 'pickup' to Fighter.press(Button), so the union can't
-// carry 'jump' until that handler exists without breaking the typecheck.
-export type CommandButton = Button | 'pickup';
+/** A press: a strike button, pick up / drop, or jump (sets the fighter's jumpRequest, docs/M1-DESIGN.md §3 phase 1a). */
+export type CommandButton = Button | 'pickup' | 'jump';
 
 /** Every verb a `verb` command can carry. Strikes, cutting by swing and strike-digging stay `button` commands. */
 export type VerbId =
