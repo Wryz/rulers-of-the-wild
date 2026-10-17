@@ -53,13 +53,64 @@ export function selfMotion(vSelf: V3, vOther: V3, nOutOfSelf: V3): boolean {
  * One side of a contact, for m_eff (§4.3's table):
  * - a creature collider (a standing zone, a slab, a ruler bone): the struck bone's mass, and the whole body's (the
  *   `unbackedTargetMassRatio` lever, §4.4);
- * - an entity: its mass, or static when it is fixed or anchored (isAnchored: a staked log is static whatever its mass);
+ * - an entity: its mass, or static when it is fixed or anchored (isAnchored: a staked log is static whatever its mass),
+ *   and `pointKg`, its effective mass at the contact point along the normal (pointMass; its whole mass when not
+ *   given), which its own integrity reads (integrityMeff);
  * - the terrain: static.
  */
 export type MeffSide =
   | { kind: 'creature'; boneKg: number; bodyKg: number }
-  | { kind: 'entity'; massKg: number; static: boolean }
+  | { kind: 'entity'; massKg: number; static: boolean; pointKg?: number }
   | { kind: 'terrain' };
+
+/**
+ * The effective mass of a free rigid body at a contact point along a normal: 1 / (1/m + (r×n)ᵀ I⁻¹ (r×n)), r = the
+ * point − the centre of mass, n the unit normal, I the world inertia tensor (`inertia` its principal moments, `frame`
+ * the world rotation of its principal axes). What a blow at that point meets: m when the line of the blow passes
+ * through the centre of mass (r×n = 0), m/4 at the end of a thin rod struck across it, m/7 at a corner of a thin square
+ * plate struck flat. A principal moment of 0 (a point mass) adds nothing.
+ */
+export function pointMass(massKg: number, inertia: V3, frame: { x: number; y: number; z: number; w: number }, r: V3, n: V3): number {
+  if (!(massKg > 0) || !Number.isFinite(massKg)) return massKg;
+  const rn = cross(r, n);
+  // r×n in the principal frame: rotate by the frame's inverse.
+  const u = rotate({ x: -frame.x, y: -frame.y, z: -frame.z, w: frame.w }, rn);
+  let k = 0;
+  if (inertia.x > 0) k += (u.x * u.x) / inertia.x;
+  if (inertia.y > 0) k += (u.y * u.y) / inertia.y;
+  if (inertia.z > 0) k += (u.z * u.z) / inertia.z;
+  return 1 / (1 / massKg + k);
+}
+
+/** kg a side brings to an entity's integrity (integrityMeff): a bone, an entity's point mass, or Infinity for a static side. */
+function integritySideMass(s: MeffSide): number {
+  switch (s.kind) {
+    case 'creature':
+      return s.boneKg;
+    case 'entity':
+      if (s.static) return Infinity;
+      return DAMAGE_TUNING.integrityPointMass ? (s.pointKg ?? s.massKg) : s.massKg;
+    case 'terrain':
+      return Infinity;
+  }
+}
+
+/**
+ * m_eff for an entity's own integrity (§4.10's E; orchestrator decision on P10's design conflict): the reduced mass of
+ * the two sides' effective masses at the contact point, an entity's being pointMass (a fixed or anchored side, and the
+ * terrain, infinite; a creature's the struck bone's, SPEC:278). With DAMAGE_TUNING.integrityPointMass off, an entity
+ * side is its whole mass (§4.3's table).
+ * DEVIATION (replaces §4.3's m_eff rows "entity vs entity | reducedMass(m1, m2); a fixed/anchored side → the other's
+ * mass" and "entity vs terrain | the entity's mass (for its own integrity)", and for an entity's integrity SPEC:278's
+ * "m_eff is the reduced mass of the two bodies, m1·m2 ÷ (m1 + m2)"): with whole masses a felled green trunk 8 m or taller
+ * shattered on landing (a 30 cm × 15 m trunk's tip scored E ≈ 133 kJ against E_b ≈ 29.5 kJ), and a 2.2 t plank landing
+ * on its corner took 146 kJ against 66 kJ. A blow at the end of a long body meets only part of its mass; the rest of
+ * the body lands later in the same episode, which is never scored again (§4.3).
+ * The creature's own damage keeps §4.3's table (contactMeff): see contacts.ts `creatureHit`.
+ */
+export function integrityMeff(self: MeffSide, other: MeffSide): number {
+  return reducedMass(integritySideMass(self), integritySideMass(other));
+}
 
 /** kg a side brings to the reduced mass: a bone, an entity, or Infinity for a static side. */
 export function sideMass(s: MeffSide): number {
@@ -148,6 +199,10 @@ export function len(a: V3): number {
 
 function add(a: V3, b: V3): V3 {
   return { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z };
+}
+
+function cross(a: V3, b: V3): V3 {
+  return { x: a.y * b.z - a.z * b.y, y: a.z * b.x - a.x * b.z, z: a.x * b.y - a.y * b.x };
 }
 
 function dist(a: V3, b: V3): number {

@@ -26,6 +26,10 @@
 // misses because they began overlapped, n = −v̂_rel. Velocities come from the phase-5 store: a body's v + ω × (p − com),
 // a kinematic zone's carryV (the previous tick's rig delta, I1); a fixed or sleeping body is still.
 //
+// m_eff (§4.3's table) for creatures; an entity's own integrity reads the effective masses at the contact point
+// (integrityMeff, the orchestrator's decision on P10's design conflict; departure recorded in world/damage.ts), and an
+// entity landing on the ground is one contact over every terrain tile it meets in the tick (groundHit).
+//
 // Every impulse a contact causes (the reaction on a dynamic impactor) is queued on the entity store and applied in
 // phase 4d of the next tick (RF-2): nothing here touches a Rapier body.
 import RAPIER from '@dimforge/rapier3d-compat';
@@ -41,7 +45,7 @@ import type { Limb } from '../sim/moves';
 import { classifyRulerZone, rulerToughness } from '../sim/ruler';
 import { boneMass, DAMAGE_TUNING, impactEnergy, zoneToughness } from '../sim/rules';
 import { safeLandingSpeed } from './characters';
-import { contactEnergy, contactMeff, dot, impactDv, len, leadingSharpness, type MeffSide, rotate, selfMotion, sideMass } from './damage';
+import { contactEnergy, contactMeff, dot, impactDv, integrityMeff, len, leadingSharpness, type MeffSide, pointMass, rotate, selfMotion, sideMass } from './damage';
 import { FELL_TUNING } from './felling';
 import { compareOwners, type ContactPair, ownerKey, PHYSICS_TUNING } from './physics';
 import { RULER_BODY_TUNING } from './rulerBody';
@@ -100,6 +104,8 @@ interface Geom {
   /** The entity bodies' poses at the contact (a's, b's), for sharp points. */
   poseA: Pose3;
   poseB: Pose3;
+  /** How many contact points `point` is the mean of (a solid pair's manifold points; 1 otherwise). */
+  points: number;
 }
 
 /** A collider's motion over the last two steps, from the phase-5 store. */
@@ -462,6 +468,12 @@ export class ContactSystem {
       }
       return;
     }
+    // An entity meeting the ground: one contact over every terrain tile it meets this tick (groundHit).
+    if (a.kind === 'terrain' && b.kind === 'entity') {
+      const h = this.groundHit(w, fr.pairs, fighters, held, tick);
+      if (h && h.energy >= DAMAGE_TUNING.minImpactJ) fr.entity.push(h);
+      return;
+    }
 
     type Best = { E: number; dv: number; hit: CreatureHit };
     // Per side of the group (0: its first owner, 1: its second): the best creature hit and the best entity hit.
@@ -476,8 +488,8 @@ export class ContactSystem {
         continue;
       }
       const g = this.geometry(w, p);
-      const sa = this.side(w, p.a, fighters, g.point, g.va, g.poseA);
-      const sb = this.side(w, p.b, fighters, g.point, g.vb, g.poseB);
+      const sa = this.side(w, p.a, fighters, g.point, g.n, g.va, g.poseA);
+      const sb = this.side(w, p.b, fighters, g.point, g.n, g.vb, g.poseB);
       if (!sa || !sb) continue;
       if (sa.isStatic && sb.isStatic) continue;
       // The closing speed along n (out of a): (v_a − v_b)·n. DEVIATION (§4.3 writes "v_n = max(0, (v_other − v_self)·n)
@@ -503,7 +515,9 @@ export class ContactSystem {
             if (Number.isFinite(full) && (!land || full > land.energy)) acc.land = { f: self.f, energy: full, point: { ...g.point } };
           }
         } else if (self.kind === 'entity' && self.e) {
-          const mEff = contactMeff(self.meff, other.meff, Infinity);
+          // Its integrity: the effective masses at the contact point (integrityMeff; orchestrator decision, a departure
+          // from §4.3's table recorded there).
+          const mEff = integrityMeff(self.meff, other.meff);
           const E = Number.isFinite(mEff) ? impactEnergy(mEff, vn, s) : 0;
           const cur = ent[k];
           if (!cur || E > cur.energy) {
@@ -524,6 +538,54 @@ export class ContactSystem {
     }
     for (const h of ent) if (h && h.energy >= DAMAGE_TUNING.minImpactJ) fr.entity.push(h);
     fr.land = acc.land;
+  }
+
+  /**
+   * An entity's landing on the terrain (9c), scored once over the pairs of every tile it meets in this tick: the terrain
+   * is one owner (§4.3), cut into tiles only for the heightfield, so the contact is at the mean of all those pairs'
+   * points (each weighted by its points) with their mean normal. An entity's integrity reads its effective mass at that
+   * point (integrityMeff): taken tile by tile, a log lying across a seam met each tile with half its length, half a log's
+   * length from its centre of mass, and scored about half its landing. Null when no pair is scored (all excluded, or the
+   * entity is static).
+   */
+  private groundHit(w: World, pairs: readonly ContactPair[], fighters: ReadonlyMap<number, Fighter>, held: ReadonlyMap<number, Set<number>>, tick: number): EntityHit | null {
+    const nSum = { x: 0, y: 0, z: 0 };
+    const pSum = { x: 0, y: 0, z: 0 };
+    let k = 0;
+    let first: ContactPair | null = null;
+    for (const p of pairs) {
+      if (!p.ca || !p.cb) continue;
+      const why = this.excluded(p, fighters, held, tick);
+      if (why) {
+        this.unscored[why]++;
+        continue;
+      }
+      // n out of the terrain (the pair's first collider), into the entity.
+      const g = this.geometry(w, p);
+      nSum.x += g.points * g.n.x;
+      nSum.y += g.points * g.n.y;
+      nSum.z += g.points * g.n.z;
+      pSum.x += g.points * g.point.x;
+      pSum.y += g.points * g.point.y;
+      pSum.z += g.points * g.point.z;
+      k += g.points;
+      first ??= p;
+    }
+    const nl = len(nSum);
+    if (!first || !(k > 0) || !(nl > 1e-9)) return null;
+    const n = scale(nSum, 1 / nl);
+    const point = scale(pSum, 1 / k);
+    const me = this.motion(w, first.b, first.cb!);
+    const ground = this.side(w, first.a, fighters, point, n, ZERO, me.body);
+    const self = this.side(w, first.b, fighters, point, n, me.vAt(point), me.body);
+    if (!ground || !self?.e || self.isStatic) return null;
+    // The closing speed along n (out of the terrain): (v_terrain − v_entity)·n.
+    const vn = Math.max(0, -dot(self.v, n));
+    const s = sharpOf(self, ground, point);
+    const E = impactEnergy(integrityMeff(self.meff, ground.meff), vn, s);
+    const rel = neg(self.v);
+    const rl = len(rel);
+    return { e: self.e, energy: E, point, breaker: ground.owner, dir: rl > 0 ? scale(rel, 1 / rl) : null, landing: true };
   }
 
   /** Why a collider pair is never scored (both sides), or null. */
@@ -549,8 +611,11 @@ export class ContactSystem {
     return null;
   }
 
-  /** One side of a candidate pair (null: a fighter no longer in the sim, an entity gone). */
-  private side(w: World, o: Owner, fighters: ReadonlyMap<number, Fighter>, point: V3, v: V3, pose: Pose3): Side | null {
+  /**
+   * One side of a candidate pair (null: a fighter no longer in the sim, an entity gone). `n` is the contact normal (either
+   * sign): a dynamic entity's effective mass at `point` along it is its MeffSide's pointKg.
+   */
+  private side(w: World, o: Owner, fighters: ReadonlyMap<number, Fighter>, point: V3, n: V3, v: V3, pose: Pose3): Side | null {
     switch (o.kind) {
       case 'terrain':
         return { owner: o, kind: 'terrain', f: null, e: null, bone: null, meff: { kind: 'terrain' }, isStatic: true, v: ZERO, pose: null };
@@ -560,7 +625,8 @@ export class ContactSystem {
         const e = w.entities.get(o.id);
         if (!e) return null;
         const isStatic = !e.body || !e.body.isDynamic() || w.entities.isAnchored(e);
-        return { owner: o, kind: 'entity', f: null, e, bone: null, meff: { kind: 'entity', massKg: e.mass, static: isStatic }, isStatic, v: isStatic ? ZERO : v, pose };
+        const pointKg = isStatic ? e.mass : entityPointMass(e, pose, point, n);
+        return { owner: o, kind: 'entity', f: null, e, bone: null, meff: { kind: 'entity', massKg: e.mass, static: isStatic, pointKg }, isStatic, v: isStatic ? ZERO : v, pose };
       }
       case 'fighter': {
         const f = fighters.get(o.id);
@@ -587,6 +653,13 @@ export class ContactSystem {
     const f = self.f!;
     const bone = self.bone!;
     const mb = boneMass(f, bone);
+    // The creature's m_eff stays §4.3's table (the struck bone against the entity's whole mass), not the entity's
+    // effective mass at the point that its own integrity reads (integrityMeff). Measured (SIM-fix): it changes nothing
+    // where the bone is light against the entity (the AC-6 log on a player's head, centred or 0.6-1.2 m off: 94.1 J vs
+    // 93.9-90.5 J), but on the giant's 860-2,865 kg bones it would cut a felled 30 cm tree's blow at 8 m from a 472 HP
+    // wound to 188 HP, no wound (AC-2(d)'s ruler gate), and a 300 kg log landing 1.5 m off-centre on the lying giant
+    // from 243 to 95 HP. With one score per episode (§4.3) the rest of the log lands in the same episode unscored, so
+    // the whole mass is the better measure of the blow the creature takes; rule 5 needs traps to wound rulers.
     const mEff = contactMeff(self.meff, other.meff, IMPACT_TUNING.unbackedTargetMassRatio);
     const own = selfMotion(self.v, other.v, n);
     const E = contactEnergy({ mEff, vn, s, boneKg: mb, vSafe: safeLandingSpeed(f), staticOther: other.isStatic, selfMotion: own });
@@ -684,12 +757,12 @@ export class ContactSystem {
     const mb = this.motion(w, p.b, cb);
     if (!p.sensor) {
       const solid = solidContact(w, ca, cb, ma, mb);
-      if (solid) return { n: solid.n, point: solid.point, va: ma.vAt(solid.point), vb: mb.vAt(solid.point), poseA: ma.body, poseB: mb.body };
+      if (solid) return { n: solid.n, point: solid.point, va: ma.vAt(solid.point), vb: mb.vAt(solid.point), poseA: ma.body, poseB: mb.body, points: solid.points };
     }
     const hit = castContact(ca.shape, ma.prev, ma.vCentre, cb.shape, mb.prev, mb.vCentre);
     if (hit) {
       const { n, point, toi } = hit;
-      return { n, point, va: ma.vAt(point), vb: mb.vAt(point), poseA: advance(ma, toi), poseB: advance(mb, toi) };
+      return { n, point, va: ma.vAt(point), vb: mb.vAt(point), poseA: advance(ma, toi), poseB: advance(mb, toi), points: 1 };
     }
     // Began overlapped (a jump, an enable, a switch): n = −v̂_rel, or the line between the centres when nothing moves.
     const rel = sub(mb.vCentre, ma.vCentre);
@@ -703,7 +776,7 @@ export class ContactSystem {
     }
     const proj = cb.projectPoint(ma.pose.p, false);
     const point = proj ? { x: proj.point.x, y: proj.point.y, z: proj.point.z } : { ...ma.pose.p };
-    return { n, point, va: ma.vAt(point), vb: mb.vAt(point), poseA: ma.body, poseB: mb.body };
+    return { n, point, va: ma.vAt(point), vb: mb.vAt(point), poseA: ma.body, poseB: mb.body, points: 1 };
   }
 
   /** A collider's motion from the phase-5 store: a dynamic body's, a kinematic zone's carryV, or still. */
@@ -878,6 +951,17 @@ function causeOf(w: World, other: Side, s: number, sharpLeads: boolean): ImpactC
   }
 }
 
+/**
+ * A dynamic entity's effective mass at `point` along `n` (damage.ts pointMass), its body at `pose` (the pose the contact
+ * geometry used): the centre of mass and the principal axes from the body's mass properties, carried by that pose.
+ */
+function entityPointMass(e: Entity, pose: Pose3, point: V3, n: V3): number {
+  const b = e.body;
+  if (!b) return e.mass;
+  const com = addv(pose.p, rotate(pose.q, v3(b.localCom())));
+  return pointMass(e.mass, v3(b.principalInertia()), qmul(pose.q, q4(b.principalInertiaLocalFrame())), sub(point, com), n);
+}
+
 /** The fighter whose hands hold or drag the entity, or null. */
 function holderOf(w: World, id: number): number | null {
   for (const f of w.combat.fighters) if (f.inventory?.hands?.entity === id) return f.id;
@@ -926,7 +1010,7 @@ export function castContact(shapeA: RAPIER.Shape, prevA: Pose3, vA: V3, shapeB: 
  * (through the start-of-step pose of the manifold's first collider) when it has none (a heightfield, A lab normals.mjs
  * (2)). Manifolds with no contacts are skipped; null when none has any.
  */
-function solidContact(w: World, ca: RAPIER.Collider, cb: RAPIER.Collider, ma: Motion, mb: Motion): { n: V3; point: V3 } | null {
+function solidContact(w: World, ca: RAPIER.Collider, cb: RAPIER.Collider, ma: Motion, mb: Motion): { n: V3; point: V3; points: number } | null {
   const nSum = { x: 0, y: 0, z: 0 };
   const pSum = { x: 0, y: 0, z: 0 };
   let np = 0;
@@ -963,7 +1047,7 @@ function solidContact(w: World, ca: RAPIER.Collider, cb: RAPIER.Collider, ma: Mo
   });
   const nl = len(nSum);
   if (np === 0 || !(nl > 1e-9)) return null;
-  return { n: scale(nSum, 1 / nl), point: scale(pSum, 1 / np) };
+  return { n: scale(nSum, 1 / nl), point: scale(pSum, 1 / np), points: np };
 }
 
 // ---------------------------------------------------------------------------
