@@ -17,7 +17,7 @@ import { DT } from '../src/sim/math';
 import { RULER_TUNING, rulerDamage, rulerDown } from '../src/sim/ruler';
 import { SPECIES_BODY } from '../src/sim/species';
 import { resetTuning } from '../src/tuning/registry';
-import { CREATURE_TUNING } from '../src/world/creatures/defs';
+import { CREATURE_TUNING, NOISE_TUNING } from '../src/world/creatures/defs';
 import { createCreature } from '../src/world/creatures/factory';
 import type { MindState } from '../src/world/creatures/mind';
 import { UNKNOWN_STIMULUS } from '../src/world/creatures/perception';
@@ -231,8 +231,9 @@ describe('patrol and investigate (§6.4)', () => {
     return { w, g, mind, tree: { x: 0, z: d - 40 } };
   }
 
-  it('investigates a 30 cm tree felled 50 m away: paths to it at speed.investigate, sniffs within investigateStopM, then patrols', async () => {
-    const { w, g, mind, tree } = await felledAt(50);
+  /** The design's investigation of a felled tree (§6.4 investigate), `d` m away: rest → investigate → sniff → patrol. */
+  async function investigatesFelled(d: number): Promise<void> {
+    const { w, g, mind, tree } = await felledAt(d);
     const states = trace(w, mind, (note) => {
       until(w, () => mind.state === 'investigate', secs(10), 'investigating', note);
     });
@@ -240,7 +241,7 @@ describe('patrol and investigate (§6.4)', () => {
     expect(mind.senses.level()).toBeGreaterThanOrEqual(G.investigateAt);
     const lkp = mind.senses.lkp!;
     expect(flat(lkp, tree)).toBeLessThan(16);
-    expect(flat(lkp, g.pos)).toBeGreaterThan(40);
+    expect(flat(lkp, g.pos)).toBeGreaterThan(d - 10);
     let maxSpeed = 0;
     until(w, () => mind.mark >= 0, secs(90), 'sniffing', () => {
       maxSpeed = Math.max(maxSpeed, speedOf(g));
@@ -264,24 +265,35 @@ describe('patrol and investigate (§6.4)', () => {
     expect(mind.state).toBe('patrol');
     expect(maxRel).toBeGreaterThan(G.sniffDeg * 0.8);
     expect(minRel).toBeLessThan(-G.sniffDeg * 0.8);
+  }
+
+  it('investigates a 30 cm tree felled 50 m away: paths to it at speed.investigate, sniffs within investigateStopM, then patrols', async () => {
+    await investigatesFelled(50);
   });
 
-  it('a tree felled 70 m away (§13.1 P20): heard (fall, then landing) but under investigateAt with P18’s numbers: PIN, flagged', async () => {
-    // DEVIATION (§13.1 P20 "it investigates a tree felled 70 m away"): the fall's noise is heard at 70.4 m (its trunk's
-    // centre 7.75 m up) with s = 1 − 70.4 / (120 × hearingMul 1.2) = 0.51, i.e. heardGain 0.5 × 0.51 = 0.26 <
-    // investigateAt 0.3; the landing (3.3 s later, 71.5 m) adds 0.25 once the first has decayed at 0.08/s. A single
-    // 120 m noise reaches investigateAt only within 57.6 m. The fix is a P18 tuning or noise-timing change (report).
-    const { w, mind, tree } = await felledAt(70);
+  // DEVIATION, flagged (§13.1 P20 "it investigates a tree felled 70 m away"): with P18's numbers it can't. The fall is
+  // heard at 70.4 m (the trunk's centre 7.75 m up) with s = 1 − 70.4 / (120 × hearingMul 1.2) = 0.51: heardGain 0.5 ×
+  // 0.51 = 0.26 < investigateAt 0.3; the landing (3.3 s later, 71.5 m) adds 0.25 after the first has decayed at 0.08/s
+  // (peak 0.26). A single 120 m noise reaches investigateAt only within 57.6 m. The fix is P18's (a tuning value or the
+  // fall's noise timing; P20 report). This is the design's test, kept as it is and marked failing until then.
+  it.fails('investigates a 30 cm tree felled 70 m away (§13.1 P20; fails with P18’s hearing numbers, flagged)', async () => {
+    await investigatesFelled(70);
+  });
+
+  it('a tree felled 70 m away is heard (fall, then landing): awareness peaks at heardGain × s, under investigateAt', async () => {
+    const { w, g, mind, tree } = await felledAt(70);
     let peak = 0;
     let heard = false;
     steps(w, secs(8), () => {
       peak = Math.max(peak, mind.senses.of(UNKNOWN_STIMULUS));
       if (mind.senses.lkp && flat(mind.senses.lkp, tree) < 20) heard = true;
     });
+    const trunk = Math.hypot(70, 7.75);
     expect(heard).toBe(true);
-    expect(peak).toBeGreaterThan(0.2);
+    expect(peak).toBeCloseTo(G.heardGain * (1 - trunk / (NOISE_TUNING.heavyLandMax * G.hearingMul)), 2);
     expect(peak).toBeLessThan(G.investigateAt);
     expect(mind.state).toBe('rest');
+    expect(flat(g.pos, { x: 0, z: -40 })).toBeLessThan(0.1);
   });
 });
 
@@ -469,13 +481,15 @@ describe('the dodge table with the real body and the real separate() (§6.4, RF-
     expect(r.minD).toBeGreaterThan(3);
   });
 
-  it('walking sideways from the commit (1.8 m/s): PIN, missed by the real legs (the B lab’s 1.95 m disc hits it at 1.67 m)', async () => {
+  // DEVIATION, flagged (§6.4's dodge table, 8°/s row: "walks sideways from the commit | hit (1.67)"): the B lab's disc
+  // of 1.95 m hits a walker whose closest approach is 1.67 m; the real body meets a 1.8 m player only with its shins,
+  // ±0.8 m out (r 0.3 m), and a walker 1.7-1.9 m off its centre line clears the outer one (rulerMind.ts legAim; P20
+  // report). The design's cell, kept as it is and marked failing: walking is enough with the real body at 8°/s.
+  it.fails('walking sideways from the commit (1.8 m/s) is hit (the table’s 8°/s row; fails with the real legs, flagged)', async () => {
     const r = await dodge(1.8 / 3.77, 0, 0);
     expect(r.side).toBeGreaterThan(1.6);
     expect(r.side).toBeLessThan(2.0);
-    // DEVIATION recorded in rulerMind.ts (legAim) and the P20 report: the real body meets a 1.8 m player only with its
-    // shins, ±0.8 m out; a walker 1.67-1.9 m off its centre line clears the outer one.
-    expect(r.hit).toBeNull();
+    expect(r.hit).not.toBeNull();
   });
 });
 
