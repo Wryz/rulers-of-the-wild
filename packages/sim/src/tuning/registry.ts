@@ -29,7 +29,7 @@ export interface TuningEntry {
   folder: string;
   table: Record<string, unknown>;
   fields: Record<string, unknown>;
-  /** Canonical JSON of the table as registered (its defaults). */
+  /** Canonical JSON of the table as registered (its defaults; read-outs left out). */
   defaults: string;
 }
 
@@ -94,7 +94,10 @@ export function resetTuning(table?: string): void {
   restoreTuning(`{${list.map((e) => `${JSON.stringify(e.name)}:${e.defaults}`).join(',')}}`);
 }
 
-/** Every primitive that differs from its registered default, sorted by (table, key); keys are dotted paths. */
+/**
+ * Every primitive that differs from its registered default, sorted by (table, key); keys are dotted paths. Compound
+ * leaves are compared primitive by primitive (what setTuningValue can change, so the save can replay it).
+ */
 export function tuningOverrides(): { table: string; key: string; value: TuningValue }[] {
   const out: { table: string; key: string; value: TuningValue }[] = [];
   for (const e of entries) {
