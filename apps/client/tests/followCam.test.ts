@@ -204,8 +204,173 @@ describe('follow camera over the terrain', () => {
   });
 });
 
+describe('the spring arm: the boom comes in before it lifts, so the view turns where it is asked', () => {
+  /** The view's pitch (rad, positive looking down). */
+  const viewPitch = (cam: FollowCam) => {
+    const d = cam.camera.getWorldDirection(new Vector3());
+    return Math.atan2(-d.y, Math.hypot(d.x, d.z));
+  };
+
+  it('on flat ground every pitch asked for is the pitch seen, at every zoom', () => {
+    const g = plane(0);
+    for (const dist of [FOLLOW_TUNING.minDistance, FOLLOW_TUNING.distance, FOLLOW_TUNING.maxDistance]) {
+      const p = standing(g, 0, 0, 0);
+      const w = fakeWorld(g, [p]);
+      const cam = new FollowCam();
+      cam.snapBehind(p);
+      cam.distance = dist;
+      for (const pd of [FOLLOW_TUNING.maxPitchDeg, 14, 0, -10, -15, -20, FOLLOW_TUNING.minPitchDeg]) {
+        cam.pitch = pd * DEG;
+        for (let i = 0; i < 120; i++) cam.update(DT60, w, p, NO_LOOK);
+        expect(viewPitch(cam), `${dist} m at ${pd}°`).toBeCloseTo(pd * DEG, 9);
+        expect(cam.pitch).toBeCloseTo(pd * DEG, 12);
+        const c = cam.camera.position;
+        expect(c.y - g(c.x, c.z)).toBeGreaterThanOrEqual(FOLLOW_TUNING.clearance - EPS);
+      }
+    }
+  });
+
+  it('looking fully up at the default zoom, a look down turns the view on the very next frame', () => {
+    const g = plane(0);
+    const p = standing(g, 0, 0, 0);
+    const w = fakeWorld(g, [p]);
+    const cam = new FollowCam();
+    cam.snapBehind(p);
+    for (let i = 0; i < 30; i++) cam.update(DT60, w, p, { dx: 0, dy: -mouseFor(1) });
+    for (let i = 0; i < 60; i++) cam.update(DT60, w, p, NO_LOOK);
+    expect(cam.pitch).toBeCloseTo(FOLLOW_TUNING.minPitchDeg * DEG, 12);
+    const before = cam.camera.getWorldDirection(new Vector3());
+    cam.update(DT60, w, p, { dx: 0, dy: mouseFor(2 * DEG) });
+    const after = cam.camera.getWorldDirection(new Vector3());
+    expect(after.angleTo(before) / DEG).toBeCloseTo(2, 6);
+  });
+
+  it('when even minDistance is under the hill, the rest is lifted and the pitch becomes the one seen (no unseen pile-up)', () => {
+    // Facing downhill on 30°: the camera is up the slope behind.
+    const g = plane(30, 0);
+    const p = standing(g, 0, 0, Math.PI);
+    const w = fakeWorld(g, [p]);
+    const cam = new FollowCam();
+    cam.snapBehind(p);
+    for (let i = 0; i < 30; i++) cam.update(DT60, w, p, { dx: 0, dy: -mouseFor(1) });
+    for (let i = 0; i < 120; i++) cam.update(DT60, w, p, NO_LOOK);
+    // In as far as it goes, then lifted: it looks down more steeply than minPitchDeg, and the pitch says so.
+    const c = cam.camera.position;
+    expect(c.distanceTo(cam.lookPoint)).toBeGreaterThan(FOLLOW_TUNING.minDistance - 1e-9);
+    expect(c.distanceTo(cam.lookPoint)).toBeLessThan(FOLLOW_TUNING.minDistance + 0.5);
+    expect(cam.pitch).toBeGreaterThan(FOLLOW_TUNING.minPitchDeg * DEG + 5 * DEG);
+    expect(viewPitch(cam)).toBeCloseTo(cam.pitch, 9);
+    expect(c.y - g(c.x, c.z)).toBeGreaterThanOrEqual(FOLLOW_TUNING.clearance - EPS);
+    // Pushing further up changes nothing and stores nothing; a look down answers at once.
+    const held = cam.pitch;
+    cam.update(DT60, w, p, { dx: 0, dy: -mouseFor(0.5) });
+    expect(cam.pitch).toBeCloseTo(held, 9);
+    const before = cam.camera.getWorldDirection(new Vector3());
+    cam.update(DT60, w, p, { dx: 0, dy: mouseFor(2 * DEG) });
+    const after = cam.camera.getWorldDirection(new Vector3());
+    expect(after.angleTo(before) / DEG).toBeGreaterThan(1.5);
+  });
+
+  it('a ridge between the player and the camera: every one of the boomSamples points stays clearance over the ground', () => {
+    // A ring-shaped ridge 2.2 m high, 2.6 m out round the player: wherever the camera turns, the boom crosses it, while
+    // the camera itself (4.2 m out) would stand on flat ground — only the points along the boom see the ridge.
+    const ridge: GroundFn = (x, z) => 2.2 * Math.exp(-(((Math.hypot(x, z) - 2.6) / 0.45) ** 2));
+    const n = FOLLOW_TUNING.boomSamples;
+    expect(n).toBe(8);
+    let lowest = Infinity;
+    for (const pd of [FOLLOW_TUNING.pitchDeg, 0, -10, 30]) {
+      for (const dist of [FOLLOW_TUNING.distance, FOLLOW_TUNING.maxDistance]) {
+        const p = standing(ridge, 0, 0, 0);
+        const w = fakeWorld(ridge, [p]);
+        const cam = new FollowCam();
+        cam.snapBehind(p);
+        cam.pitch = pd * DEG;
+        cam.distance = dist;
+        for (let i = 0; i <= 360; i++) {
+          cam.update(DT60, w, p, { dx: i === 0 ? 0 : mouseFor(DEG), dy: 0 });
+          const a = cam.lookPoint;
+          const c = cam.camera.position;
+          for (let k = 1; k <= n; k++) {
+            const u = k / n;
+            const x = a.x + (c.x - a.x) * u;
+            const y = a.y + (c.y - a.y) * u;
+            const z = a.z + (c.z - a.z) * u;
+            const above = y - ridge(x, z);
+            lowest = Math.min(lowest, above);
+            expect(above, `pitch ${pd}°, ${dist} m, yaw step ${i}, point ${k}`).toBeGreaterThanOrEqual(FOLLOW_TUNING.clearance - EPS);
+          }
+        }
+      }
+    }
+    // (The ridge does hold the boom up somewhere.)
+    expect(lowest).toBeLessThan(FOLLOW_TUNING.clearance + 0.05);
+  });
+});
+
+describe('heights over the ground, not over y = 0 (a plateau where no clamp binds)', () => {
+  it('the follow camera looks at pos.y + lookHeight × scale and hangs its boom from there', () => {
+    const g: GroundFn = () => 10;
+    const p = createPlayer();
+    p.scale = 1.1;
+    // Standing on a log on the plateau.
+    p.pos.set(3, 10.4, -2);
+    const w = fakeWorld(g, [p]);
+    const cam = new FollowCam();
+    cam.snapBehind(p);
+    cam.update(DT60, w, p, NO_LOOK);
+    const T = FOLLOW_TUNING;
+    expect(cam.lookPoint.y).toBeCloseTo(10.4 + T.lookHeight * 1.1, 12);
+    expect(cam.camera.position.y).toBeCloseTo(10.4 + T.lookHeight * 1.1 + Math.sin(T.pitchDeg * DEG) * T.distance, 9);
+    const dir = cam.camera.getWorldDirection(new Vector3());
+    const toLook = cam.lookPoint.clone().sub(cam.camera.position).normalize();
+    expect(toLook.dot(dir)).toBeCloseTo(1, 12);
+  });
+
+  it('the fight camera stands over the ground under the fight and looks at each chest over its own feet', () => {
+    const g: GroundFn = (x, z) => 10 + 0.05 * x - 0.03 * z;
+    const p = standing(g, 0, 0, 0);
+    const t = createPlayer();
+    t.scale = 1.1;
+    // The opponent up on a log, 0.6 m over the ground.
+    t.pos.set(1.5, g(1.5, 3) + 0.6, 3);
+    const rig = new CameraRig();
+    rig.ground = g;
+    rig.snap(p, t);
+    const T = CAMERA_TUNING;
+    const gap = Math.hypot(1.5, 3);
+    const big = 0.1;
+    const mx = 1.5 * T.focusMix;
+    const mz = 3 * T.focusMix;
+    const yaw = Math.atan2(1.5, 3) - T.sideAngle;
+    const dist = T.distance + gap * 0.85 + big * 2.2;
+    const want = new Vector3(mx - Math.sin(yaw) * dist, g(mx, mz) + T.rise + gap * 0.25 + big * 1.4, mz - Math.cos(yaw) * dist);
+    expect(rig.camera.position.distanceTo(want)).toBeLessThan(1e-9);
+    expect(rig.heading).toBeCloseTo(yaw, 12);
+    const look = new Vector3(p.pos.x, p.pos.y + 1.0, p.pos.z).lerp(new Vector3(t.pos.x, t.pos.y + 1.15 * 1.1, t.pos.z), T.focusMix);
+    const dir = rig.camera.getWorldDirection(new Vector3());
+    expect(look.sub(rig.camera.position).normalize().dot(dir)).toBeCloseTo(1, 12);
+  });
+
+  it('out of a fight the rig sits (rise − 0.2) × scale over the feet and looks ahead at chest height over them', () => {
+    const g: GroundFn = () => 10;
+    const p = createPlayer();
+    p.pos.set(0, 10.25, 0);
+    const rig = new CameraRig();
+    rig.ground = g;
+    rig.snap(p);
+    expect(rig.camera.position.y).toBeCloseTo(10.25 + CAMERA_TUNING.rise - 0.2, 12);
+    const look = new Vector3(0, 10.25 + 1.15, 2.2);
+    const dir = rig.camera.getWorldDirection(new Vector3());
+    expect(look.sub(rig.camera.position).normalize().dot(dir)).toBeCloseTo(1, 12);
+  });
+});
+
 describe('the director: follow ↔ fight', () => {
   /** Runs `frames` frames, returning the largest move of the camera between two frames and the last fight weight. */
+  /**
+   * Runs `frames` frames; over the frames that blend, the largest move of the camera between two frames (m), its largest
+   * turn (°) and its largest change of fov (°).
+   */
   function run(
     d: CameraDirector,
     w: CameraWorld,
@@ -213,46 +378,65 @@ describe('the director: follow ↔ fight', () => {
     lock: (i: number) => Fighter | null,
     frames: number,
     each?: (i: number) => void,
-  ): { maxStep: number; blendingFrames: number } {
+    look: LookInput = NO_LOOK,
+  ): { maxStep: number; maxTurnDeg: number; maxFovDeg: number; blendingFrames: number } {
     let prev = d.camera.position.clone();
+    let prevQ = d.camera.quaternion.clone();
+    let prevFov = d.camera.fov;
     let maxStep = 0;
+    let maxTurnDeg = 0;
+    let maxFovDeg = 0;
     let blendingFrames = 0;
     for (let i = 0; i < frames; i++) {
       each?.(i);
       const w0 = d.fightWeight;
-      d.update(DT60, w, p, lock(i), NO_LOOK);
+      d.update(DT60, w, p, lock(i), look);
       const w1 = d.fightWeight;
-      const step = d.camera.position.distanceTo(prev);
       if (w0 !== w1 || (w1 > 0 && w1 < 1)) {
         blendingFrames++;
-        maxStep = Math.max(maxStep, step);
+        maxStep = Math.max(maxStep, d.camera.position.distanceTo(prev));
+        maxTurnDeg = Math.max(maxTurnDeg, d.camera.quaternion.angleTo(prevQ) / DEG);
+        maxFovDeg = Math.max(maxFovDeg, Math.abs(d.camera.fov - prevFov));
       }
       prev = d.camera.position.clone();
+      prevQ = d.camera.quaternion.clone();
+      prevFov = d.camera.fov;
     }
-    return { maxStep, blendingFrames };
+    return { maxStep, maxTurnDeg, maxFovDeg, blendingFrames };
+  }
+
+  /** No jump: under 0.5 m, 3° and 1° of fov between two frames of a blend. */
+  function smooth(r: ReturnType<typeof run>): void {
+    expect(r.maxStep).toBeLessThan(0.5);
+    expect(r.maxTurnDeg).toBeLessThan(3);
+    expect(r.maxFovDeg).toBeLessThan(1);
   }
 
   for (const [label, scale, gap] of [
     ['an ape', 1.1, 3],
     ['the giant', 5.5, 8],
   ] as const) {
-    it(`blending into a fight with ${label} and back out never moves the view more than 0.5 m in a frame`, () => {
+    it(`blending into a fight with ${label} and back out never jumps (0.5 m, 3°, 1° of fov a frame)`, () => {
       const g = plane(12, 0.8);
       const p = standing(g, 0, 0, 0);
       const t = standing(g, 1.2, gap, Math.PI, scale);
       const w = fakeWorld(g, [p, t]);
       const { d } = director();
       d.snapBehind(p);
-      run(d, w, p, () => null, 30);
+      // (Aiming, so the two cameras' fovs differ and the fov blend is exercised.)
+      const aim: LookInput = { dx: 0, dy: 0, aim: true };
+      run(d, w, p, () => null, 60, undefined, aim);
       expect(d.fightWeight).toBe(0);
-      const into = run(d, w, p, () => t, 240);
+      expect(d.camera.fov).toBeCloseTo(CAMERA_TUNING.fov * FOLLOW_TUNING.aimFovMul, 1);
+      const into = run(d, w, p, () => t, 240, undefined, aim);
       expect(d.fightWeight).toBe(1);
+      expect(d.camera.fov).toBeCloseTo(CAMERA_TUNING.fov, 6);
       expect(into.blendingFrames).toBeGreaterThanOrEqual(Math.floor(FOLLOW_TUNING.blendS * 60) - 1);
-      expect(into.maxStep).toBeLessThan(0.5);
-      const out = run(d, w, p, () => null, 240);
+      smooth(into);
+      const out = run(d, w, p, () => null, 240, undefined, aim);
       expect(d.fightWeight).toBe(0);
       expect(out.blendingFrames).toBeGreaterThanOrEqual(Math.floor(FOLLOW_TUNING.blendS * 60) - 1);
-      expect(out.maxStep).toBeLessThan(0.5);
+      smooth(out);
     });
   }
 
@@ -280,7 +464,25 @@ describe('the director: follow ↔ fight', () => {
       },
     );
     expect(res.blendingFrames).toBeGreaterThan(100);
-    expect(res.maxStep).toBeLessThan(0.5);
+    smooth(res);
+  });
+
+  it('the fight camera starts on the side of the fight the follow camera is on', () => {
+    const g = plane(0);
+    for (const followYaw of [0.45, -0.45]) {
+      const p = standing(g, 0, 0, 0);
+      const t = standing(g, 0, 3, Math.PI);
+      const w = fakeWorld(g, [p, t]);
+      const { d } = director();
+      d.snapBehind(p);
+      run(d, w, p, () => null, 10);
+      d.update(DT60, w, p, null, { dx: -mouseFor(followYaw), dy: 0 });
+      expect(d.follow.yaw).toBeCloseTo(followYaw, 9);
+      d.update(DT60, w, p, t, NO_LOOK);
+      // The fight heads along the line to the target (yaw 0) swung sideAngle to one side: the follow camera's side.
+      expect(Math.sign(d.rig.heading)).toBe(Math.sign(followYaw));
+      expect(Math.abs(d.rig.heading)).toBeCloseTo(CAMERA_TUNING.sideAngle, 1);
+    }
   });
 
   it('a fight is a live target within fightRangeM; out of a fight the follow camera frames the player', () => {
