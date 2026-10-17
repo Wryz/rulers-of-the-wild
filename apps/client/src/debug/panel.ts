@@ -58,7 +58,10 @@ export interface PanelHost {
   readonly sfx: Pick<SfxPort, 'setVolume'>;
   /** Developer Backspace: rebuild the world from the same seed. */
   readonly onRebuild: (() => void) | null;
-  /** Rebuilds the game around a loaded save (absent: "Load world" is disabled). TODO(main.ts follow-up). */
+  /**
+   * Rebuilds the game around a loaded save (main.ts: the page boots from it, ?save=session). Absent or null: "Load
+   * world" is disabled (a production build's developer mode, which has no loader).
+   */
   readonly loadWorld?: ((bytes: Uint8Array) => void) | null;
 }
 
@@ -133,7 +136,7 @@ export class DevPanel implements PanelPort {
   private readonly inspect = { entity: 0 };
   private readonly impacts: string[] = [];
   private readonly tripwires: string[] = [];
-  /** handle() has been called: the game dispatches every tick's events here (else refresh reads the last tick's). */
+  /** handle() has been called: the game dispatches every tick's events here (else refresh reads the last tick's: tests). */
   private gotEvents = false;
   private scannedTick = -1;
   private readonly monitors: PanelBinding[] = [];
@@ -203,8 +206,8 @@ export class DevPanel implements PanelPort {
   }
 
   /**
-   * One event of a stepped tick, for the impact and tripwire read-outs. TODO(game.ts follow-up): Game.dispatch should
-   * call this for every event; until it does, refresh() reads the world's events of the last tick of each frame.
+   * One event of a stepped tick, for the impact and tripwire read-outs: Game.dispatch hands it every event of every
+   * tick. (A host that doesn't, a test's, gets refresh() reading the world's events of the last tick instead.)
    */
   handle(e: SimEvent, world: World): void {
     this.gotEvents = true;
@@ -256,7 +259,7 @@ export class DevPanel implements PanelPort {
     const saveReady = this.saveReady();
     dev.addButton({ title: saveReady ? 'Save world (download)' : 'Save world (arrives with P13)', disabled: !saveReady }).on('click', () => this.host.loop?.save());
     const load = this.host.loadWorld;
-    dev.addButton({ title: load ? 'Load world…' : 'Load world (needs main.ts)', disabled: !load }).on('click', () => this.pickSave());
+    dev.addButton({ title: load ? 'Load world…' : 'Load world (dev server only)', disabled: !load }).on('click', () => this.pickSave());
     dev.addButton({ title: 'Copy tuning as JSON' }).on('click', () => {
       const json = tuningSnapshot();
       console.log(json);
@@ -547,7 +550,7 @@ export class DevPanel implements PanelPort {
     return this.host.world.spawnData?.apeHomes[0]?.home ?? null;
   }
 
-  /** Reads the world's events of the latest tick (until game.ts dispatches every event to handle()). */
+  /** Reads the world's events of the latest tick (a host that dispatches no events to handle()). */
   private scanEvents(world: World): void {
     if (world.tick === this.scannedTick) return;
     this.scannedTick = world.tick;

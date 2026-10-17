@@ -51,7 +51,10 @@ export interface ShotPoint {
 
 /** What a developer screenshot URL asks of the boot. */
 export interface ShotParams {
-  /** `?save=<url>`: a canonical save (packages/sim/src/save) the world is loaded from instead of created. */
+  /**
+   * `?save=<url>`: a canonical save (packages/sim/src/save) the world is loaded from instead of created; `?save=session`
+   * the one the dev panel's "Load world" picked (SESSION_SAVE).
+   */
   save: string | null;
   /** `?paused=1`: the loop starts paused (the loop's own pause, GAME_TUNING.paused: rule 8; the sim is not touched). */
   paused: boolean;
@@ -88,11 +91,58 @@ export function shotParams(search: string): ShotParams | null {
   return { save: save !== null && save !== '' ? save : null, paused: q.has('paused') && !off(q.get('paused')), cam, fov, hud: !off(q.get('hud')) };
 }
 
-/** The bytes of a save served by the dev server (`?save=`). */
-export async function fetchSave(url: string): Promise<Uint8Array> {
+/**
+ * `?save=session`: the save the dev panel's "Load world" picked, kept in this tab's sessionStorage under
+ * SESSION_SAVE_KEY (a reload, or dev Backspace, loads it again).
+ */
+export const SESSION_SAVE = 'session';
+export const SESSION_SAVE_KEY = 'rotw.dev.loadedSave';
+
+/** What the session-save helpers need of the browser's storage (tests hand in a Map-backed one). */
+export interface SaveStore {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+}
+
+/**
+ * Keeps a picked save for the reload that loads it (the panel's "Load world"; a canonical save is JSON text) and
+ * returns the query that boots it. Throws when the storage refuses it (full, or unavailable).
+ */
+export function stashSave(bytes: Uint8Array, search: string, store: SaveStore = sessionStorage): string {
+  store.setItem(SESSION_SAVE_KEY, new TextDecoder().decode(bytes));
+  const q = new URLSearchParams(search);
+  q.set('save', SESSION_SAVE);
+  return `?${q.toString()}`;
+}
+
+/** The bytes of a save served by the dev server (`?save=<url>`), or the one the panel kept (`?save=session`). */
+export async function fetchSave(url: string, store: SaveStore | null = typeof sessionStorage !== 'undefined' ? sessionStorage : null): Promise<Uint8Array> {
+  if (url === SESSION_SAVE) {
+    const text = store?.getItem(SESSION_SAVE_KEY) ?? null;
+    if (text === null) throw new Error('?save=session: no save was loaded in this tab (use the dev panel\'s "Load world")');
+    return new TextEncoder().encode(text);
+  }
   const res = await fetch(url, { cache: 'no-store' });
   if (!res.ok) throw new Error(`?save: ${url} answered ${res.status} ${res.statusText}`);
   return new Uint8Array(await res.arrayBuffer());
+}
+
+/** Resolves once the page has painted (the boot's loading message shows before createWorld holds the thread). */
+export function nextPaint(): Promise<void> {
+  return new Promise((done) => {
+    if (typeof requestAnimationFrame === 'undefined') {
+      done();
+      return;
+    }
+    // (A hidden tab runs no animation frames: the timer lets the boot go on there anyway.)
+    const timer = setTimeout(done, 100);
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => {
+        clearTimeout(timer);
+        done();
+      }),
+    );
+  });
 }
 
 /** The camera as a pinned shot sees it: three.js's PerspectiveCamera, structurally. */

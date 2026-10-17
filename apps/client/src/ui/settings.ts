@@ -35,8 +35,7 @@ export class SettingsMenu {
         <h2 class="opt-title">Options</h2>
         <div class="row"><span>Crouch key</span><button class="key crouch-toggle"></button></div>
         <div class="row"><span>Blood effects</span><button class="key blood-toggle"></button></div>
-        <div class="row"><span>Combat cues (flashes, telegraphs, popups)</span><button class="key cues-toggle"></button></div>
-        <div class="row"><span>Fight tips (what to do right now)</span><button class="key tips-toggle"></button></div>
+        <div class="row"><span>Combat cues (hit flashes, callouts, longer hit-pauses)</span><button class="key cues-toggle"></button></div>
         <div class="row"><span>Record battles for the Battle Log</span><button class="key rec-toggle"></button></div>
         <div class="actions">
           <button class="reset">Reset to defaults</button>
@@ -59,9 +58,6 @@ export class SettingsMenu {
     });
     this.toggleRow('.cues-toggle', () => (this.prefs.cues ? 'On' : 'Off'), () => {
       this.prefs.cues = !this.prefs.cues;
-    });
-    this.toggleRow('.tips-toggle', () => (this.prefs.tips ? 'On' : 'Off'), () => {
-      this.prefs.tips = !this.prefs.tips;
     });
     this.toggleRow('.rec-toggle', () => (this.prefs.record ? 'On' : 'Off'), () => {
       this.prefs.record = !this.prefs.record;

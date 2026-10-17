@@ -8,8 +8,8 @@
 // looks around under pointer lock, §5.14), so its buttons can be clicked.
 // P35: Settings lists M1's controls (§5.14) and the pad's; "Blood effects" sets prefs.gore ('full' / 'off'), the one
 // value game.ts goreOf reads (rule 12; the three-level setting is M5's); a "Crouch key" row picks toggle or hold.
-// TODO(P36): "Fight tips" and the telegraph-ring part of "Combat cues" still do nothing while the HUD leaves the tips and
-// telegraph rings out (ui/hudPort.ts): drop the rows, or bring the HUD pieces back (P36's call).
+// C-fix: the "Fight tips" row went with DS's tips HUD (§10.8's minimal HUD has none), and "Combat cues" names only what it
+// still does (hit flashes, the cues callouts, longer hit-pauses: DS's telegraph rings went with the training ring).
 // TODO(M5): the rolling 30 s buffer and the clip button replace this.
 import type { Fighter, World } from '@wild/sim';
 import type { MenusPort, SimEvent } from '../game/ports';

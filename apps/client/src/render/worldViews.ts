@@ -11,13 +11,11 @@
 import { type Group, Matrix4, Mesh, type Object3D, type Scene, Vector3 } from 'three';
 import {
   BONES,
-  type BoneName,
   type Entity,
   type Fighter,
   FIST_OFFSET,
   principalAxis,
   SKELETON,
-  type V3,
   type World,
   type WoundRecord,
   type Wound,
@@ -386,11 +384,6 @@ export class FighterViewAdapter implements FighterViewPort {
     this.held = entity;
     this.view.weaponBlood = 0;
     if (entity !== null) this.view.setWeapon(null);
-  }
-
-  /** A ruler's wound drawn where it is (SPEC:845). */
-  scar(bone: BoneName, local: V3, kind: ScarKind): void {
-    this.view.scar(bone, [local.x, local.y, local.z], kind);
   }
 
   /** Rule 12: the gore level every gore-bearing visual reads; what is drawn already is drawn again at the new level. */
