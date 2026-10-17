@@ -28,20 +28,22 @@
 //   solver iterations and CCD; the fighter 'tripped' for getupAfterS; a `trip` event; the history reset (RF-1).
 // - Phase 13b: the tripped rig from the body (rig = body ∘ frozen local, f.pos the terrain under the pelvis, the pose's
 //   root and pelvis re-expressed so CombatSim's forward kinematics reproduces it); in-pit (the ground the root stands on,
-//   or the lying pelvis, more than pitDownDepthFrac × knee height below the original ground, RR-1; §4.7 says "both
-//   planted feet", see updatePit) with a `pit` event; pinned (D-38: the dynamic mass resting on it, transitively, by
-//   contact manifolds, with hysteresis) with a `pinned` event; the get-up at getupAfterS when not pinned (light loads
-//   shoved off first, sensors again, the yaw that makes kneeling shortest, a getupFrames rise through `kneel` that ends
-//   in a riseBlendFrames blend into the stance, a `rise` event, the history reset and a contact grace, RF-1); and, for a
-//   standing ruler, cover failure: a support that vanished under it (a load break, §4.11) is remembered as the cause of
-//   a 'cover' trip, which it requests at once when the drop under its feet is beyond the ledge threshold (step 8).
+//   or the lying pelvis, more than pitDownDepthFrac × knee height below the original ground, RR-1; out again only on the
+//   rim: within pitOutDepthFrac of it, off the pit wall; §4.7 says "both planted feet", see updatePit) with a `pit`
+//   event; pinned (D-38: the dynamic mass resting on it, transitively, by contact manifolds, with hysteresis) with a
+//   `pinned` event; the get-up at getupAfterS when not pinned (light loads shoved off first, sensors again, the yaw that
+//   makes kneeling shortest, a getupFrames rise through `kneel` that ends in a riseBlendFrames blend into the stance, a
+//   `rise` event, the history reset and a contact grace, RF-1); and, for a standing ruler, cover failure: a support that
+//   vanished under it (a load break, §4.11) is remembered as the cause of a 'cover' trip, which it requests at once when
+//   the drop under its feet is beyond the ledge threshold (step 8).
 // - The save (RR-19, §8.3 bodies[].ruler): the body's pose and velocity (0 standing: Rapier derives a kinematic body's
 //   from the next pose), the frozen local pose, the pose history, sleep, and the mover's memory (climb floor, deflection,
 //   supports, cover break); restoreRecord puts it back kinematic or dynamic.
 // - A ruler knocked out standing collapses: the same switch, no `trip` event; its corpse stays (world/deaths.ts).
-// - Footfalls: a standing ruler's feet set down this tick (footwork.landed, emptied by the mover before the footwork runs)
-//   are `land` events at the foot (mass the leg's, energy ½ m v² at its walking speed): the camera shake and thud of a
-//   giant's steps (SPEC:849).
+// - Footfalls: the mover empties footwork.landed before the footwork runs, so it holds the feet set down this tick, as
+//   the KCC does for players: the noise bus hears them as the giant's footsteps (§6.2, 6 × scale walking) and the
+//   client shakes and thuds from the footwork (SPEC:849). No `land` event: that is a body coming down, which the noise
+//   bus hears as a heavy landing by its mass (≈ 120 m for a 2 t leg) and the client draws as a fall.
 import RAPIER from '@dimforge/rapier3d-compat';
 import { Quaternion, Vector3 } from 'three';
 import { boolFromRecord, numFromRecord } from '../body/animator';
@@ -49,13 +51,12 @@ import { getPose } from '../body/poses';
 import { ANKLE_HEIGHT, BONES, type BoneName, bonePoint, type Rig, SKELETON } from '../body/skeleton';
 import type { RulerBodyRecV1 } from '../save/schema';
 import type { Fighter } from '../sim/fighter';
-import { IMPACT_TUNING } from '../sim/impact';
 import { DT } from '../sim/math';
 import { RULER_TUNING } from '../sim/ruler';
 import { DAMAGE_TUNING } from '../sim/rules';
 import { defineTuning } from '../tuning/registry';
 import { collisionGroups, solverGroups } from './groups';
-import { ownerKey, PHYSICS_TUNING } from './physics';
+import { compareOwners, ownerKey, PHYSICS_TUNING } from './physics';
 import { cylinderPoints, principalAxis } from './shapes';
 import type { Entity, FighterMover, ImpactCause, Pose3, Quat, RulerState, TripWhy, V3 } from './types';
 import type { World } from './world';
@@ -90,6 +91,7 @@ export const RULER_BODY_TUNING = defineTuning(
     coverTripWindowTicks: 30,
     // Not §9.1 rows (P11): values §4.7 gives in prose or leaves open, kept here so the file holds no bare constants.
     climbLookM: 3,
+    pitOutDepthFrac: 0.15,
     deflectAxisMinXZ: 0.5,
     getupShoveMps: 2,
     riseBlendFrames: 40,
@@ -118,6 +120,11 @@ export const RULER_BODY_TUNING = defineTuning(
     pitDownDepthFrac: { unit: '× knee height (1.4 m)', source: 'NEW: "in a pit" (SPEC:504), the ledge threshold (RR-1)' },
     coverTripWindowTicks: { unit: 'ticks', source: "NEW: a ledge trip this soon after a cover load break is a 'cover' trip (RT-1)" },
     climbLookM: { unit: 'm', source: 'NEW: §4.7 step 3 ("a support no more than climbMaxM above the pit floor within 3 m ahead")' },
+    pitOutDepthFrac: {
+      unit: '× knee height (0.41 m)',
+      source:
+        "NEW: \"down until it has climbed out\" (SPEC:504, RR-1): once in a pit, the ruler is out only when it stands within this of the original ground on ground no steeper than maxSlopeDeg (the rim, not the pit wall it is climbing)",
+    },
     deflectAxisMinXZ: {
       unit: 'horizontal share of the axis',
       source: "NEW: §4.7 step 6.1: an obstacle whose long axis is steeper than this (an upright trunk or stake) is round, deflecting along the tangent ⟂ n̂",
@@ -129,7 +136,7 @@ export const RULER_BODY_TUNING = defineTuning(
     riseBlendFrames: {
       unit: 'frames',
       source:
-        "NEW: the blend from the rise's last key into the ruler's own stance (DS's 4-frame fade swings a 5.5× arm at 88 m/s, over AC-5's 30 m/s; 40 frames keep it under 9 m/s)",
+        "NEW: the blend from the rise's last key into the ruler's own stance (DS's 4-frame fade swings a 5.5× arm at 88 m/s, over AC-5's 30 m/s; with 40 frames the blend peaks at 8.3 m/s, and the fastest part of the whole rise is 12.6 m/s, through the kneel; measured on AC-5's fixture log)",
     },
   },
 );
@@ -199,6 +206,7 @@ const _qi = new Quaternion();
 const _p = new Vector3();
 const _o = new Vector3();
 const _a = new Vector3();
+const _n: V3 = { x: 0, y: 1, z: 0 };
 
 export class RulerBodies {
   readonly world: World;
@@ -299,7 +307,7 @@ export class RulerBodies {
 
   /**
    * Phase 4c, in fighter order: a ruler knocked out standing collapses; a pending trip switches the body to dynamic;
-   * a standing or rising ruler's zones are posed from the rig (§4.7), and its footfalls of this tick are `land` events.
+   * a standing or rising ruler's zones are posed from the rig (§4.7).
    */
   preStep(w: World): void {
     for (const f of w.combat.fighters) {
@@ -321,7 +329,6 @@ export class RulerBodies {
         continue;
       }
       this.poseStanding(f, rb);
-      this.footfalls(w, f);
     }
   }
 
@@ -903,20 +910,6 @@ export class RulerBodies {
     rb.jump = false;
   }
 
-  /** Phase 4c: a `land` event per foot set down this tick (§2.13 `land`, SPEC:849: a giant's footfall shakes). */
-  private footfalls(w: World, f: Fighter): void {
-    const landed = f.footwork.landed;
-    if (landed.length === 0) return;
-    const v = Math.hypot(f.walkVel.x, f.walkVel.z);
-    for (const side of landed) {
-      const mass = f.mass * (f.boneShare[side === 'L' ? 'thighL' : 'thighR'] + f.boneShare[side === 'L' ? 'shinL' : 'shinR']);
-      const energy = 0.5 * mass * v * v;
-      if (energy < IMPACT_TUNING.landMinJ) continue;
-      const p = f.footwork.foot(side).pos;
-      w.events.push({ type: 'land', entity: null, f, point: { x: p.x, y: p.y, z: p.z }, energy, mass });
-    }
-  }
-
   /** Phase 4c: the trip switch (§4.7), then the fighter tripped for getupAfterS, the down cause and wound, the event. */
   private trip(w: World, f: Fighter, rb: RulerBody, r: RulerState): void {
     const T = RULER_BODY_TUNING;
@@ -1105,21 +1098,27 @@ export class RulerBodies {
   }
 
   /**
-   * §4.7 "In a pit" (RR-1): the ruler's ground (while dynamic: the pelvis) more than pitDownDepthFrac × knee height below
-   * the original ground; a `pit` event on change.
+   * §4.7 "In a pit" (RR-1): into a pit when the ruler's ground (while dynamic: the pelvis) lies more than
+   * pitDownDepthFrac × knee height below the original ground; out of it again only when that point is within
+   * pitOutDepthFrac × knee height of the original ground and, standing, the terrain under the root is no steeper than
+   * maxSlopeDeg (it stands on the rim, not on the pit wall it is climbing); a `pit` event on change.
    * INTERPRETATION (§4.7 says "both planted feet"): the ground the root stands on, which the feet stand around. A 5.5×
    * stride plants a foot on the rim while the body still stands at the foot of the pit wall (the root stops there,
    * step 2), and by the feet it would be out of the pit (and recovering) with its body still in it.
+   * INTERPRETATION (hysteresis; §4.7 gives one threshold): the climb (step 3) raises the root up the wall face, and with
+   * one threshold in-pit went off halfway up the wall; the mind's climb (§6.4: while ruler.inPit) then stopped, the wall
+   * blocked it as a slope (step 2) and it stood on the wall for good, in-pit flickering every tick. "Down until it has
+   * climbed out" (SPEC:504) is the rim: within a small step of the original ground, off the wall.
    */
   private updatePit(w: World, f: Fighter, rb: RulerBody, r: RulerState): void {
-    const depth = RULER_BODY_TUNING.pitDownDepthFrac * rulerKneeM(f);
+    const T = RULER_BODY_TUNING;
+    const knee = rulerKneeM(f);
+    const p = rb.dynamic ? f.rig.pelvis.pos : f.pos;
+    const below = w.terrain.originalHeightAt(p.x, p.z) - p.y;
     let inPit: boolean;
-    if (rb.dynamic) {
-      const p = f.rig.pelvis.pos;
-      inPit = w.terrain.originalHeightAt(p.x, p.z) - p.y > depth;
-    } else {
-      inPit = w.terrain.originalHeightAt(f.pos.x, f.pos.z) - f.pos.y > depth;
-    }
+    if (!r.inPit) inPit = below > T.pitDownDepthFrac * knee;
+    else if (below > T.pitOutDepthFrac * knee) inPit = true;
+    else inPit = !rb.dynamic && w.terrain.normalAt(p.x, p.z, _n).y < Math.cos(T.maxSlopeDeg * DEG);
     if (inPit !== r.inPit) {
       r.inPit = inPit;
       w.events.push({ type: 'pit', f, on: inPit });
@@ -1158,10 +1157,14 @@ export class RulerBodies {
         for (let i = 0; i < b2.numColliders(); i++) frontier.push(b2.collider(i));
       }
     }
+    // Summed in owner order (§4.3), not by handle: handles aren't saved, and pinnedKg is (a loaded world must sum the
+    // same masses in the same order to the last bit).
+    const physics = this.world.physics;
+    const keyed = [...found.values()].map((b) => ({ b, o: b.numColliders() > 0 ? physics.ownerOf(b.collider(0).handle) : null }));
+    keyed.sort((x, y) => (x.o && y.o ? compareOwners(x.o, y.o) : x.o ? -1 : y.o ? 1 : 0) || x.b.handle - y.b.handle);
     let kg = 0;
     const entities: number[] = [];
-    for (const h of [...found.keys()].sort((a, b) => a - b)) {
-      const b = found.get(h)!;
+    for (const { b } of keyed) {
       kg += b.mass();
       for (let i = 0; i < b.numColliders(); i++) {
         const o = this.world.physics.ownerOf(b.collider(i).handle);

@@ -1,6 +1,7 @@
 // The ruler's hybrid body and RulerMover (docs/M1-DESIGN.md §4.7, P11): the body, AC-5's numbers on a fixture log,
 // deflection, shove and block, the rim and the pit wall (RR-1), in-pit, the climb out, the ledge and cover trips (RT-1),
-// the get-up over stakes (RF-1), pinned with hysteresis (D-38), footfalls, teleport and the save round trip (RR-19).
+// the get-up over stakes (RF-1), pinned with hysteresis (D-38), the down wound (§4.6), the trip switch's momentum (RF-14),
+// footfalls, teleport and the save round trip (RR-19).
 import { Vector3 } from 'three';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { BONES } from '../src/body/skeleton';
@@ -12,13 +13,14 @@ import type { Fighter } from '../src/sim/fighter';
 import { DT } from '../src/sim/math';
 import { newRulerState, RULER_TUNING, rulerDamage, rulerDown, rulerHeld, rulerHp } from '../src/sim/ruler';
 import { SPECIES_BODY } from '../src/sim/species';
-import { IMPACT_TUNING } from '../src/sim/impact';
 import { resetTuning } from '../src/tuning/registry';
+import { NOISE_TUNING } from '../src/world/creatures/defs';
 import { spawnBox, spawnLog } from '../src/world/factory';
 import { physicsReady } from '../src/world/physics';
 import { RULER_BODY_TUNING, rulerAnkleM, stepPinned } from '../src/world/rulerBody';
-import type { ImpactCause, Quat, WorldEvent } from '../src/world/types';
+import type { ImpactCause, Quat, V3, WorldEvent } from '../src/world/types';
 import { createWorld, type World, type WorldOptions } from '../src/world/world';
+import { boneZoneShape } from '../src/world/zones';
 
 // createCreature is P19's (a stub that throws until then). The loader makes a saved creature with it, so this file's
 // giant is made by it: DS's bruiser at the giant ape's scale, mass and RulerState, without a mind.
@@ -116,6 +118,64 @@ function rulerColliders(w: World, g: Fighter) {
 }
 
 const somebody: ImpactCause = { kind: 'entity', entityId: null, fighterId: null, credit: ['p1'], held: false, feature: 'falling' };
+
+/** The giant's ruler body (the one Rapier body all its colliders hang on). */
+function rulerBodyOf(w: World, g: Fighter) {
+  return w.physics.rapier.getCollider(rulerColliders(w, g)[0].handle).parent()!;
+}
+
+/** Records the velocities the ruler body is given (the trip switch's momentum fit), and still sets them. */
+function spyVelocities(w: World, g: Fighter): { lin: V3[]; ang: V3[] } {
+  const body = rulerBodyOf(w, g);
+  const got = { lin: [] as V3[], ang: [] as V3[] };
+  const setLin = body.setLinvel.bind(body);
+  const setAng = body.setAngvel.bind(body);
+  body.setLinvel = (v, wake) => {
+    got.lin.push({ x: v.x, y: v.y, z: v.z });
+    setLin(v, wake);
+  };
+  body.setAngvel = (v, wake) => {
+    got.ang.push({ x: v.x, y: v.y, z: v.z });
+    setAng(v, wake);
+  };
+  return got;
+}
+
+/** The giant's bone collider centres from its rig (the bone shapes' offsets, × scale), 3 numbers a bone in BONES order. */
+function colliderCentres(g: Fighter): number[] {
+  const out: number[] = [];
+  for (const b of BONES) {
+    const off = boneZoneShape(b, g.scale).off;
+    const c = new Vector3(off.x, off.y, off.z).applyQuaternion(g.rig[b].rot).add(g.rig[b].pos);
+    out.push(c.x, c.y, c.z);
+  }
+  return out;
+}
+
+/** Σ m_b (c_b − c'_b) / DT / M over the bones: the momentum fit of the motion from centres `before` to `after`. */
+function massVelocity(g: Fighter, after: number[], before: number[]): V3 {
+  let M = 0;
+  const v = { x: 0, y: 0, z: 0 };
+  BONES.forEach((b, i) => {
+    const m = g.mass * g.boneShare[b];
+    M += m;
+    v.x += (m * (after[3 * i] - before[3 * i])) / DT;
+    v.y += (m * (after[3 * i + 1] - before[3 * i + 1])) / DT;
+    v.z += (m * (after[3 * i + 2] - before[3 * i + 2])) / DT;
+  });
+  return { x: v.x / M, y: v.y / M, z: v.z / M };
+}
+
+/** Moves a standing (idle-paused) giant rigidly by (dx, 0, 0) before the next step: the root and both feet. */
+function translate(g: Fighter, dx: number): void {
+  g.pos.x += dx;
+  for (const side of ['L', 'R'] as const) {
+    const foot = g.footwork.foot(side);
+    foot.pos.x += dx;
+    foot.from.x += dx;
+    foot.to.x += dx;
+  }
+}
 
 describe('the body (§4.7)', () => {
   it('is one body with 12 bone sensors owned by the ruler standing, solid and weighing the giant once tripped', async () => {
@@ -372,6 +432,43 @@ describe('the rim, the pit wall, in-pit and the climb out (RR-1, RF-14)', () => 
     expect(g.pos.y).toBeCloseTo(0, 1);
     expect(g.pos.x).toBeGreaterThan(4);
   });
+
+  it('driven as the mind drives it (climb only while ruler.inPit, §6.4): down every tick until on the rim, one pit event, out', async () => {
+    const w = await make();
+    digPit(w, -4, 4, -3, 3, 2.5);
+    run(w, 1);
+    const g = giant(w, 0, 0, EAST);
+    run(w, 1);
+    expect(g.ruler!.inPit).toBe(true);
+    const mind = (): void => {
+      g.drive = { heading: EAST, speed: RULER_BODY_TUNING.climbWalkMps, accel: 5, climb: g.ruler!.inPit };
+    };
+    mind();
+    const pits: boolean[] = [];
+    let upBelowRim = 0;
+    let out = -1;
+    let outAt = { x: Number.NaN, y: Number.NaN };
+    run(w, 1500, (ev, t) => {
+      for (const e of ev) if (e.type === 'pit' && e.f === g) pits.push(e.on);
+      // Anywhere below the rim (the original ground is at 0 here), on the floor or on the wall it climbs: down.
+      if (g.pos.y < -0.01 && !rulerDown(g)) upBelowRim++;
+      if (out < 0 && !g.ruler!.inPit) {
+        out = t;
+        outAt = { x: g.pos.x, y: g.pos.y };
+      }
+      mind();
+    });
+    // In-pit went off once (no flicker on the wall), with the root on the rim past the wall's top, and it walked on.
+    expect(pits).toEqual([false]);
+    expect(upBelowRim).toBe(0);
+    expect(out).toBeGreaterThan(0);
+    expect(outAt.y).toBeGreaterThan(-0.01);
+    expect(outAt.x).toBeGreaterThan(4);
+    expect(g.ruler!.inPit).toBe(false);
+    expect(rulerDown(g)).toBe(false);
+    expect(g.pos.y).toBeCloseTo(0, 6);
+    expect(g.pos.x).toBeGreaterThan(outAt.x + 2);
+  });
 });
 
 describe('the ledge and the cover (§4.7 steps 7-8, RT-1)', () => {
@@ -587,38 +684,141 @@ describe('pinned (D-38, with hysteresis)', () => {
   });
 });
 
+describe('the down wound (§4.6, SPEC:505)', () => {
+  it("is the wound the trip tick's impact opened (the trip cause's); a later wound doesn't move it; a small hit finishes into it", async () => {
+    const w = await make();
+    const log = spawnLog(w, { p: { x: 20, y: 0.3, z: 20 }, q: LOG_Z, length: 3, mass: 600, state: 'fixed' });
+    const g = giant(w, 0, 0, EAST);
+    run(w, 2);
+    const r = g.ruler!;
+    const byLog: ImpactCause = { kind: 'entity', entityId: log, fighterId: null, credit: ['p1'], held: false, feature: 'falling' };
+    // Tick N: the log's impact opens a wound and trips the giant ('impact'); something else wounds it on the same tick.
+    const tick = w.tick;
+    const wound = rulerDamage(w, g, 500, 'knees', 'shinL', byLog, g.rig.shinL.pos.clone())!;
+    const other = rulerDamage(w, g, 300, 'leg', 'shinR', somebody, g.rig.shinR.pos.clone())!;
+    expect(wound.tick).toBe(tick);
+    expect(other.tick).toBe(tick);
+    w.rulers.requestTrip(g, 'impact', byLog);
+    expect(r.downWound).toBeNull();
+    let trip: Extract<WorldEvent, { type: 'trip' }> | null = null;
+    run(w, 1, (ev) => {
+      for (const e of ev) if (e.type === 'trip' && e.f === g) trip = { ...e };
+    });
+    expect(trip).not.toBeNull();
+    expect(trip!.why).toBe('impact');
+    expect(g.state).toBe('tripped');
+    expect(r.downWound).toBe(wound.id);
+    expect(r.downCause).toEqual(byLog);
+    // A later wound, even by the same log, is its own: the down wound stays.
+    const later = rulerDamage(w, g, 2000, 'back', 'chest', byLog, g.rig.chest.pos.clone())!;
+    expect(later.id).not.toBe(wound.id);
+    expect(r.downWound).toBe(wound.id);
+    // A hit below the wound threshold is finishing damage on the down wound (nothing recovers).
+    const before = wound.hp;
+    const unhealed = r.unhealed;
+    expect(rulerDamage(w, g, 100, 'flanks', 'abdomen', somebody, g.rig.abdomen.pos.clone())).toBeNull();
+    expect(wound.hp).toBeCloseTo(before + 100, 9);
+    expect(r.unhealed).toBe(unhealed);
+  });
+});
+
+describe('the trip switch (§4.7, RF-14)', () => {
+  it("carries the previous tick's motion of the walking rig into the body, not an older tick's", async () => {
+    const w = await make();
+    const g = giant(w, -30, 0, EAST);
+    g.drive = { heading: EAST, speed: 6, accel: 50, climb: false };
+    run(w, 157);
+    const got = spyVelocities(w, g);
+    const c0 = colliderCentres(g);
+    run(w, 1);
+    const c1 = colliderCentres(g);
+    run(w, 1);
+    const c2 = colliderCentres(g);
+    w.rulers.requestTrip(g, 'impact', null);
+    run(w, 1);
+    expect(g.state).toBe('tripped');
+    expect(got.lin).toHaveLength(1);
+    const prev = massVelocity(g, c2, c1);
+    const older = massVelocity(g, c1, c0);
+    const lin = got.lin[0];
+    expect(Math.hypot(lin.x - prev.x, lin.y - prev.y, lin.z - prev.z)).toBeLessThan(1e-9);
+    // (The DS stride swings the whole 5.5× body: the pairs differ, so the check above tells them apart.)
+    expect(Math.hypot(older.x - prev.x, older.y - prev.y, older.z - prev.z)).toBeGreaterThan(0.05);
+    expect(got.ang.every((a) => [a.x, a.y, a.z].every(Number.isFinite))).toBe(true);
+  });
+
+  it('a giant moving steadily over a pit cover keeps its velocity when the cover goes; the drop does not leak in (vy ≈ 0)', async () => {
+    const w = await make();
+    digPit(w, -4, 4, -3, 3, 2.5);
+    const cover = spawnBox(w, { p: { x: 0, y: 0.1, z: 0 }, size: [10, 0.2, 8], material: 'dryWood', look: 'plank' });
+    run(w, 40);
+    const g = giant(w, -14, 0, EAST);
+    g.drive = { heading: EAST, speed: 2, accel: 5, climb: false };
+    run(w, 900, () => g.pos.x > -1);
+    // On the cover over the hole: stop, hold still, then move rigidly at 3 m/s (root and feet together).
+    g.drive = null;
+    g.idlePaused = true;
+    run(w, 90);
+    expect(g.pos.y).toBeCloseTo(0.2, 3);
+    const got = spyVelocities(w, g);
+    const v = 3;
+    for (let k = 0; k < 6; k++) {
+      translate(g, v * DT);
+      run(w, 1);
+    }
+    const pelvisY = g.rig.pelvis.pos.y;
+    // The cover goes before the next step: the giant's ground drops 2.7 m under it on the trip tick.
+    translate(g, v * DT);
+    w.removeEntity(cover);
+    let why = '';
+    run(w, 1, (ev) => {
+      for (const e of ev) if (e.type === 'trip' && e.f === g) why = e.why;
+    });
+    expect(why).toBe('cover');
+    expect(got.lin).toHaveLength(1);
+    const lin = got.lin[0];
+    const ang = got.ang[0];
+    expect(lin.x).toBeCloseTo(v, 1);
+    expect(Math.abs(lin.y)).toBeLessThan(0.05);
+    expect(Math.abs(lin.z)).toBeLessThan(0.05);
+    expect(Math.hypot(ang.x, ang.y, ang.z)).toBeLessThan(0.05);
+    // The body starts where the pelvis stood (one physics step of gravity later), not 2.7 m lower.
+    expect(Math.abs(w.rulers.pose(g.id)!.p.y - pelvisY)).toBeLessThan(0.05);
+  });
+});
+
 describe('footfalls', () => {
-  it("a walking giant's feet set down are land events at the foot; the mover empties footwork.landed every tick", async () => {
+  it("a walking giant's feet set down are this tick's footwork.landed, heard as its footsteps; never `land` events", async () => {
     const w = await make();
     const g = giant(w, -10, 0, EAST);
     g.drive = { heading: EAST, speed: 2, accel: 5, climb: false };
-    let lands = 0;
+    const noises: { kind: string; radius: number }[] = [];
+    const emit = w.noise.emit.bind(w.noise);
+    w.noise.emit = (n) => {
+      if (n.source === g.id) noises.push({ kind: n.kind, radius: n.radius });
+      emit(n);
+    };
+    let set = 0;
     let maxLanded = 0;
-    let mismatch = 0;
-    const legs = g.mass * (g.boneShare.thighL + g.boneShare.shinL);
+    let lands = 0;
     run(w, 400, (ev) => {
-      const mine = ev.filter((e): e is Extract<WorldEvent, { type: 'land' }> => e.type === 'land' && e.f === g);
+      set += g.footwork.landed.length;
       maxLanded = Math.max(maxLanded, g.footwork.landed.length);
-      if (mine.length !== g.footwork.landed.length) mismatch++;
-      const v = Math.hypot(g.walkVel.x, g.walkVel.z);
-      for (const e of mine) {
-        lands++;
-        expect(e.entity).toBeNull();
-        expect(e.energy).toBeGreaterThanOrEqual(IMPACT_TUNING.landMinJ);
-        expect(e.energy).toBeCloseTo(0.5 * e.mass * v * v, 6);
-        expect(e.mass).toBeCloseTo(legs, 6);
-        expect(Math.abs(e.point.y - g.pos.y)).toBeLessThan(0.5);
-      }
+      lands += ev.filter((e) => e.type === 'land' && e.f === g).length;
     });
-    expect(lands).toBeGreaterThan(4);
+    expect(set).toBeGreaterThan(4);
     expect(maxLanded).toBeLessThanOrEqual(2);
-    expect(mismatch).toBe(0);
+    expect(lands).toBe(0);
+    // One walking footstep (§6.2: 6 m × scale) per foot set down, and no heavy landing (a 2 t leg would be heard at 120 m).
+    expect(noises.length).toBe(set);
+    expect(noises.every((n) => n.kind === 'step' && n.radius === NOISE_TUNING.stepWalk * g.scale)).toBe(true);
     // A foot set down by an earlier tick never comes back as this tick's.
-    g.footwork.landed.push('L', 'R');
     g.drive = null;
     g.idlePaused = true;
+    run(w, 120);
+    g.footwork.landed.push('L', 'R');
     run(w, 1);
-    expect(w.events.filter((e) => e.type === 'land' && e.f === g).length).toBe(g.footwork.landed.length);
+    expect(g.footwork.landed).toEqual([]);
   });
 });
 

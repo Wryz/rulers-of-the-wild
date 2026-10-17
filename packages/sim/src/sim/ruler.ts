@@ -303,7 +303,7 @@ export interface RulerDamageWorld {
  * §4.6 (SPEC:500-506; thresholds are "above", so strict, RR-8). `hp` of damage on `zone` of `bone` at world `point`:
  * - hp > woundFrac × maxHp: a new wound (severe above severeFrac × maxHp, with its effect by zone); a `wound` event
  *   (byWorld: an unheld entity, or the terrain within envKillWindowS of the last world trip, RR-14). A new wound never
- *   moves downWound (RR-8);
+ *   moves downWound (RR-8); while held with none, one opened by downCause's entity becomes it;
  * - else, while held (down, stuck or pinned): finishing damage added to downWound; with none, a wound is opened with
  *   downCause (D-37) and becomes downWound;
  * - else unhealed damage (it recovers).
@@ -329,6 +329,11 @@ export function rulerDamage(
     const local = woundLocal(f, bone, point);
     opened = makeWound(w, zone, bone, local, severe ? severeEffect(zone, local) : null, severe, hp, cause, tick);
     r.wounds.push(opened);
+    // INTERPRETATION (§4.6 names the trip tick's wound, a pinning body's, or D-37's): held with no down wound yet, the
+    // first wound opened by the entity that put it down (downCause) is the down wound. An 'obstacle' trip stops the
+    // capsule short of the log, and the legs strike it only once the body is dynamic, after the trip tick; this wound,
+    // not a second one D-37 would open with the same cause, is "the wound that put it there" (SPEC:505).
+    if (r.downWound === null && cause.entityId !== null && r.downCause?.entityId === cause.entityId && rulerHeld(f)) r.downWound = opened.id;
     w.events?.push({ type: 'wound', ruler: f, wound: opened, byWorld: byWorld(r, cause, tick) });
   } else if (rulerHeld(f)) {
     const down = r.downWound === null ? undefined : r.wounds.find((x) => x.id === r.downWound);
@@ -419,6 +424,10 @@ export function rulerHit(
   rulerDamage(w, d, hp, rz, bone, cause, point);
   const ko = knockedOut(d);
   // 4. The attacker: DungeonStyle's reaction for a blow that beats the zone, a rebound and a bump for one that doesn't.
+  //    INTERPRETATION (§4.6 step 4 says E > T → a.impact('stick', max(4, hold), heavy ? 16 : 12) for every blow): only
+  //    an edge (cut > 0) sticks, as at the end of DungeonStyle's hit(); a blunt weapon, a fist or a foot that beats the
+  //    zone rebounds with DungeonStyle's values (weapon 3/11, kick 2/10, punch 2/8), and one that knocks the ruler out
+  //    gets no reaction (DS: the KO blow follows through). A fist or a blunt weapon has no edge to bite in with.
   const beats = E > T;
   const held = thrown ?? a.weapon;
   const weapon = m.weapon && !haft ? held : null;

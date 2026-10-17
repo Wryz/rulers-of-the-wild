@@ -316,6 +316,31 @@ describe('rulerDamage (§4.6, SPEC:500-506)', () => {
     expect(r.unhealed).toBe(7);
   });
 
+  it("held with no down wound, the first wound opened by the down cause's entity becomes it; nobody else's does", () => {
+    // An 'obstacle' trip stops the giant short of the log; its legs strike the log only after the trip tick.
+    const { g, w } = giantScene();
+    const r = g.ruler!;
+    const pt = g.rig.shinL.pos.clone();
+    // Standing, a wound by that entity is no down wound (nothing put it down).
+    r.downCause = { ...ENTITY };
+    rulerDamage(w, g, 500, 'knees', 'shinL', ENTITY, pt);
+    expect(r.downWound).toBeNull();
+    g.setState('tripped');
+    // Another entity's wound, or one with no entity, isn't what put it down.
+    rulerDamage(w, g, 500, 'knees', 'shinL', { ...ENTITY, entityId: 9 }, pt);
+    rulerDamage(w, g, 500, 'knees', 'shinL', TERRAIN, pt);
+    expect(r.downWound).toBeNull();
+    const byCause = rulerDamage(w, g, 600, 'knees', 'shinL', ENTITY, pt)!;
+    expect(r.downWound).toBe(byCause.id);
+    // A later wound by the same entity is its own; finishing goes into the first.
+    const later = rulerDamage(w, g, 700, 'knees', 'shinL', ENTITY, pt)!;
+    expect(later.id).not.toBe(byCause.id);
+    expect(r.downWound).toBe(byCause.id);
+    rulerDamage(w, g, 20, 'knees', 'shinL', HELD_LOG, pt);
+    expect(byCause.hp).toBe(620);
+    expect(r.wounds).toHaveLength(5);
+  });
+
   it('knocks the ruler out at 0 HP: by a strike for a creature’s held blow, by impact otherwise, once', () => {
     for (const [cause, by] of [
       [ENTITY, 'impact'],
