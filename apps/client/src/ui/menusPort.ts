@@ -3,12 +3,14 @@
 // started once per session (docs/M1-DESIGN.md §10.11; the clip button is M5). The adapter file P35 changes, so game.ts
 // never has to (RF-9).
 //
-// STUB (P31; P35 fills it): DungeonStyle's settings, battle log and marks (game.ts logHit). A recording is filed when
-// the player dies and the next starts at the respawn, so a session isn't one ever-growing video.
+// DungeonStyle's settings, battle log and marks (game.ts logHit). A recording is filed when the player dies and the next
+// starts at the respawn, so a session isn't one ever-growing video. A menu opening lets go of the pointer (the mouse
+// looks around under pointer lock, §5.14), so its buttons can be clicked.
+// P35: Settings lists M1's controls (§5.14) and the pad's; "Blood effects" sets prefs.gore ('full' / 'off'), the one
+// value game.ts goreOf reads (rule 12; the three-level setting is M5's); a "Crouch key" row picks toggle or hold.
+// TODO(P36): "Fight tips" and the telegraph-ring part of "Combat cues" still do nothing while the HUD leaves the tips and
+// telegraph rings out (ui/hudPort.ts): drop the rows, or bring the HUD pieces back (P36's call).
 // TODO(M5): the rolling 30 s buffer and the clip button replace this.
-// TODO(P35): Settings (ui/settings.ts) still offers DS's rows: "Fight tips" does nothing now (the tips HUD is not shown,
-// see ui/hudPort.ts), nor does the telegraph-ring part of "Combat cues"; "Blood effects" stands in for the gore level
-// (game.ts goreOf) until prefs.gore; its controls text ("Gamepad: X/Y punch, A/B kick", "G grab") predates §5.14.
 import type { Fighter, World } from '@wild/sim';
 import type { MenusPort, SimEvent } from '../game/ports';
 import type { Prefs } from '../game/prefs';
@@ -45,6 +47,7 @@ export class Menus implements MenusPort {
 
   openLog(): void {
     if (this.open) return;
+    if (typeof document !== 'undefined' && document.pointerLockElement) document.exitPointerLock?.();
     this.log.open();
   }
 
