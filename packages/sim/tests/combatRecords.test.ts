@@ -6,11 +6,13 @@
 //   swept, continues bit-identically in a fresh CombatSim restored from the record's canonical text: every tick, the
 //   sim's own state (read from its internals, never through toRecord), every fighter's and brain's state and the
 //   events equal the uninterrupted fight's. The fighters' own state comes from a twin of the fight that ran the same
-//   ticks (their records are P04's, not on this branch): its fighters and brains are moved into the fresh sim as they
-//   are and re-linked to the fresh sim's shared Rng, drops and director (and a weapon being reached for to its drop, by
-//   id, as P04's Fighter.restoreRecord does), so everything CombatSim itself owns comes from the record alone.
+//   ticks (their records are P04's, tested in records.test.ts; this test keeps CombatSim's record apart from them): its
+//   fighters and brains are moved into the fresh sim as they are and re-linked to the fresh sim's shared Rng, drops
+//   and director (and a weapon being reached for to its drop, by id, as P04's Fighter.restoreRecord does), so
+//   everything CombatSim itself owns comes from the record alone.
 // - A record with any one field left out (the value a fresh sim has in its place) is caught by that comparison.
 // - Every own field of a CombatSim is in the record, saved by its owner, or named with the reason it isn't.
+// - A field missing or of the wrong kind throws a `save record:` error naming it, before the sim is changed.
 // - record → canonical text → restore → record is identical, −0, ±Infinity and NaN included.
 // - DAMAGE_TUNING.bladeSharpness is the thrown rule's s for a DungeonStyle blade, read live.
 //
@@ -230,6 +232,8 @@ interface Scenario {
   script?: (sim: CombatSim, next: number) => void;
   /** Where a save is taken: the first ticks (at least `gap` apart, up to `saves` of them) whose state has these. */
   saveWhen(x: Features): boolean;
+  /** What the scenario's save points must hold between them (each feature > 0 at one save point at least). */
+  covers: (keyof Features)[];
   saves: number;
   gap: number;
   /** Ticks to look for save points in, and how long each restored copy is followed. */
@@ -274,6 +278,7 @@ const SCENARIOS: Scenario[] = [
     },
     // Weapons lying around, in flight and swung, all at once.
     saveWhen: (x) => x.drops > 0 && x.inFlight > 0 && x.blades > 0,
+    covers: ['drops', 'inFlight', 'blades', 'pending'],
     saves: 3,
     gap: 60,
     ticks: 2400,
@@ -312,6 +317,7 @@ const SCENARIOS: Scenario[] = [
       }
     },
     saveWhen: (x) => x.passed > 0,
+    covers: ['drops', 'inFlight', 'passed'],
     saves: 1,
     gap: 0,
     ticks: 120,
@@ -342,6 +348,7 @@ const SCENARIOS: Scenario[] = [
     },
     // A weapon in flight while someone goes down for one lying on the floor (its drop re-linked by id).
     saveWhen: (x) => x.drops > 0 && x.inFlight > 0 && x.pickups > 0,
+    covers: ['drops', 'inFlight', 'pickups', 'pending'],
     saves: 1,
     gap: 0,
     ticks: 2400,
@@ -371,6 +378,7 @@ const SCENARIOS: Scenario[] = [
     },
     // Someone reaching for a weapon on the floor (its drop re-linked by id), or a blade swung beside dropped ones.
     saveWhen: (x) => x.drops > 0 && (x.pickups > 0 || x.blades > 0),
+    covers: ['drops', 'pickups', 'blades', 'pending'],
     saves: 2,
     gap: 120,
     ticks: 2400,
@@ -582,8 +590,6 @@ function firstDiff(got: string, want: string): string {
 // ---------------------------------------------------------------------------
 
 describe('CombatSim.toRecord / restoreRecord: a legacy fight saved mid-way continues bit-identically', () => {
-  const seen: Record<string, number> = { drops: 0, inFlight: 0, passed: 0, blades: 0, pickups: 0, pending: 0 };
-
   for (const sc of SCENARIOS) {
     it(
       sc.name,
@@ -593,16 +599,19 @@ describe('CombatSim.toRecord / restoreRecord: a legacy fight saved mid-way conti
         // Every save point was found and followed for its whole length.
         expect(r.saves).toHaveLength(sc.saves);
         expect(r.checked).toBe(sc.saves * sc.follow);
-        for (const s of r.saves) for (const k of Object.keys(seen)) if (s.features[k as keyof Features] > 0) seen[k]++;
+        // Its save points held what the scenario is there to cover.
+        for (const k of sc.covers) expect(r.saves.some((s) => s.features[k] > 0), k).toBe(true);
       },
       120_000,
     );
   }
 
-  it('the save points held everything the record covers', () => {
+  it('the scenarios between them cover everything the record covers', () => {
     // Weapons lying around and in flight, in flight past someone, blades swept, a weapon being reached for in a drop
-    // still lying there (re-linked by drop id), and the next tick's commands queued.
-    for (const k of Object.keys(seen)) expect(seen[k], k).toBeGreaterThan(0);
+    // still lying there (re-linked by drop id), and the next tick's commands queued. (Each scenario's own test checks
+    // that its save points held its `covers`, so this one stands alone: it runs no fight.)
+    const covered = new Set(SCENARIOS.flatMap((sc) => sc.covers));
+    expect([...covered].sort()).toEqual(Object.keys(features(new CombatSim())).sort());
   });
 
   it(
@@ -746,6 +755,40 @@ describe('the record', () => {
     const c = new CombatSim(1);
     c.fighters.push(...sim.fighters);
     expect(() => c.restoreRecord(broken)).toThrow(/yaw is null, not a number/);
+  });
+
+  it('refuses a field missing or of the wrong kind with a save record error naming it, and leaves the sim as it was', () => {
+    const { sim } = scene(false);
+    type Rec = Record<string, unknown> & { drops: Record<string, unknown>[]; projectiles: Record<string, unknown>[]; prevBlade: unknown[] };
+    const breaks: [string, (r: Rec) => void, RegExp][] = [
+      ['live not a boolean', (r) => (r.projectiles[0].live = 1), /projectiles\[0\]\.live is 1, not a boolean/],
+      ['passed missing', (r) => delete r.projectiles[0].passed, /projectiles\[0\]\.passed is missing, not an array/],
+      ['passed not an array', (r) => (r.projectiles[0].passed = 2), /projectiles\[0\]\.passed is 2, not an array/],
+      ['weapon missing', (r) => delete r.drops[0].weapon, /drops\[0\]\.weapon is missing, not an object/],
+      ['weapon id not a string', (r) => ((r.drops[0].weapon as Record<string, unknown>).id = 7), /drops\[0\]\.weapon\.id is 7, not a string/],
+      ['weapon def missing', (r) => delete (r.projectiles[1].weapon as Record<string, unknown>).def, /projectiles\[1\]\.weapon\.def is missing, not an object/],
+      ['an unknown weapon', (r) => ((r.drops[0].weapon as Record<string, unknown>).id = 'toString'), /drops\[0\]\.weapon is weapon "toString", which doesn't exist/],
+      ['a vector missing', (r) => delete r.projectiles[0].vel, /projectiles\[0\]\.vel is missing, not an object/],
+      ['a vector component missing', (r) => delete (r.drops[1].pos as Record<string, unknown>).z, /drops\[1\]\.pos\.z is missing, not a number/],
+      ['drops not an array', (r) => (r.drops = null as unknown as Rec['drops']), /drops is null, not an array/],
+      ['prevBlade missing', (r) => delete (r as Partial<Rec>).prevBlade, /prevBlade is missing, not an array/],
+      ['a blade entry not a pair', (r) => (r.prevBlade[0] = [2]), /prevBlade\[0\] is \[2\], not \[fighter id, points\]/],
+      ['blade points not an array', (r) => ((r.prevBlade[0] as unknown[])[1] = {}), /prevBlade\[0\]\[1\] is \{\}, not an array/],
+      ['pending missing', (r) => delete r.pending, /pending is missing, not an array/],
+      ['a pending command not an object', (r) => ((r.pending as unknown[])[1] = 'jump'), /pending\[1\] is "jump", not an object/],
+      ['frame not a number', (r) => Object.assign(r, { frame: 'soon' }), /frame is "soon", not a number/],
+    ];
+    for (const [what, brk, msg] of breaks) {
+      const c = scene(false).sim;
+      const before = canon(c.toRecord());
+      const r = reread(sim.toRecord()) as unknown as Rec;
+      brk(r);
+      expect(() => c.restoreRecord(r as unknown as CombatSimRecord), what).toThrow(msg);
+      expect(() => c.restoreRecord(r as unknown as CombatSimRecord), what).toThrow(/^save record: /);
+      // Nothing was changed: the restore read the whole record before it touched the sim.
+      expect(canon(c.toRecord()), what).toBe(before);
+    }
+    expect(() => new CombatSim(1).restoreRecord(null as unknown as CombatSimRecord)).toThrow(/^save record: combat is null, not an object/);
   });
 
   it('names every own field of a CombatSim: in the record, saved by its owner, or not saved and why', () => {

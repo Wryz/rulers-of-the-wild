@@ -2,7 +2,8 @@ import { Vector3 } from 'three';
 import { type BoneName, bonePoint, fistPoint, footPoint, SKELETON } from '../body/skeleton';
 import type { PoseName } from '../body/poses';
 import { AIDirector, type Brain, MAX_HEFT } from './ai';
-import { type Button, type Fighter } from './fighter';
+import { boolFromRecord, numFromRecord, readV3, strFromRecord, v3Record } from '../body/animator';
+import { type Button, type Fighter, type WeaponRecord } from './fighter';
 import { RectWalkable, type Walkable } from '../world/collision';
 import type { Finish, FighterMover, GroundQuery, ImpactCause, RulerZoneId, V3, Work, WorldPort } from '../world/types';
 import { getTuningValue } from '../tuning/registry';
@@ -491,30 +492,43 @@ export class CombatSim {
    * Puts back a toRecord() state, re-linking fighters by id against `fighters` (default: the sim's own, which a loader
    * has already added). Call it after every fighter has been made (making one can draw from this Rng) and before
    * Fighter.restoreRecord, which re-links a weapon being reached for to its drop here. The arrays, the map, the Rng and
-   * the command queue keep their identity (brains share `drops` and `rng`). A fighter id that isn't among `fighters`
-   * throws: the record is broken.
+   * the command queue keep their identity (brains share `drops` and `rng`). A broken record (a field missing or of the
+   * wrong kind, a weapon that doesn't exist, a fighter id that isn't among `fighters`) throws a `save record:` error
+   * before anything is changed. (A pending command's own fields are the command queue's to check; TODO(P13).)
    */
-  restoreRecord(r: CombatSimRecord, fighters: readonly Fighter[] = this.fighters): void {
+  restoreRecord(rec: CombatSimRecord, fighters: readonly Fighter[] = this.fighters): void {
     const byId = (id: unknown, field: string): Fighter => {
       const n = numFromRecord(id, field);
       const f = fighters.find((o) => o.id === n);
-      if (!f) throw new Error(`CombatSim.restoreRecord: ${field} is fighter ${n}, who isn't among the fighters`);
+      if (!f) throw new Error(`save record: ${field} is fighter ${n}, who isn't among the fighters`);
       return f;
     };
-    this.frame = numFromRecord(r.frame, 'frame');
-    this.rng.state = numFromRecord(r.rng, 'rng');
-    this.dropSerial = numFromRecord(r.dropSerial, 'dropSerial');
-    this.projSerial = numFromRecord(r.projSerial, 'projSerial');
+    // Everything is read first, so a broken record leaves the sim as it was.
+    const r = objFromRecord(rec, 'combat');
+    const frame = numFromRecord(r.frame, 'frame');
+    const rng = numFromRecord(r.rng, 'rng');
+    const dropSerial = numFromRecord(r.dropSerial, 'dropSerial');
+    const projSerial = numFromRecord(r.projSerial, 'projSerial');
+    const drops = arrFromRecord(r.drops, 'drops').map((d, i) => dropFromRecord(d, `drops[${i}]`));
+    const projectiles = arrFromRecord(r.projectiles, 'projectiles').map((p, i) => projectileFromRecord(p, `projectiles[${i}]`, byId));
+    const blades = arrFromRecord(r.prevBlade, 'prevBlade').map((e, i): [Fighter, Vector3[]] => {
+      const at = `prevBlade[${i}]`;
+      const pair = arrFromRecord(e, at);
+      if (pair.length !== 2) throw brokenRecord(at, e, '[fighter id, points]');
+      return [byId(pair[0], `${at}[0]`), arrFromRecord(pair[1], `${at}[1]`).map((v, j) => vecFromRecord(v, `${at}[1][${j}]`))];
+    });
+    const pending = arrFromRecord(r.pending, 'pending').map((c, i) => objFromRecord(c, `pending[${i}]`)) as unknown as Command[];
+    this.commands.restoreRecord(pending);
+    this.frame = frame;
+    this.rng.state = rng;
+    this.dropSerial = dropSerial;
+    this.projSerial = projSerial;
     this.drops.length = 0;
-    for (const d of r.drops) this.drops.push(dropFromRecord(d));
+    this.drops.push(...drops);
     this.projectiles.length = 0;
-    for (const p of r.projectiles) this.projectiles.push(projectileFromRecord(p, byId));
+    this.projectiles.push(...projectiles);
     this.prevBlade.clear();
-    for (const [id, pts] of r.prevBlade) {
-      const f = byId(id, 'prevBlade');
-      this.prevBlade.set(f, pts.map((v, i) => readV3(v, new Vector3(), `prevBlade[${f.id}][${i}]`)));
-    }
-    this.commands.restoreRecord(r.pending);
+    for (const [f, pts] of blades) this.prevBlade.set(f, pts);
     // As at the end of a tick: no events left from before, the director on this tick, the per-tick scratch empty.
     this.events.length = 0;
     this.director.frame = this.frame;
@@ -2178,27 +2192,28 @@ export class CombatSim {
 // CombatSim's save records (docs/M1-DESIGN.md §8.3; MAP gap-7 §3.1, §6). Plain data, keys in a fixed order: fighters by
 // id, weapons by id, vectors as V3, sets as arrays in their insertion order. P13 places them in SaveV1: `frame` is
 // `tick`, `rng` is `rng.combat`, the serials are `counters.dropSerial`/`counters.projSerial`, `drops`, `projectiles`,
-// `pending` as they are, and `prevBlade` is the new field `prevBlade: [number, V3[]][]`.
+// `pending` as they are, and `prevBlade` is a new field, `prevBlade: [number, V3[]][]` (MAP gap-7 §3.1: save it, or
+// resumes keep a different set of swept blades). TODO(P13): §8.3's SaveV1 doesn't list it yet; add it there, to
+// save/schema.ts's SaveV1 and to the save's completeness inventory.
 // ---------------------------------------------------------------------------
 
-/**
- * A weapon in a record: its id, and its definition by value when it isn't the shared WEAPONS[id] object (a tool the
- * world synthesised from an entity, §5.2); null: the WEAPONS entry itself, whose identity the sim relies on. The shape
- * of P04's `WeaponRecord` (sim/fighter.ts). TODO(P13): one type for both once P04 has merged.
- */
-export type CombatWeaponRecord = { id: WeaponId; def: WeaponDef | null };
+/** A weapon in a record: P04's WeaponRecord (sim/fighter.ts), the one shape for a weapon in the save. */
+export type CombatWeaponRecord = WeaponRecord;
+
+// The records are type aliases, not interfaces, so they are assignable to the save's `{ id: number; [field: string]:
+// unknown }` placeholders (save/schema.ts's DropRecV1 and ProjRecV1) until P13 gives those their exact fields.
 
 /** A weapon lying around (Drop); `from` null when it was placed rather than let go of. */
-export interface DropRecord {
+export type DropRecord = {
   id: number;
   weapon: CombatWeaponRecord;
   pos: V3;
   yaw: number;
   from: V3 | null;
-}
+};
 
 /** A weapon in flight (Projectile): its thrower by fighter id, `passed` as fighter ids in the order they got out of its way. */
-export interface ProjectileRecord {
+export type ProjectileRecord = {
   id: number;
   serial: number;
   weapon: CombatWeaponRecord;
@@ -2214,10 +2229,10 @@ export interface ProjectileRecord {
   live: boolean;
   age: number;
   passed: number[] | null;
-}
+};
 
 /** CombatSim's own state (CombatSim.toRecord), in this key order. */
-export interface CombatSimRecord {
+export type CombatSimRecord = {
   /** The last tick run (the world's tick). */
   frame: number;
   /** CombatSim.rng's state (uint32); brains share this Rng, so it is restored in place. */
@@ -2230,39 +2245,58 @@ export interface CombatSimRecord {
   prevBlade: [number, V3[]][];
   /** The command queue, in queue order (CommandQueue.toRecord). */
   pending: Command[];
+};
+
+// The readers take a record as `unknown` and check every field they take back, with body/animator.ts's readers (P04):
+// anything missing or of the wrong kind throws a `save record:` error naming the field, never a TypeError.
+
+function brokenRecord(field: string, v: unknown, what: string): Error {
+  return new Error(`save record: ${field} is ${v === undefined ? 'missing' : JSON.stringify(v)}, not ${what}`);
 }
 
-// Number and vector helpers of the records. TODO(P04 merge): body/animator.ts's numFromRecord, v3Record and readV3 (P04)
-// are these, the same semantics; import them from there once P04 has merged (they aren't on this branch yet).
+/** A plain object read back from a record (not null, not an array); anything else throws. */
+function objFromRecord(v: unknown, field: string): Readonly<Record<string, unknown>> {
+  if (v !== null && typeof v === 'object' && !Array.isArray(v)) return v as Record<string, unknown>;
+  throw brokenRecord(field, v, 'an object');
+}
+
+/** An array read back from a record; anything else throws. */
+function arrFromRecord(v: unknown, field: string): readonly unknown[] {
+  if (Array.isArray(v)) return v;
+  throw brokenRecord(field, v, 'an array');
+}
+
+/** A V3 record read back into a new Vector3 (readV3 checks each of x, y and z). */
+function vecFromRecord(v: unknown, field: string): Vector3 {
+  return readV3(objFromRecord(v, field) as unknown as V3, new Vector3(), field);
+}
+
+/** An own property of a table (a weapon id never reaches the prototype). */
+function ownWeapon(id: string): WeaponDef | undefined {
+  return Object.prototype.hasOwnProperty.call(WEAPONS, id) ? WEAPONS[id as WeaponId] : undefined;
+}
+
+// TODO(P04): fighter.ts's weaponRecord/weaponFromRecord and clonePlain are these; use them once they are exported.
+function weaponRecord(w: WeaponDef): CombatWeaponRecord {
+  return { id: w.id, def: ownWeapon(w.id) === w ? null : plainCopy(w) };
+}
 
 /**
- * One number read back from a record: a number as it is (−0 included), or the string the canonical writer gives a
- * non-finite number ('$inf', '$-inf', '$nan'; §8.3). Anything else (a JSON null among them) is a broken record.
+ * A WEAPONS entry by id, or a synthesised tool's definition by value (whose id must be the record's). The definition's
+ * own fields are copied as they are: they are the WeaponDef type's, checked by P13's schema validation of the save
+ * (docs/M1-DESIGN.md §8.3), as P04's Fighter records leave them.
  */
-function numFromRecord(v: unknown, field: string): number {
-  if (typeof v === 'number') return v;
-  if (v === '$inf') return Infinity;
-  if (v === '$-inf') return -Infinity;
-  if (v === '$nan') return NaN;
-  throw new Error(`save record: ${field} is ${JSON.stringify(v)}, not a number`);
-}
-
-function v3Record(v: Readonly<V3>): V3 {
-  return { x: v.x, y: v.y, z: v.z };
-}
-
-function readV3(r: V3, out: Vector3, field: string): Vector3 {
-  return out.set(numFromRecord(r.x, `${field}.x`), numFromRecord(r.y, `${field}.y`), numFromRecord(r.z, `${field}.z`));
-}
-
-function weaponRecord(w: WeaponDef): CombatWeaponRecord {
-  return { id: w.id, def: Object.prototype.hasOwnProperty.call(WEAPONS, w.id) && WEAPONS[w.id] === w ? null : plainCopy(w) };
-}
-
-function weaponFromRecord(r: CombatWeaponRecord, field: string): WeaponDef {
-  if (r.def) return plainCopy(r.def);
-  if (!Object.prototype.hasOwnProperty.call(WEAPONS, r.id)) throw new Error(`save record: ${field} is weapon ${JSON.stringify(r.id)}, which doesn't exist`);
-  return WEAPONS[r.id];
+function weaponFromRecord(v: unknown, field: string): WeaponDef {
+  const r = objFromRecord(v, field);
+  const id = strFromRecord(r.id, `${field}.id`);
+  if (r.def !== null) {
+    const def = objFromRecord(r.def, `${field}.def`);
+    if (def.id !== id) throw brokenRecord(`${field}.def.id`, def.id, `the record's weapon id ${JSON.stringify(id)}`);
+    return plainCopy(def) as unknown as WeaponDef;
+  }
+  const w = ownWeapon(id);
+  if (!w) throw new Error(`save record: ${field} is weapon ${JSON.stringify(id)}, which doesn't exist`);
+  return w;
 }
 
 /** A deep copy of plain data in its key order, leaving out undefined values (a WeaponDef is numbers, strings and a map). */
@@ -2283,15 +2317,15 @@ function dropRecord(d: Drop): DropRecord {
   return { id: d.id, weapon: weaponRecord(d.weapon), pos: v3Record(d.pos), yaw: d.yaw, from: d.from ? v3Record(d.from) : null };
 }
 
-function dropFromRecord(r: DropRecord): Drop {
-  const at = `drop ${r.id}`;
+function dropFromRecord(v: unknown, at: string): Drop {
+  const r = objFromRecord(v, at);
   return {
-    id: numFromRecord(r.id, 'drop.id'),
+    id: numFromRecord(r.id, `${at}.id`),
     weapon: weaponFromRecord(r.weapon, `${at}.weapon`),
-    pos: readV3(r.pos, new Vector3(), `${at}.pos`),
+    pos: vecFromRecord(r.pos, `${at}.pos`),
     yaw: numFromRecord(r.yaw, `${at}.yaw`),
     // (As addDrop makes it: the key is there, undefined for a placed weapon.)
-    from: r.from ? readV3(r.from, new Vector3(), `${at}.from`) : undefined,
+    from: r.from === null ? undefined : vecFromRecord(r.from, `${at}.from`),
   };
 }
 
@@ -2315,27 +2349,28 @@ function projectileRecord(p: Projectile): ProjectileRecord {
   };
 }
 
-function projectileFromRecord(r: ProjectileRecord, byId: (id: unknown, field: string) => Fighter): Projectile {
-  const at = `projectile ${r.id}`;
-  const n = (v: unknown, k: string) => numFromRecord(v, `${at}.${k}`);
+function projectileFromRecord(v: unknown, at: string, byId: (id: unknown, field: string) => Fighter): Projectile {
+  const r = objFromRecord(v, at);
+  const n = (k: string) => numFromRecord(r[k], `${at}.${k}`);
+  const vec = (k: string) => vecFromRecord(r[k], `${at}.${k}`);
   // (Keys in the order CombatSim.release makes them; `passed` only once someone has got out of its way.)
   const p: Projectile = {
-    id: n(r.id, 'id'),
-    serial: n(r.serial, 'serial'),
+    id: n('id'),
+    serial: n('serial'),
     weapon: weaponFromRecord(r.weapon, `${at}.weapon`),
     owner: byId(r.owner, `${at}.owner`),
-    scale: n(r.scale, 'scale'),
-    pos: readV3(r.pos, new Vector3(), `${at}.pos`),
-    vel: readV3(r.vel, new Vector3(), `${at}.vel`),
-    axis: readV3(r.axis, new Vector3(), `${at}.axis`),
-    omega: n(r.omega, 'omega'),
-    angle: n(r.angle, 'angle'),
-    dir0: readV3(r.dir0, new Vector3(), `${at}.dir0`),
-    com: n(r.com, 'com'),
-    live: r.live,
-    age: n(r.age, 'age'),
+    scale: n('scale'),
+    pos: vec('pos'),
+    vel: vec('vel'),
+    axis: vec('axis'),
+    omega: n('omega'),
+    angle: n('angle'),
+    dir0: vec('dir0'),
+    com: n('com'),
+    live: boolFromRecord(r.live, `${at}.live`),
+    age: n('age'),
   };
-  if (r.passed !== null) p.passed = new Set(r.passed.map((id, i) => byId(id, `${at}.passed[${i}]`)));
+  if (r.passed !== null) p.passed = new Set(arrFromRecord(r.passed, `${at}.passed`).map((id, i) => byId(id, `${at}.passed[${i}]`)));
   return p;
 }
 
