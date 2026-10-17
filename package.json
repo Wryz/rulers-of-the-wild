@@ -12,7 +12,9 @@
     "build": "npm run build --workspaces --if-present",
     "preview": "npm run preview -w apps/client",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:accept": "vitest run packages/sim/tests/ac",
+    "test:rehearsal": "ROTW_REHEARSAL=1 vitest run rehearsal"
   },
   "devDependencies": {
     "@types/three": "^0.186.0",
