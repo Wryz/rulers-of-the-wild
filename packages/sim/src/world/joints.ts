@@ -33,6 +33,7 @@ import type { JointRecV1 } from '../save/schema';
 import type { Fighter } from '../sim/fighter';
 import { DT } from '../sim/math';
 import { defineTuning } from '../tuning/registry';
+import { knockLoose } from './breaking';
 import type { TripwireSink } from './contacts';
 import { ropeCoilShape } from './factory';
 import { collisionGroups, solverGroups } from './groups';
@@ -504,7 +505,7 @@ export class JointStore implements TripwireSink {
         const dynamic = !!e.body && e.body.isEnabled() && e.body.isDynamic() && !w.entities.isAnchored(e);
         if (dynamic) w.entities.queueImpulse(e.id, share, P);
         else if (e.state === 'anchored' && e.anchor && e.anchor.capacityN < load) {
-          w.entities.unanchor(e);
+          knockLoose(w, e);
           loosed.push(e.id);
           w.entities.queueImpulse(e.id, share, P);
         }
@@ -992,8 +993,8 @@ export class JointStore implements TripwireSink {
       return;
     }
     if (e.state === 'anchored' && e.anchor && j.pullN > e.anchor.capacityN) {
-      w.entities.unanchor(e);
-      w.entities.queueImpulse(e.id, scale(u, j.pullN * DT), A);
+      const lift = knockLoose(w, e);
+      w.entities.queueImpulse(e.id, scale(u, j.pullN * DT), { x: A.x, y: A.y + lift, z: A.z });
     }
   }
 

@@ -21,8 +21,8 @@
 import type RAPIER from '@dimforge/rapier3d-compat';
 import { defineTuning } from '../tuning/registry';
 import { breakEnergyJ, MATERIALS } from './materials';
-import { crossCut, fracture, GEOM_EPS, principalAxis, shapeContains, type ShapePiece } from './shapes';
-import type { Entity, Owner, Quat, SharpPoint, V3 } from './types';
+import { crossCut, fracture, GEOM_EPS, principalAxis, shapeContains, type ShapePiece, triangulate } from './shapes';
+import type { Entity, Owner, Pose3, Quat, Shape, SharpPoint, V3 } from './types';
 import type { World } from './world';
 
 export const BREAK_TUNING = defineTuning(
@@ -79,7 +79,7 @@ export class Breaking {
       const j = w.joints.get(jid);
       if (j && (j.kind === 'lash' || j.kind === 'hinge') && E > j.breakEnergyJ) w.joints.remove(jid, 'snap');
     }
-    if (e.state === 'anchored' && e.anchor && E > e.anchor.capacityN * BREAK_TUNING.loadLeverM) w.entities.unanchor(e);
+    if (e.state === 'anchored' && e.anchor && E > e.anchor.capacityN * BREAK_TUNING.loadLeverM) knockLoose(w, e);
     const Eb = breakEnergyJ(MATERIALS[e.material], e.mass);
     if (!(Eb > 0) || !Number.isFinite(Eb) || !(E > Eb)) return;
     e.integrity = Math.max(0, e.integrity - ((E - Eb) / Eb) * BREAK_TUNING.integrityPerExcess);
@@ -120,14 +120,16 @@ export class Breaking {
   // -------------------------------------------------------------------------
 
   private split(w: World, e: Entity, p: PendingBreak): void {
-    const pieces = p.kind === 'load' ? loadPieces(e, p.loadPoints) : fracture(e.shape, pieceCount(p.ratio), w.rngs.world);
-    // The parent's motion: the body's (as the step left it), else the record's.
+    // The parent's pose and motion: the body's, as this tick's step left it (the record still holds the pose from
+    // before the step until phase 18 mirrors it; pieces placed there would sit a tick behind their velocities).
     const b = e.body;
-    const dyn = !!b && b.isEnabled() && b.isDynamic();
+    const live = !!b && b.isEnabled();
+    const dyn = live && b.isDynamic();
+    const pose = live ? { p: v3(b.translation()), q: q4(b.rotation()) } : { p: { ...e.pose.p }, q: { ...e.pose.q } };
     const v = dyn ? v3(b.linvel()) : { ...e.vel.lin };
     const omega = dyn ? v3(b.angvel()) : { ...e.vel.ang };
-    const com = dyn ? v3(b.worldCom()) : { ...e.pose.p };
-    const pose = { p: { ...e.pose.p }, q: { ...e.pose.q } };
+    const com = dyn ? v3(b.worldCom()) : { ...pose.p };
+    const pieces = p.kind === 'load' ? loadPieces(e.shape, pose, p.loadPoints) : fracture(e.shape, pieceCount(p.ratio), w.rngs.world);
     // Its joints go first: a rope's end on it lies loose where it was; anything else is released.
     for (const jid of [...e.joints]) {
       const j = w.joints.get(jid);
@@ -155,6 +157,8 @@ export class Breaking {
     pieces.forEach((pc, i) => {
       const c = add(pose.p, rotate(pose.q, pc.offset));
       const lin = add(v, cross(omega, sub(c, com)));
+      // A piece of a stake that was driven in starts inside the ground: lifted out, as a stake knocked loose is.
+      c.y += groundDepth(w, pc.shape, { p: c, q: pose.q });
       const sharpPoints: SharpPoint[] = [];
       parent.sharp.forEach((s, k) => {
         if (owner[k] === i) sharpPoints.push({ local: sub(s.local, pc.offset), dir: s.dir, sharpness: s.sharpness });
@@ -227,6 +231,35 @@ export class Breaking {
 }
 
 // ---------------------------------------------------------------------------
+// Stakes knocked loose
+// ---------------------------------------------------------------------------
+
+/**
+ * A stake knocked or pulled loose (§2.3, §4.9: an impact above capacity × loadLeverM, a haul or a tripwire share above
+ * its capacity): free and awake, then lifted straight up until no vertex is below the terrain. Returns the lift (m).
+ * DEVIATION (P10): EntityStore.unanchor (P06) leaves the driven end inside the heightfield, and Rapier pushes a dynamic
+ * body that deep down through the heightfield's triangles about half the time (a 6 kg stake 0.15 m in, measured: it
+ * falls out of the world); the lift is the smallest move that clears the ground. The fix belongs in unanchor.
+ */
+export function knockLoose(w: World, e: Entity): number {
+  w.entities.unanchor(e);
+  const lift = groundDepth(w, e.shape, e.pose);
+  if (lift > 0) w.entities.setPose(e, { p: { x: e.pose.p.x, y: e.pose.p.y + lift, z: e.pose.p.z }, q: e.pose.q });
+  return lift;
+}
+
+/** How far a shape at `pose` reaches below the terrain (m; 0 when it doesn't): its deepest vertex under the surface. */
+export function groundDepth(w: World, shape: Shape, pose: Pose3): number {
+  const { positions } = triangulate(shape, pose);
+  let d = 0;
+  for (let i = 0; i < positions.length; i += 3) {
+    const below = w.terrain.heightAt(positions[i], positions[i + 2]) - positions[i + 1];
+    if (below > d) d = below;
+  }
+  return d;
+}
+
+// ---------------------------------------------------------------------------
 // Pieces
 // ---------------------------------------------------------------------------
 
@@ -241,17 +274,17 @@ function pieceCount(ratio: number): 2 | 3 | 4 {
  * A load break's pieces (§4.10, RT-7): the shape cut across its long axis at the heaviest load point, and again at the
  * first other load point more than loadPointSplitM away along the axis (3 pieces). Offsets in the parent's frame.
  */
-function loadPieces(e: Entity, points: readonly V3[]): ShapePiece[] {
-  const ax = principalAxis(e.shape);
+function loadPieces(shape: Shape, pose: Pose3, points: readonly V3[]): ShapePiece[] {
+  const ax = principalAxis(shape);
   const at = (w: V3): number => {
-    const l = rotate(conj(e.pose.q), sub(w, e.pose.p));
+    const l = rotate(conj(pose.q), sub(w, pose.p));
     return l.x * ax.dir.x + l.y * ax.dir.y + l.z * ax.dir.z;
   };
   const ts = points.map(at);
   const t0 = ts[0];
   const t1 = ts.find((t) => Math.abs(t - t0) > BREAK_TUNING.loadPointSplitM);
   const lo = t1 === undefined ? t0 : Math.min(t0, t1);
-  const [a, rest] = crossCut(e.shape, lo);
+  const [a, rest] = crossCut(shape, lo);
   if (t1 === undefined) return [a, rest];
   const hi = Math.max(t0, t1);
   const along = rest.offset.x * ax.dir.x + rest.offset.y * ax.dir.y + rest.offset.z * ax.dir.z;
@@ -299,6 +332,10 @@ function copyOwner(o: Owner): Owner {
 
 function v3(v: { x: number; y: number; z: number }): V3 {
   return { x: v.x, y: v.y, z: v.z };
+}
+
+function q4(q: { x: number; y: number; z: number; w: number }): Quat {
+  return { x: q.x, y: q.y, z: q.z, w: q.w };
 }
 
 function add(a: V3, b: V3): V3 {
