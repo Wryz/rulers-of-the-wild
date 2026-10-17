@@ -1,25 +1,32 @@
 // P13, the save (docs/M1-DESIGN.md §8, §1.5.11, §13.1): saveRecord / serializeWorld, bodyStateBytes (AC-7's body bytes),
 // loadWorld and migrate.
 //
-// - The save: SaveV1's keys in order; the options, tick, counters, RNG streams and per-fighter lists; the client's
-//   tuning tables left out; commands rewritten in their type's key order; `meta 'save'` writes at the end of its tick;
-//   a brain that isn't a creature mind, or a RulerState field the writer doesn't know, is refused.
+// - The save: SaveV1's keys in order; the options, tick, counters, RNG streams and per-fighter lists (the player's
+//   controller, zone history and slab by their fields); the client's tuning tables left out; commands rewritten in their
+//   type's key order, every field of every kind written and read back; `meta 'save'` writes at the end of its tick; a
+//   brain that isn't a creature mind, or a RulerState field the writer doesn't know, is refused.
 // - Determinism (an AC-7 preview): two worlds from one seed fed one command log give byte-identical saves and
 //   bit-identical body bytes every 60 ticks, run one after the other (after an unrelated world) and interleaved.
 // - Completeness (RR-19): every runtime field of every world system is saved (with its place in the save) or listed
-//   with the reason it isn't, and every key of the save has a source. A system that adds a field fails here until the
-//   field is placed in the inventory below (and, if it is state, in its record).
+//   with the reason it isn't; every inventory entry is matched against a live object (whole, or the fields it lists) or
+//   is descriptive; every place a `saved:` verdict names (record sub-fields and list elements included) is in a
+//   populated save; every key of the save has a source. A system that adds a field fails here until the field is placed
+//   in the inventory below (and, if it is state, in its record).
 // - save → load → save is byte-identical for the M1 loader's scope (entities, joints, terrain with the dug mask, rulers)
 //   and for everything else the loader restores exactly (fighters, CombatSim's state, counters, streams, commands,
 //   impulses …); the loaded world continues: pending commands land at their ticks, two loads of one save stay
 //   bit-identical to each other; a knocked-down player loads down (slab moving, controller and zones off) and gets up
-//   as the original does; the navmesh is rebuilt over the loaded ground with its dirty queue.
+//   as the original does; an impulse queued for an entity removed since is left out (phase 4d drops it), so the save
+//   loads; the scene queries see every restored body before the first step (supportAt, rays, a teleport onto a box);
+//   the navmesh is rebuilt over the loaded ground with its dirty queue.
 // - A world at rest, saved and loaded, matches the original within 1 cm and 1° over 10 s (an M3 preview, SPEC:730).
-// - Tuning: loadWorld leaves the registry alone unless applyTuning; a failed load puts it back.
+// - Tuning: loadWorld leaves the registry alone unless applyTuning; with it, the sim tables are the saving world's (a
+//   stray sim value goes back to its default, the client's tables are untouched); a failed load puts it back.
 // - The v1 fixture (tests/fixtures/save-v1.json) loads, so M3's migrations have a v1 to start from. To rewrite it after a
 //   deliberate format change (bump formatVersion and add a migration instead once saves exist in the wild):
 //     ROTW_WRITE_SAVE_FIXTURE=1 npx vitest run packages/sim/tests/save.test.ts
-// - Broken saves are refused with a `save record:` error naming the field, before a world is built.
+// - Broken saves are refused with a `save record:` error naming the field, before a world is built (an impulse on an
+//   entity the loaded world wouldn't have, once generation has run).
 //
 // Scene numbers (sizes, masses, positions, ticks) are test constants, never tuning (§9).
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -188,9 +195,25 @@ describe('saveRecord', () => {
     expect(s.dug.length).toBeGreaterThan(0);
     expect(s.dug).toEqual([...s.dug].sort((a, b) => a[0] - b[0] || a[1] - b[1]));
     expect(s.fighters).toEqual([w.player!.toRecord(w.combat.drops)]);
-    expect(s.bodies).toEqual([{ fighter: 1, kcc: s.bodies[0].kcc, zonesHistory: s.bodies[0].zonesHistory, slab: s.bodies[0].slab, ruler: null }]);
+    // The player's bodies: its controller's capsule where Rapier holds it, standing; its zones' pose history (per bone,
+    // the last stored pose and the one before it, 7 numbers each); its slab parked and off; no ruler body.
+    expect(s.bodies.map((b) => [b.fighter, b.ruler])).toEqual([[1, null]]);
+    const kcc = s.bodies[0].kcc!;
+    expect(Object.keys(kcc)).toEqual(['pose', 'vy', 'grounded', 'crouched', 'enabled', 'halfHeight', 'teleport', 'pushes', 'pushTick']);
+    expect(kcc.pose).toEqual(w.kcc.capsulePose(w.player!));
+    expect([kcc.grounded, kcc.crouched, kcc.enabled, kcc.teleport]).toEqual([true, false, true, null]);
+    expect(kcc.halfHeight).toBeGreaterThan(0);
+    const hist = s.bodies[0].zonesHistory;
+    expect(hist.length).toBe(BONES.length * 2 * 7);
+    for (let i = 0; i < hist.length; i += 7) expect(Math.hypot(hist[i + 3], hist[i + 4], hist[i + 5], hist[i + 6]), `quaternion at ${i + 3}`).toBeCloseTo(1, 5);
+    const slab = s.bodies[0].slab!;
+    expect(Object.keys(slab)).toEqual(['enabled', 'pose', 'lin', 'ang', 'hold', 'handedBack', 'dv']);
+    expect([slab.enabled, slab.hold, slab.handedBack, slab.dv]).toEqual([false, 0, false, null]);
     expect(s.rulers).toEqual([]);
-    expect(s.spawner).toEqual(w.spawner.toRecord());
+    // The empty scene has no creature homes and no sparring ape.
+    expect(s.spawner.homes).toEqual([]);
+    expect(Object.keys(s.spawner.sparring)).toEqual(['fighter', 'respawnTick']);
+    expect(s.spawner.sparring.fighter).toBeNull();
     // The text is the canonical JSON of the record, as UTF-8.
     expect(text(serializeWorld(w))).toBe(canonicalJson(s));
   });
@@ -229,6 +252,27 @@ describe('saveRecord', () => {
     expect(Object.keys(s.fighters[0].verbRequest!.cmd)).toEqual(['tick', 'player', 'kind', 'verb', 'target', 'at']);
     // The fighter keeps its own command object as it was.
     expect(Object.keys(w.player!.verbRequest.cmd)[0]).toBe('target');
+  });
+
+  it('writes and reads back every field of every command kind (the key lists are checked against the types)', async () => {
+    const w = await make();
+    const t = w.tick + 50;
+    const all: Command[] = [
+      { tick: t, player: 1, kind: 'move', dir: 5, speed: 64, flags: 3 },
+      { tick: t, player: 1, kind: 'button', button: 'pickup' },
+      { tick: t, player: 1, kind: 'verb', verb: 'lash', target: 3, second: 4, at: [1, -2, 3], at2: [-4, 5, -6], yaw: 7, pitch: 64, aim: [9, -10], charge: 200, slot: 2, drive: 1 },
+      { tick: t, player: 1, kind: 'meta', meta: 'timeAway', seconds: 30 },
+      { tick: t, player: 1, kind: 'meta', meta: 'dev', dev: { op: 'setTuning', args: [1.5, -2], tuning: { table: 'WORLD_TUNING', key: 'aiNearM', value: Infinity } } },
+    ];
+    for (const c of all) w.commands.push(c);
+    const read = readSave(serializeWorld(w)).pending;
+    expect(read).toEqual(all);
+    for (let i = 0; i < all.length; i++) expect(Object.keys(read[i]), `pending[${i}]`).toEqual(Object.keys(all[i]));
+    const dev = (read[4] as Extract<Command, { kind: 'meta' }>).dev!;
+    expect([Object.keys(dev), Object.keys(dev.tuning!)]).toEqual([
+      ['op', 'args', 'tuning'],
+      ['table', 'key', 'value'],
+    ]);
   });
 
   it("writes `meta 'save'`'s bytes at the end of its tick, the same as serializeWorld then", async () => {
@@ -353,7 +397,8 @@ describe('determinism', () => {
 /**
  * Every runtime field of every world system: `saved: <where in the save>`, `system: <inventory entry>` (a field that
  * holds a system inventoried below) or `not saved: <why>`. A system that adds a field fails the test until it is
- * listed here; one that is state is saved by its system's record and listed with its place.
+ * listed here; one that is state is saved by its system's record and listed with its place, a path into the save
+ * (`bodies[].kcc.pushes`: `[]` steps into every element of a list) that the test resolves against a populated save.
  */
 const INVENTORY: Record<string, Record<string, string>> = {
   World: {
@@ -597,6 +642,52 @@ const INVENTORY: Record<string, Record<string, string>> = {
 };
 
 /**
+ * Inventory entries matched against only part of a live object: the fields listed must be on it, and the object's
+ * other fields are inventoried elsewhere (a fighter's by P04's records.test.ts, through its record).
+ */
+const PARTIAL: Record<string, (w: World) => object> = { Fighter: (w) => w.player! };
+/** Inventory entries with no runtime object of their own: the process-wide registry and the save's own tags. */
+const DESCRIPTIVE = ['Registry', 'Save'];
+
+/**
+ * `saved:` places that a populated test scene can't reach, because a list it steps into is empty there. Each says why;
+ * every other place a `saved:` verdict names is checked against a populated save.
+ */
+const UNREACHED: Record<string, string> = {
+  'minds[].inner': 'the test scene has no creature (and MindRegistry is P19\'s); save/load.ts checks the key of every mind record',
+};
+
+/** A save path: a save key, then `.field` steps; `name[]` steps into every element of a list. */
+const SAVE_PATH = /[A-Za-z]+(?:\[\])?(?:\.[A-Za-z]+(?:\[\])?)*/g;
+
+/** Every place in the save a `saved:` verdict names (each path in it whose first step is a save key). */
+function savedPaths(verdict: string): string[] {
+  if (!verdict.startsWith('saved: ')) return [];
+  return [...verdict.slice('saved: '.length).matchAll(SAVE_PATH)].map((m) => m[0]).filter((p) => (SAVE_V1_KEYS as readonly string[]).includes(p.split(/[.[]/)[0]));
+}
+
+/** The first step of `path` that isn't in `v` (a list stepped into must have elements), or null when all are. */
+function missingStep(v: unknown, path: string): string | null {
+  let here: unknown[] = [v];
+  let at = '';
+  for (const step of path.split('.')) {
+    const list = step.endsWith('[]');
+    const key = list ? step.slice(0, -2) : step;
+    at = at ? `${at}.${step}` : step;
+    const next: unknown[] = [];
+    for (const o of here) {
+      if (o === null || typeof o !== 'object' || !Object.prototype.hasOwnProperty.call(o, key)) return at;
+      const x = (o as Record<string, unknown>)[key];
+      if (!list) next.push(x);
+      else if (Array.isArray(x) && x.length > 0) next.push(...x);
+      else return `${at} (no element)`;
+    }
+    here = next;
+  }
+  return null;
+}
+
+/**
  * Save keys whose runtime source arrives with a later package: the system is a stub that holds nothing yet, and its
  * record (an empty list) is already in the save. Each leaves this list when its package adds the state to the
  * inventory above.
@@ -667,7 +758,7 @@ describe('completeness (RR-19)', () => {
       if (missing.length > 0 || gone.length > 0) diffs.push({ entry: name, notInInventory: missing, notOnObject: gone });
     }
     expect(diffs).toEqual([]);
-    // Every `system:` names an entry, every entry is reached, every verdict is one of the three kinds.
+    // Every `system:` names an entry, every verdict is one of the three kinds.
     for (const [name, fields] of Object.entries(INVENTORY)) {
       for (const [k, v] of Object.entries(fields)) {
         expect(v, `${name}.${k}`).toMatch(/^(saved|system|not saved): ./);
@@ -675,7 +766,39 @@ describe('completeness (RR-19)', () => {
         if (sysName) expect(INVENTORY[sysName], `${name}.${k} → ${sysName}`).toBeDefined();
       }
     }
+    // Every system object has an entry, and every entry is reached: matched against a whole object above, against part
+    // of one (its listed fields are on it), or descriptive (no runtime object), and nothing is in two of those lists.
     for (const name of Object.keys(sys)) expect(Object.keys(INVENTORY)).toContain(name);
+    const reached = [...Object.keys(sys), ...Object.keys(PARTIAL), ...DESCRIPTIVE];
+    expect(new Set(reached).size).toBe(reached.length);
+    expect(Object.keys(INVENTORY).filter((name) => !reached.includes(name))).toEqual([]);
+    for (const [name, of] of Object.entries(PARTIAL)) {
+      const o = of(w);
+      for (const k of Object.keys(INVENTORY[name])) expect(Object.prototype.hasOwnProperty.call(o, k), `${name}.${k} is on the object`).toBe(true);
+    }
+  });
+
+  it('every place a `saved:` verdict names is in a populated save (sub-fields of records and list elements included)', async () => {
+    const w = await make();
+    const ids = populate(w);
+    run(w, 20, new Rng(5));
+    w.entities.queueImpulse(ids.log, { x: 0, y: 1, z: 0 }, null);
+    w.player!.ruler = rulerSample();
+    const s = parsed(serializeWorld(w));
+    const paths = new Set(Object.values(INVENTORY).flatMap((fields) => Object.values(fields).flatMap(savedPaths)));
+    // Not vacuous: the record sub-fields and list elements are among them.
+    expect([...paths].filter((p) => p.includes('[]')).length).toBeGreaterThan(30);
+    const missing: Record<string, string> = {};
+    for (const p of [...paths].sort()) {
+      const step = missingStep(s, p);
+      if (step !== null && !(p in UNREACHED)) missing[p] = step;
+    }
+    expect(missing).toEqual({});
+    // An unreached place is one the populated save can't reach, and is still named by a verdict.
+    for (const p of Object.keys(UNREACHED)) {
+      expect(paths.has(p), p).toBe(true);
+      expect(missingStep(s, p), p).toMatch(/\(no element\)$/);
+    }
   });
 
   it("every key of the save has a source in the inventory (or awaits its system's package), and every `saved:` names a key", async () => {
@@ -900,6 +1023,69 @@ describe('save → load → save', () => {
     expect(Math.abs(t1 - t2)).toBeLessThanOrEqual(3);
   });
 
+  it('leaves out an impulse queued for an entity removed since (phase 4d drops it), so the save loads and saves again as it was', async () => {
+    /** A scene, a 2 m/s upward push on the log, the stone removed; `stale`: a contact reaction queued on the stone first. */
+    const scene = async (stale: boolean) => {
+      const w = await make();
+      const ids = populate(w);
+      run(w, 10, new Rng(17));
+      const push = { j: { x: 0, y: 2 * w.entities.get(ids.log)!.mass, z: 0 }, at: { x: 2, y: 0.2, z: 1 } };
+      if (stale) w.entities.queueImpulse(ids.stone, { x: 1, y: 0, z: 0 }, null);
+      w.entities.queueImpulse(ids.log, push.j, push.at);
+      w.removeEntity(ids.stone);
+      return { w, ids, push };
+    };
+    const { w, ids, push } = await scene(true);
+    const twin = (await scene(false)).w;
+    expect(w.entities.pendingImpulses().map((q) => q.id)).toEqual([ids.stone, ids.log]);
+    const a = serializeWorld(w);
+    expect((parsed(a) as unknown as SaveV1).impulses).toEqual([{ entity: ids.log, ...push }]);
+    // The stale impulse is nothing the world will act on: the twin without it writes the same bytes and steps the same.
+    expect(text(serializeWorld(twin)) === text(a)).toBe(true);
+    // The save loads (the loader never queues an impulse on an entity it doesn't have) and saves again as it was.
+    const l = await load(a);
+    expect(l.entities.pendingImpulses()).toEqual([{ id: ids.log, ...push }]);
+    const b = serializeWorld(l);
+    const sa = sections(a, SAVE_V1_KEYS);
+    const sb = sections(b, SAVE_V1_KEYS);
+    for (const k of EXACT) expect(sb[k] === sa[k], `section ${k}`).toBe(true);
+    // The next phase 4d drops the stone's impulse in the original and applies the log's push in all three.
+    w.step();
+    twin.step();
+    l.step();
+    for (const x of [w, twin, l]) expect(x.entities.pendingImpulses()).toEqual([]);
+    expect(firstDiff(bodyStateBytes(w), bodyStateBytes(twin))).toBe(-1);
+    expect(text(serializeWorld(w)) === text(serializeWorld(twin))).toBe(true);
+    expect(w.entities.get(ids.log)!.vel.lin.y).toBeGreaterThan(1);
+    expect(dist(l.entities.get(ids.log)!.vel.lin, w.entities.get(ids.log)!.vel.lin)).toBeLessThan(0.01);
+  });
+
+  it('lets the scene queries see every restored body from the first tick: supportAt, a ray, a teleport onto a box', async () => {
+    const w = await make();
+    const box = spawnBox(w, { p: { x: 4, y: 1, z: 4 }, size: [2, 2, 2], material: 'dryWood', state: 'fixed', look: 'crate' });
+    run(w, 5, new Rng(18));
+    const ray = (x: World) => x.queries.castRay({ x: 4, y: 5, z: 4 }, { x: 0, y: -1, z: 0 }, 10, { terrain: true, entities: 'all' });
+    const support = w.supportAt(4, 4, 5);
+    expect(support).toBeCloseTo(2, 5);
+    const hit = ray(w);
+    expect(hit?.owner).toEqual({ kind: 'entity', id: box });
+    const bytes = serializeWorld(w);
+    // Queries right after the load, before any step (the first tick's phases 1c-3 run before its phase-7 step).
+    const l = await load(bytes);
+    expect(l.supportAt(4, 4, 5)).toBe(support);
+    expect(ray(l)).toEqual(hit);
+    // A dev op's or a harness's teleport onto the box lands on it, as in the saved world.
+    w.teleport(w.player!, 4, 4);
+    l.teleport(l.player!, 4, 4);
+    expect(w.player!.pos.y).toBeCloseTo(2, 5);
+    expect(l.player!.pos.y).toBe(w.player!.pos.y);
+    // Nothing moved: the loaded world's entities, controller and slab are where the save put them.
+    const again = parsed(serializeWorld(track(await loadWorld(bytes, { nav: 'off' })))) as unknown as SaveV1;
+    const saved = parsed(bytes) as unknown as SaveV1;
+    expect(canonicalJson(again.entities)).toBe(canonicalJson(saved.entities));
+    expect(canonicalJson(again.bodies.map((x) => [x.kcc, x.slab]))).toBe(canonicalJson(saved.bodies.map((x) => [x.kcc, x.slab])));
+  });
+
   it('rebuilds the navmesh over the loaded ground and gives it back its dirty tiles', async () => {
     const w = await make({ nav: 'full' });
     populate(w);
@@ -1007,8 +1193,27 @@ describe('tuning on load', () => {
     expect(CLIENT_TEST_TUNING.knob).toBe(1);
   });
 
+  it("with applyTuning, runs on the saving world's sim tuning: a stray sim value this process holds goes back to its default", async () => {
+    const bytes = await savedWithOverride();
+    const restTicks = getTuningValue('PHYSICS_TUNING', 'restTicks');
+    // A live dev-panel tweak to a sim table the save doesn't override, one to a table it does, and a client tweak.
+    setTuningValue('PHYSICS_TUNING', 'restTicks', 77);
+    setTuningValue('WORLD_TUNING', 'corpseDespawnS', 5);
+    CLIENT_TEST_TUNING.knob = 3;
+    const l = await load(bytes, { applyTuning: true });
+    expect(getTuningValue('PHYSICS_TUNING', 'restTicks')).toBe(restTicks);
+    expect(WORLD_TUNING.corpseDespawnS).toBe(77);
+    expect(getTuningValue('PHYSICS_TUNING', 'restSpeed')).toBe(0.06);
+    // The sim's tuning is now exactly the saving world's: its overrides and nothing else.
+    expect(saveRecord(l).tuningOverrides).toEqual(readSave(bytes).tuningOverrides);
+    // The client's own tables are not the save's.
+    expect(CLIENT_TEST_TUNING.knob).toBe(3);
+  });
+
   it('puts the registry back when the load fails', async () => {
     const bytes = await savedWithOverride();
+    // A stray sim value too: the load resets the sim tables before it fails, and the registry comes back as it was.
+    setTuningValue('PHYSICS_TUNING', 'restTicks', 44);
     const before = tuningSnapshot();
     const bad = edited(bytes, (s) => {
       (s.tuningOverrides as unknown[]).push({ table: 'WORLD_TUNING', key: 'noSuchKey', value: 1 });
@@ -1167,6 +1372,27 @@ describe('broken saves', () => {
     refuse((s) => (s.entities as unknown[]).reverse(), 'entities are not in increasing id order at entities[1]');
     refuse((s) => ((s.rng as Record<string, unknown>).fighters = [[9, 1]]), 'rng.fighters[0] names fighter 9');
     refuse((s) => (s.bodies as Record<string, unknown>[]).push({ fighter: 7, kcc: null, zonesHistory: [], slab: null, ruler: null }), 'bodies[1] names fighter 7');
+  });
+
+  it('refuses an impulse on an entity the loaded world would not have', async () => {
+    const push = { j: { x: 1, y: 0, z: 0 }, at: null };
+    refuse((s) => (s.impulses = [{ entity: 999, ...push }]), 'save record: impulses[0] names entity 999, which is not below counters.entity');
+    refuse(
+      (s) => {
+        s.removed = [2];
+        s.impulses = [{ entity: 2, ...push }];
+      },
+      'save record: impulses[0] names entity 2, which the save lists as removed',
+    );
+    // Below the counter, not removed, yet neither saved nor regenerated (a non-generated entity gone before the save).
+    let id = 0;
+    const gone = edited(good, (s) => {
+      const list = s.entities as { id: number }[];
+      id = list[0].id;
+      list.splice(0, 1);
+      s.impulses = [{ entity: id, ...push }];
+    });
+    await expect(loadWorld(gone, { nav: 'off' })).rejects.toThrow(`save record: impulses[0] names entity ${id}, which isn't in the loaded world`);
   });
 
   it('refuses a terrain edit outside the world, before anything is left behind', async () => {

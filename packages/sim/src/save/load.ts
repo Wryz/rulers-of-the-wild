@@ -8,8 +8,9 @@
 // made) are checked here, as P04 and P02-fix leave to the save (§8.3).
 //
 // loadWorld rebuilds the world (M1 scope, §8.3) in this order:
-// 1. tuning: with `applyTuning`, the save's overrides go into the process-wide registry first (they shape generation);
-//    without it the registry is left alone (RR-17). All or nothing: a failure anywhere puts the registry back;
+// 1. tuning: with `applyTuning`, the sim tables are reset to their defaults and the save's overrides set on top, first
+//    (they shape generation); without it the registry is left alone (RR-17). The client's tables are never touched. All
+//    or nothing: a failure anywhere puts the registry back;
 // 2. a World built from the save's seed and options: generation regenerates every untouched generated entity and joint;
 //    the fighters construction made (the player, the spawner's creatures) and any non-generated entity are removed
 //    again, since the save replaces them;
@@ -33,17 +34,21 @@
 //    contacts (ContactSystem.restoreRecord replaces its runtime maps, graces included) and the saved graces re-opened;
 //    felling, deaths and corpses; the queued impulses;
 // 7. the world RNG streams and the id counters; the navmesh rebuilt over the loaded ground and its dirty queue
-//    restored; the events construction pushed cleared.
+//    restored;
+// 8. every collider the load made put into the scene queries by a zero-length Rapier step that moves nothing (so the
+//    first tick's queries before its phase-7 step see the world the save saw: refreshQueries); the events construction
+//    pushed cleared.
 // Rapier's body order after a load differs from the saving world's (restored bodies are made after the generated ones
 // kept), so a loaded world matches the saved one within SPEC:730's 1 cm and 1° at rest, not bit for bit; two loads of
 // one save are bit-identical to each other.
+import type RAPIER from '@dimforge/rapier3d-compat';
 import { BONES, type BoneName } from '../body/skeleton';
-import type { Command, DevOp, MetaCommand, MoveCommand, VerbCommand, VerbId } from '../sim/commands';
+import type { ButtonCommand, Command, CommandButton, DevOp, MetaCommand, MoveCommand, TuningEdit, VerbCommand, VerbId } from '../sim/commands';
 import { type Fighter, IdCounter } from '../sim/fighter';
 import { createPlayer } from '../sim/roster';
 import type { WeaponDef } from '../sim/weapons';
 import { WEAPONS } from '../sim/weapons';
-import { restoreTuning, setTuningValue, TUNING, tuningSnapshot } from '../tuning/registry';
+import { resetTuning, restoreTuning, setTuningValue, TUNING, tuningSnapshot } from '../tuning/registry';
 import { MATERIALS } from '../world/materials';
 import { physicsReady } from '../world/physics';
 import type {
@@ -79,21 +84,37 @@ import {
   type SlabRecV1,
   type TuningOverrideV1,
 } from './schema';
-import { isClientTuning } from './serialize';
+import {
+  BUTTON_KEYS,
+  BUTTON_REQUIRED,
+  DEV_KEYS,
+  DEV_REQUIRED,
+  isClientTuning,
+  META_KEYS,
+  META_REQUIRED,
+  MOVE_KEYS,
+  MOVE_REQUIRED,
+  TUNING_EDIT_KEYS,
+  VERB_KEYS,
+  VERB_REQUIRED,
+} from './serialize';
 
 export interface LoadOptions {
   /** 'off' builds no navmesh (physics-only tests). Default 'full'. */
   nav?: 'full' | 'off';
   /**
-   * Default false: restore the save's tuningOverrides into the process-wide registry (RR-17). The registry is per
-   * process and the client holds one live world; tests that load with applyTuning restore a snapshot afterwards.
+   * Default false: restore the save's tuningOverrides into the process-wide registry (RR-17): every sim table is reset
+   * to its defaults and the save's overrides are set on top, so the sim runs with the saving world's tuning (a live
+   * dev-panel tweak to a sim table is dropped; the client's own tables are left alone). The registry is per process and
+   * the client holds one live world; tests that load with applyTuning restore a snapshot afterwards.
    */
   applyTuning?: boolean;
 }
 
 /**
  * Builds the world a save describes (see the top of this file). applyTuning (default false): restore the save's
- * tuningOverrides into the process-wide registry (RR-17).
+ * tuning into the process-wide registry (RR-17, LoadOptions). The loaded world's scene queries see every body it was
+ * saved with from its first tick (step 8).
  */
 export async function loadWorld(bytes: Uint8Array, opts?: LoadOptions): Promise<World> {
   const save = readSave(bytes);
@@ -160,12 +181,15 @@ const LADDER: Readonly<Partial<Record<number, (r: Obj) => Obj>>> = {};
 // ---------------------------------------------------------------------------
 
 /**
- * The save's overrides into the registry, over whatever this process holds now (the registry is not reset to its
- * defaults first: the overrides are the saving build's differences from its defaults). A client table, or a table this
- * process doesn't register (a client table in a sim-only process: saves hold none, but the client's own tables are not
- * the save's to set), is skipped; an unknown key or a value of the wrong kind in a sim table throws.
+ * The saving world's sim tuning, exactly: every sim table back to its registered defaults (a live dev-panel tweak this
+ * process holds is not the save's), then the save's overrides (its differences from those defaults) on top. The client's
+ * tables are left as they are: they are the game loop's and the presentation's, never saved (rules 6 and 8). A client
+ * table, or a table this process doesn't register (a client table in a sim-only process: saves hold none, but the
+ * client's own tables are not the save's to set), is skipped; an unknown key or a value of the wrong kind in a sim table
+ * throws, and loadWorld puts the whole registry back as it was.
  */
 function applyTuningOverrides(list: readonly TuningOverrideV1[]): void {
+  for (const e of TUNING) if (!isClientTuning(e)) resetTuning(e.name);
   for (const t of list) {
     const e = TUNING.find((x) => x.name === t.table);
     if (!e || isClientTuning(e)) continue;
@@ -236,9 +260,12 @@ function restoreWorld(w: World, s: SaveV1): void {
   for (const [id, until] of s.contactGrace) w.contacts.grace(id, until);
   w.felling.restoreRecord(s.felling);
   w.deaths.restoreRecord(s.deaths, s.corpses);
-  for (const q of s.impulses) w.entities.queueImpulse(q.entity, q.j, q.at);
+  s.impulses.forEach((q, i) => {
+    if (!w.entities.get(q.entity)) throw new Error(`save record: impulses[${i}] names entity ${q.entity}, which isn't in the loaded world`);
+    w.entities.queueImpulse(q.entity, q.j, q.at);
+  });
 
-  // 7. Streams, counters, the navmesh, events.
+  // 7. Streams, counters, the navmesh; 8. the scene queries, events.
   w.rngs.restoreRecord({ combat: s.rng.combat, world: s.rng.world });
   w.ids.fighter.next = s.counters.fighter;
   w.ids.entity.next = s.counters.entity;
@@ -248,7 +275,54 @@ function restoreWorld(w: World, s: SaveV1): void {
     w.nav.build(w);
     w.nav.restoreDirty(s.navDirty);
   }
+  refreshQueries(w);
   w.events.length = 0;
+}
+
+/** A Rapier body's pose and velocities, and whether it sleeps (what refreshQueries must leave as it was). */
+function bodyState(b: RAPIER.RigidBody): number[] {
+  const t = b.translation();
+  const q = b.rotation();
+  const v = b.linvel();
+  const a = b.angvel();
+  return [t.x, t.y, t.z, q.x, q.y, q.z, q.w, v.x, v.y, v.z, a.x, a.y, a.z, b.isSleeping() ? 1 : 0];
+}
+
+/**
+ * 8. Every collider the load made (restored entities, fighters' bodies, regenerated ones) into the scene queries,
+ * without moving anything. A new collider is invisible to queries until a Rapier step (MAP rapier finding 7; World's
+ * constructor primes the terrain the same way), and the first tick after a load queries before its phase-7 step: dev
+ * ops and teleports (phase 1c), minds' perception rays (2), the movers' supportAt (3). The saved world had every one of
+ * these colliders in its broad phase, so without this a load would change those outcomes (a giant standing on a
+ * restored pit cover would read the pit floor). So: one Rapier step of zero length, its events discarded (pairs already
+ * touching at the save then start no new contact on the first tick, as in the saved world). A zero-length step moves no
+ * body and changes no velocity (measured: bit for bit, with resting stacks, sliding bodies, kinematic capsules and
+ * motorised, rope, spring and fixed joints); that is checked here, so a Rapier that did otherwise fails the load loudly
+ * instead of changing the world quietly.
+ * TODO(P05-fix): PhysicsWorld.refreshQueries(), primeQueries' general form, so physics.ts owns the Rapier step; the
+ * loader then calls it.
+ */
+function refreshQueries(w: World): void {
+  const rapier = w.physics.rapier;
+  const before = new Map<number, number[]>();
+  rapier.bodies.forEach((b) => {
+    before.set(b.handle, bodyState(b));
+  });
+  const dt = rapier.timestep;
+  rapier.timestep = 0;
+  try {
+    rapier.step(w.physics.events);
+  } finally {
+    rapier.timestep = dt;
+  }
+  w.physics.drain();
+  rapier.bodies.forEach((b) => {
+    const was = before.get(b.handle);
+    const now = bodyState(b);
+    if (!was || !was.every((x, i) => Object.is(x, now[i]))) {
+      throw new Error(`loadWorld: the zero-length step that refreshes the scene queries changed Rapier body ${b.handle}`);
+    }
+  });
 }
 
 /**
@@ -394,6 +468,13 @@ function crossCheck(s: SaveV1): void {
   for (const e of s.entities) if (e.id >= s.counters.entity) throw new Error(`save record: entity ${e.id} is not below counters.entity (${s.counters.entity})`);
   for (const id of s.removed) if (id >= s.counters.entity) throw new Error(`save record: removed entity ${id} is not below counters.entity (${s.counters.entity})`);
   for (const j of s.joints) if (j.id >= s.counters.joint) throw new Error(`save record: joint ${j.id} is not below counters.joint (${s.counters.joint})`);
+  // An impulse names an entity the load will have: a saved record, or a generated one the seed regenerates (not
+  // removed). Whether a regenerated id exists is known only once generation has run (restoreWorld checks it there).
+  const removed = new Set(s.removed);
+  s.impulses.forEach((q, i) => {
+    if (q.entity >= s.counters.entity) throw new Error(`save record: impulses[${i}] names entity ${q.entity}, which is not below counters.entity (${s.counters.entity})`);
+    if (removed.has(q.entity)) throw new Error(`save record: impulses[${i}] names entity ${q.entity}, which the save lists as removed`);
+  });
   for (let i = 1; i < s.entities.length; i++) {
     if (!(s.entities[i].id > s.entities[i - 1].id)) throw new Error(`save record: entities are not in increasing id order at entities[${i}]`);
   }
@@ -417,9 +498,13 @@ function options(v: unknown, p: string): SaveV1['options'] {
 
 function tuningOverride(v: unknown, p: string): TuningOverrideV1 {
   const o = exactKeys(obj(v, p), ['table', 'key', 'value'], p);
-  const value = o.value;
-  if (typeof value !== 'number' && typeof value !== 'boolean' && typeof value !== 'string') fail(`${p}.value`, value, 'a number, a boolean or a string');
-  return { table: str(o.table, `${p}.table`), key: str(o.key, `${p}.key`), value };
+  return { table: str(o.table, `${p}.table`), key: str(o.key, `${p}.key`), value: tuningValue(o.value, `${p}.value`) };
+}
+
+/** A tuning value: a number (Infinity allowed: a reach can be unlimited), a boolean or a string. */
+function tuningValue(v: unknown, p: string): number | boolean | string {
+  if (typeof v === 'number' || typeof v === 'boolean' || typeof v === 'string') return v;
+  return fail(p, v, 'a number, a boolean or a string');
 }
 
 function counters(v: unknown, p: string): SaveV1['counters'] {
@@ -461,7 +546,7 @@ function impulse(v: unknown, p: string): SaveV1['impulses'][number] {
 
 // Commands ------------------------------------------------------------------
 
-const COMMAND_BUTTONS = { lpunch: true, rpunch: true, lkick: true, rkick: true, pickup: true, jump: true } as const;
+const COMMAND_BUTTONS: Record<CommandButton, true> = { lpunch: true, rpunch: true, lkick: true, rkick: true, pickup: true, jump: true };
 const VERB_IDS: Record<VerbId, true> = {
   focus: true,
   take: true,
@@ -489,72 +574,83 @@ const DEV_OPS: Record<DevOp, true> = {
   respawnPlayer: true,
   setTuning: true,
 };
-const METAS = { pause: true, save: true, timeAway: true, dev: true } as const;
+const METAS: Record<MetaCommand['meta'], true> = { pause: true, save: true, timeAway: true, dev: true };
+
+/** A reader for every field of T: a field added to T is a type error here until it is read. */
+type FieldReaders<T> = { readonly [K in keyof T]-?: (v: unknown, p: string) => Exclude<T[K], undefined> };
+
+/**
+ * A record of T read field by field in `keys` order (save/serialize.ts's key lists, checked against T when compiled):
+ * every `required` key there, the others there or absent, nothing else.
+ */
+function fields<T>(o: Obj, p: string, keys: readonly (keyof T & string)[], required: readonly (keyof T & string)[], read: FieldReaders<T>): T {
+  exactKeys(o, required, p, keys.filter((k) => !required.includes(k)));
+  const out: Partial<T> = {};
+  for (const k of keys) if (o[k] !== undefined) out[k] = read[k](o[k], `${p}.${k}`);
+  return out as T;
+}
+
+/** The string literal `k` itself. */
+const lit =
+  <K extends string>(k: K) =>
+  (v: unknown, p: string): K =>
+    v === k ? k : fail(p, v, `'${k}'`);
+
+const wholes =
+  (n: number, what: string) =>
+  (v: unknown, p: string): number[] => {
+    const a = arr(v, p);
+    if (a.length !== n) fail(p, v, what);
+    return a.map((x, i) => int(x, `${p}[${i}]`));
+  };
+const triple = wholes(3, 'three whole numbers') as (v: unknown, p: string) => [number, number, number];
+
+const MOVE_READ: FieldReaders<MoveCommand> = { tick: nat, player: nat, kind: lit('move'), dir: int, speed: int, flags: nat };
+const BUTTON_READ: FieldReaders<ButtonCommand> = { tick: nat, player: nat, kind: lit('button'), button: (v, p) => oneOf(v, COMMAND_BUTTONS, p) };
+const VERB_READ: FieldReaders<VerbCommand> = {
+  tick: nat,
+  player: nat,
+  kind: lit('verb'),
+  verb: (v, p) => oneOf(v, VERB_IDS, p),
+  target: nat,
+  second: nat,
+  at: triple,
+  at2: triple,
+  yaw: int,
+  pitch: int,
+  aim: wholes(2, '[yaw, pitch]') as (v: unknown, p: string) => [number, number],
+  charge: int,
+  slot: int,
+  drive: int,
+};
+const TUNING_EDIT_READ: FieldReaders<TuningEdit> = { table: str, key: str, value: tuningValue };
+const DEV_READ: FieldReaders<NonNullable<MetaCommand['dev']>> = {
+  op: (v, p) => oneOf(v, DEV_OPS, p),
+  args: (v, p) => arr(v, p).map((x, i) => fin(x, `${p}[${i}]`)),
+  tuning: (v, p) => fields<TuningEdit>(obj(v, p), p, TUNING_EDIT_KEYS, TUNING_EDIT_KEYS, TUNING_EDIT_READ),
+};
+const META_READ: FieldReaders<MetaCommand> = {
+  tick: nat,
+  player: nat,
+  kind: lit('meta'),
+  meta: (v, p) => oneOf(v, METAS, p),
+  seconds: nat,
+  dev: (v, p) => fields<NonNullable<MetaCommand['dev']>>(obj(v, p), p, DEV_KEYS, DEV_REQUIRED, DEV_READ),
+};
 
 /** A command, every field checked (integers everywhere but a setTuning value), in its type's key order. */
 function command(v: unknown, p: string): Command {
   const o = obj(v, p);
-  const tick = nat(o.tick, `${p}.tick`);
-  const player = nat(o.player, `${p}.player`);
-  const kind = oneOf(o.kind, { move: true, button: true, verb: true, meta: true }, `${p}.kind`);
-  switch (kind) {
-    case 'move': {
-      exactKeys(o, ['tick', 'player', 'kind', 'dir', 'speed'], p, ['flags']);
-      const c: MoveCommand = { tick, player, kind, dir: int(o.dir, `${p}.dir`), speed: int(o.speed, `${p}.speed`) };
-      if (o.flags !== undefined) c.flags = nat(o.flags, `${p}.flags`);
-      return c;
-    }
+  switch (oneOf(o.kind, { move: true, button: true, verb: true, meta: true }, `${p}.kind`)) {
+    case 'move':
+      return fields<MoveCommand>(o, p, MOVE_KEYS, MOVE_REQUIRED, MOVE_READ);
     case 'button':
-      exactKeys(o, ['tick', 'player', 'kind', 'button'], p);
-      return { tick, player, kind, button: oneOf(o.button, COMMAND_BUTTONS, `${p}.button`) };
+      return fields<ButtonCommand>(o, p, BUTTON_KEYS, BUTTON_REQUIRED, BUTTON_READ);
     case 'verb':
-      return verbCommand(o, p);
-    case 'meta': {
-      exactKeys(o, ['tick', 'player', 'kind', 'meta'], p, ['seconds', 'dev']);
-      const c: MetaCommand = { tick, player, kind, meta: oneOf(o.meta, METAS, `${p}.meta`) };
-      if (o.seconds !== undefined) c.seconds = nat(o.seconds, `${p}.seconds`);
-      if (o.dev !== undefined) {
-        const d = exactKeys(obj(o.dev, `${p}.dev`), ['op', 'args'], `${p}.dev`, ['tuning']);
-        c.dev = { op: oneOf(d.op, DEV_OPS, `${p}.dev.op`), args: arr(d.args, `${p}.dev.args`).map((x, i) => fin(x, `${p}.dev.args[${i}]`)) };
-        if (d.tuning !== undefined) {
-          const t = tuningOverride(d.tuning, `${p}.dev.tuning`);
-          c.dev.tuning = { table: t.table, key: t.key, value: t.value };
-        }
-      }
-      return c;
-    }
+      return fields<VerbCommand>(o, p, VERB_KEYS, VERB_REQUIRED, VERB_READ);
+    case 'meta':
+      return fields<MetaCommand>(o, p, META_KEYS, META_REQUIRED, META_READ);
   }
-}
-
-function verbCommand(o: Obj, p: string): VerbCommand {
-  exactKeys(o, ['tick', 'player', 'kind', 'verb', 'target'], p, ['second', 'at', 'at2', 'yaw', 'pitch', 'aim', 'charge', 'slot', 'drive']);
-  if (o.kind !== 'verb') fail(`${p}.kind`, o.kind, "'verb'");
-  const c: VerbCommand = {
-    tick: nat(o.tick, `${p}.tick`),
-    player: nat(o.player, `${p}.player`),
-    kind: 'verb',
-    verb: oneOf(o.verb, VERB_IDS, `${p}.verb`),
-    target: nat(o.target, `${p}.target`),
-  };
-  const triple = (x: unknown, q: string): [number, number, number] => {
-    const a = arr(x, q);
-    if (a.length !== 3) fail(q, x, 'three whole numbers');
-    return [int(a[0], `${q}[0]`), int(a[1], `${q}[1]`), int(a[2], `${q}[2]`)];
-  };
-  if (o.second !== undefined) c.second = nat(o.second, `${p}.second`);
-  if (o.at !== undefined) c.at = triple(o.at, `${p}.at`);
-  if (o.at2 !== undefined) c.at2 = triple(o.at2, `${p}.at2`);
-  if (o.yaw !== undefined) c.yaw = int(o.yaw, `${p}.yaw`);
-  if (o.pitch !== undefined) c.pitch = int(o.pitch, `${p}.pitch`);
-  if (o.aim !== undefined) {
-    const a = arr(o.aim, `${p}.aim`);
-    if (a.length !== 2) fail(`${p}.aim`, o.aim, '[yaw, pitch]');
-    c.aim = [int(a[0], `${p}.aim[0]`), int(a[1], `${p}.aim[1]`)];
-  }
-  if (o.charge !== undefined) c.charge = int(o.charge, `${p}.charge`);
-  if (o.slot !== undefined) c.slot = int(o.slot, `${p}.slot`);
-  if (o.drive !== undefined) c.drive = int(o.drive, `${p}.drive`);
-  return c;
 }
 
 // Entities and joints ---------------------------------------------------------

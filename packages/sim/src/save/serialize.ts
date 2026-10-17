@@ -5,11 +5,14 @@
 // felling, deaths, navigation's dirty queue, CombatSim's own state); this file assembles them in SaveV1's key order and
 // writes the few records it owns itself with explicit writers in a fixed key order:
 // - commands (the pending queue, and a fighter's buffered or working verb command): a command's key order is whatever
-//   its maker gave it, so it is rewritten in its type's declared order, keeping only its type's fields;
+//   its maker gave it, so it is rewritten in its type's declared order, keeping only its type's fields (the key lists
+//   are checked against the command types when compiled, so a field added to a type can't be left out; load.ts reads
+//   the same lists);
 // - a ruler's RulerState, its wounds and their causes (`rulers`);
 // - the tuning overrides (sim tables only: a table whose folder is "Client …" belongs to the client's presentation and
 //   game loop, rules 6 and 8, and is never saved);
-// - the counters, the RNG states, the options, the queued impulses.
+// - the counters, the RNG states, the options, the queued impulses (those whose entity still exists: phase 4d drops the
+//   others).
 //
 // A fighter driven by a brain that isn't a creature mind (a DungeonStyle BrawlerAI added by hand) is refused: a world
 // makes players and creatures only, and the save holds a brain only as a mind (§6.8; minds[].inner for the ape's).
@@ -17,7 +20,7 @@
 //
 // Saved at the end of a tick (phase 19 or between steps), when nothing is pending but what the save holds: the
 // command queue, the queued impulses, the dirty nav tiles (MAP gap-7 §3.8).
-import type { Command, MetaCommand, MoveCommand, VerbCommand } from '../sim/commands';
+import type { ButtonCommand, Command, MetaCommand, MoveCommand, TuningEdit, VerbCommand } from '../sim/commands';
 import type { Fighter } from '../sim/fighter';
 import { TUNING, type TuningEntry, tuningOverrides } from '../tuning/registry';
 import type { ImpactCause, RulerState, V3, WoundRecord } from '../world/types';
@@ -26,6 +29,7 @@ import { canonicalJson } from './canonical';
 import {
   type BodiesRecV1,
   type FighterRecV1,
+  type ImpulseRecV1,
   type KccRecV1,
   type RulerBodyRecV1,
   SAVE_FORMAT,
@@ -84,7 +88,7 @@ export function saveRecord(w: World): SaveV1 {
     cover: w.cover.edits().map(([cell, v]): [number, number] => [cell, v]),
     entities: w.entities.toRecord(),
     removed: w.entities.removedGenerated(),
-    impulses: w.entities.pendingImpulses().map((q) => ({ entity: q.id, j: v3(q.j), at: q.at ? v3(q.at) : null })),
+    impulses: savedImpulses(w),
     joints: w.joints.toRecord(),
     fighters: fighters.map((f) => fighterRecord(w, f)),
     minds: w.minds.toRecord(),
@@ -110,6 +114,19 @@ export function saveRecord(w: World): SaveV1 {
     corpses: w.deaths.corpsesRecord(),
     navDirty: w.nav ? w.nav.dirtyQueue() : [],
   };
+}
+
+/**
+ * The queued impulses whose entity is still in the world, in queue order. The store keeps an impulse queued for an
+ * entity removed after it was queued (a contact reaction of phase 9 on an entity that phase 10 then breaks, a strike's
+ * push followed by a cut), and phase 4d drops it; so does the save, which changes nothing the world will do, and a load
+ * never has to queue an impulse on an entity it doesn't have.
+ */
+function savedImpulses(w: World): ImpulseRecV1[] {
+  return w.entities
+    .pendingImpulses()
+    .filter((q) => w.entities.get(q.id) !== undefined)
+    .map((q) => ({ entity: q.id, j: v3(q.j), at: q.at ? v3(q.at) : null }));
 }
 
 /** UTF-8 of canonicalJson(saveRecord(w)). */
@@ -141,16 +158,62 @@ export function savedTuningOverrides(): TuningOverrideV1[] {
 // Commands, in their type's declared key order
 // ---------------------------------------------------------------------------
 
+/** The keys of T that a list of T's keys leaves out. */
+type MissingKeys<T, K extends readonly PropertyKey[]> = Exclude<keyof T, K[number]>;
+
+/**
+ * Every key of T, in T's declared order, checked when compiled: a key T has and the list lacks is a type error naming it
+ * (`missingKey`). So a field added to a command type can't compile without being written to the save (an optional field
+ * left out of a hand-written literal would compile and be dropped silently), and the loader reads the same lists.
+ */
+export function keysOf<T>() {
+  return <const K extends readonly (keyof T)[]>(keys: K & ([MissingKeys<T, K>] extends [never] ? unknown : { missingKey: MissingKeys<T, K> })): K => keys;
+}
+
+/** T's required (non-optional) keys. */
+type RequiredKeys<T> = { [P in keyof T]-?: Record<never, never> extends Pick<T, P> ? never : P }[keyof T];
+/** The required keys of T that a list leaves out. */
+type MissingRequired<T, K extends readonly PropertyKey[]> = Exclude<RequiredKeys<T>, K[number]>;
+
+/** The keys a record of T must have (exactly T's required ones), checked when compiled in the same way. */
+export function requiredKeysOf<T>() {
+  return <const K extends readonly RequiredKeys<T>[]>(keys: K & ([MissingRequired<T, K>] extends [never] ? unknown : { missingKey: MissingRequired<T, K> })): K => keys;
+}
+
+type DevRecord = NonNullable<MetaCommand['dev']>;
+
+export const MOVE_KEYS = keysOf<MoveCommand>()(['tick', 'player', 'kind', 'dir', 'speed', 'flags']);
+export const MOVE_REQUIRED = requiredKeysOf<MoveCommand>()(['tick', 'player', 'kind', 'dir', 'speed']);
+export const BUTTON_KEYS = keysOf<ButtonCommand>()(['tick', 'player', 'kind', 'button']);
+export const BUTTON_REQUIRED = requiredKeysOf<ButtonCommand>()(['tick', 'player', 'kind', 'button']);
+export const VERB_KEYS = keysOf<VerbCommand>()(['tick', 'player', 'kind', 'verb', 'target', 'second', 'at', 'at2', 'yaw', 'pitch', 'aim', 'charge', 'slot', 'drive']);
+export const VERB_REQUIRED = requiredKeysOf<VerbCommand>()(['tick', 'player', 'kind', 'verb', 'target']);
+export const META_KEYS = keysOf<MetaCommand>()(['tick', 'player', 'kind', 'meta', 'seconds', 'dev']);
+export const META_REQUIRED = requiredKeysOf<MetaCommand>()(['tick', 'player', 'kind', 'meta']);
+export const DEV_KEYS = keysOf<DevRecord>()(['op', 'args', 'tuning']);
+export const DEV_REQUIRED = requiredKeysOf<DevRecord>()(['op', 'args']);
+export const TUNING_EDIT_KEYS = keysOf<TuningEdit>()(['table', 'key', 'value']);
+
+/**
+ * The fields of `c` named in `keys`, in that order; an absent (undefined) one stays absent, a field outside the list (not
+ * in the type: the lists are checked against it) is left out, and a flat array (a point, an aim, dev args) is copied.
+ */
+function ordered<T extends object>(c: T, keys: readonly (keyof T)[]): T {
+  const out: Partial<T> = {};
+  for (const k of keys) {
+    const v = c[k];
+    if (v !== undefined) out[k] = (Array.isArray(v) ? [...v] : v) as T[keyof T];
+  }
+  return out as T;
+}
+
 /** A command rewritten in its type's key order with only its type's fields (absent optional fields stay absent). */
 export function commandRecord(c: Command): Command {
   switch (c.kind) {
-    case 'move': {
-      const out: MoveCommand = { tick: c.tick, player: c.player, kind: 'move', dir: c.dir, speed: c.speed };
-      if (c.flags !== undefined) out.flags = c.flags;
-      return out;
-    }
+    case 'move':
+      return ordered(c, MOVE_KEYS);
     case 'button':
-      return { tick: c.tick, player: c.player, kind: 'button', button: c.button };
+      return ordered(c, BUTTON_KEYS);
     case 'verb':
       return verbCommandRecord(c);
     case 'meta':
@@ -159,26 +222,15 @@ export function commandRecord(c: Command): Command {
 }
 
 export function verbCommandRecord(c: VerbCommand): VerbCommand {
-  const out: VerbCommand = { tick: c.tick, player: c.player, kind: 'verb', verb: c.verb, target: c.target };
-  if (c.second !== undefined) out.second = c.second;
-  if (c.at !== undefined) out.at = [c.at[0], c.at[1], c.at[2]];
-  if (c.at2 !== undefined) out.at2 = [c.at2[0], c.at2[1], c.at2[2]];
-  if (c.yaw !== undefined) out.yaw = c.yaw;
-  if (c.pitch !== undefined) out.pitch = c.pitch;
-  if (c.aim !== undefined) out.aim = [c.aim[0], c.aim[1]];
-  if (c.charge !== undefined) out.charge = c.charge;
-  if (c.slot !== undefined) out.slot = c.slot;
-  if (c.drive !== undefined) out.drive = c.drive;
-  return out;
+  return ordered(c, VERB_KEYS);
 }
 
 function metaCommandRecord(c: MetaCommand): MetaCommand {
-  const out: MetaCommand = { tick: c.tick, player: c.player, kind: 'meta', meta: c.meta };
-  if (c.seconds !== undefined) out.seconds = c.seconds;
+  const out = ordered(c, META_KEYS);
   if (c.dev !== undefined) {
-    const d = c.dev;
-    out.dev = { op: d.op, args: [...d.args] };
-    if (d.tuning !== undefined) out.dev.tuning = { table: d.tuning.table, key: d.tuning.key, value: d.tuning.value };
+    const dev = ordered(c.dev, DEV_KEYS);
+    if (c.dev.tuning !== undefined) dev.tuning = ordered(c.dev.tuning, TUNING_EDIT_KEYS);
+    out.dev = dev;
   }
   return out;
 }
