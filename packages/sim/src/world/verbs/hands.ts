@@ -175,8 +175,15 @@ export function heldPose(w: World, f: Fighter, h: Hands): Pose3 | null {
  */
 export function syncHands(w: World, f: Fighter): void {
   const inv = f.inventory;
-  const h = inv?.hands;
-  if (!inv || !h) return;
+  if (!inv) return;
+  // A stowed thing that is gone (removed, decayed) leaves its slot empty.
+  for (let i = 0; i < inv.belt.length; i++) {
+    const id = inv.belt[i];
+    if (id !== null && !w.entities.get(id)) inv.belt[i] = null;
+  }
+  if (inv.back !== null && !w.entities.get(inv.back)) inv.back = null;
+  const h = inv.hands;
+  if (!h) return;
   const e = w.entities.get(h.entity);
   const lost = (): void => {
     inv.hands = null;

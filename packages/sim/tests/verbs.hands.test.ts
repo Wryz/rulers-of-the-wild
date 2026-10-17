@@ -402,6 +402,28 @@ describe('wield and drop (§5.1, §5.2)', () => {
     verb(w, { verb: 'stow', target: 0, slot: 3 });
     expect(verbs(untilFree(w), 'stow')).toEqual([expect.objectContaining({ ok: false, reason: 'notATool' })]);
   });
+
+  it('what the hands hold or the belt keeps going away (broken, removed) empties the hands or the slot', async () => {
+    const w = await make();
+    const p = w.player!;
+    const inv = p.inventory!;
+    const a = stick(w, 0.5, 0.02, -0.4, 1);
+    const b = stick(w, 1, 0.02, 0.4, 1);
+    w.step();
+    verb(w, { verb: 'take', target: a });
+    untilFree(w);
+    verb(w, { verb: 'stow', target: 0, slot: 0 });
+    untilFree(w);
+    verb(w, { verb: 'take', target: b });
+    untilFree(w);
+    expect(p.weapon?.id).toBe('stick');
+    w.removeEntity(a);
+    w.removeEntity(b);
+    w.step();
+    expect(inv.belt[0]).toBeNull();
+    expect(inv.hands).toBeNull();
+    expect(p.weapon).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------
