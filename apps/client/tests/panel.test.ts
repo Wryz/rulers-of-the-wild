@@ -26,11 +26,14 @@ import { GAME_TUNING } from '../src/game/game';
 import { GameLoop, type LoopGame } from '../src/game/loop';
 import type { InputFrame } from '../src/input/input';
 // Every client table registers as its module loads (main.ts loads them all before the panel).
+import '../src/body/ragdoll';
 import '../src/game/killcam';
 import '../src/game/presentationWorld';
 import '../src/input/verbInput';
+import '../src/render/cameraRig';
 import '../src/render/followCam';
 import '../src/render/terrainView';
+import '../src/ui/hud';
 
 type Change = { value: unknown; last: boolean };
 
@@ -194,7 +197,7 @@ describe('dev panel: built from the registry', () => {
     const { pane, panel } = setup();
     const names = TUNING.map((e) => e.name);
     // The sim's tables and every client table (FEEL_TUNING and the panel's own included).
-    for (const n of ['DAMAGE_TUNING', 'MATERIALS', 'SPECIES_BODY', 'ENTITY_TUNING', 'CREATURE_TUNING', 'GAME_TUNING', 'LOOP_TUNING', 'FEEL_TUNING', 'PANEL_TUNING', 'KILLCAM_TUNING', 'RENDER_TUNING']) {
+    for (const n of ['DAMAGE_TUNING', 'MATERIALS', 'SPECIES_BODY', 'ENTITY_TUNING', 'CREATURE_TUNING', 'GAME_TUNING', 'LOOP_TUNING', 'FEEL_TUNING', 'PANEL_TUNING', 'KILLCAM_TUNING', 'RENDER_TUNING', 'RAGDOLL_TUNING', 'CAMERA_TUNING', 'FOLLOW_TUNING', 'PRESENTATION_TUNING', 'VERB_UI_TUNING', 'HUD_TUNING']) {
       expect(names).toContain(n);
     }
     let leaves = 0;

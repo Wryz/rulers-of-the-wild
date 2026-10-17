@@ -408,12 +408,15 @@ describe('SfxAdapter', () => {
     expect(calls.at(-1)).toEqual(['knap']);
     a.handle(ev({ type: 'verb', f: me, verb: 'shape', ok: true, entity: 6 }), w);
     expect(calls.at(-1)).toEqual(['scrape']);
-    // A wounded ruler bellows.
     const giant = fighter({ id: 3, x: 20, z: 0, scale: 5.5, ruler: true }).f;
     // It shoves a log aside: a scrape and a knock by the log's mass and material.
     a.handle(ev({ type: 'shove', ruler: giant, entity: 6 }), w);
     expect(calls.slice(-2)).toEqual([['scrape'], ['thud', 60, 'wood', 0.6]]);
+    // A wounded ruler bellows once: through the noise bus's `roar` for the wound, not the wound event as well.
+    const before = calls.length;
     a.handle(ev({ type: 'wound', ruler: giant, wound: { severe: true }, byWorld: true }), w);
+    expect(calls.length).toBe(before);
+    a.handle(ev({ type: 'noise', at: { x: 20, y: 8, z: 0 }, radius: 200, kind: 'roar' }), w);
     expect(calls.at(-1)).toEqual(['roar', 5.5, 1]);
   });
 

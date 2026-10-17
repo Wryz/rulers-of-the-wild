@@ -67,8 +67,7 @@ const DOWN: V3 = { x: 0, y: -1, z: 0 };
 export class SfxAdapter implements SfxPort {
   /**
    * The camera jolt a giant's footfall asks for (FEEL_TUNING: 0.05·(scale − 1)·near inside 6·scale m). Footfalls are
-   * read here, not sent as events, so the camera hears of them through this. TODO(main.ts follow-up): wire it to
-   * CameraPort.shake.
+   * read here, not sent as events, so the camera hears of them through this (main.ts: CameraPort.shake).
    */
   onTrauma: ((trauma: number) => void) | null = null;
 
@@ -256,10 +255,8 @@ export class SfxAdapter implements SfxPort {
       case 'impact':
         this.impact(e, world);
         return;
-      case 'wound':
-        // A trap opens a wound on a ruler: it bellows (SPEC:850).
-        this.at(e.ruler.pos, L.roar, () => s.roar(e.ruler.scale, e.wound.severe ? 1 : 0.7));
-        return;
+      // (A wound on a ruler bellows through the sim's own `noise` roar, which the noise bus raises for every wound:
+      // §6.2, SPEC:850. Roaring here too would double it.)
       case 'trip':
         if (e.f.ruler) this.at(e.at, L.roar, () => s.roar(e.f.scale, 0.85));
         return;

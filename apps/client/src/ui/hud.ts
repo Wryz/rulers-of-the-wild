@@ -1,5 +1,5 @@
 // The HUD (docs/M1-DESIGN.md §10.8, SPEC:419-423): DungeonStyle's DOM overlay made the minimal HUD of the Clearing, and
-// the HudPort game.ts calls (it folds in P31's adapter, ui/hudPort.ts, RF-9):
+// the HudPort game.ts calls (main.ts hands it in as the port itself, RF-9):
 // - health and stamina bars (DS); the guard bar only while locked on;
 // - the hands strip (bottom left): what the hands hold (name, mass, mode, a two-handed mark), the belt slots 1-3 and
 //   the back slot 4 with their keys;
@@ -7,7 +7,8 @@
 // - the target bar while locked on (DS's lock-on: the target alive and within FOLLOW_TUNING.fightRangeM): an ape's
 //   name and HP; the giant's HP bar with each wound a notch (severe ones larger) and what it costs the bar;
 // - the death banner "DOWN — back in N s" (game.ts counts it down in sim ticks), the mood, popups and DS's callouts
-//   (combat markers always; COUNTER, ARMORED, SKULL SPLIT… only with prefs.cues, off by default, realism.test.ts).
+//   (combat markers always; COUNTER, ARMORED, SKULL SPLIT… only with prefs.cues, off by default, realism.test.ts);
+// - a refused verb's reason over the player's head, in §5.13's words (ui/radial.ts reasonText: "too heavy (300 kg)").
 // DS's training HUD is gone: the round label (`.wave`), the move panel, the fight tips and the incoming-threat marker
 // (§10.8's minimal HUD has none of them; DS's cues-only telegraph rings went with the training ring).
 //
@@ -19,11 +20,13 @@ import {
   type Entity,
   type Fighter,
   heldMembers,
+  heldShape,
   type Inventory,
   type MaterialId,
   type RulerState,
   rulerEffectiveMax,
   type World,
+  type WorldEvent,
 } from '@wild/sim';
 import type { HudPort, SimEvent } from '../game/ports';
 import { DEFAULT_PREFS, type Prefs } from '../game/prefs';
@@ -31,6 +34,7 @@ import { type Bindings, keyLabel } from '../input/bindings';
 import { FOLLOW_TUNING } from '../render/followCam';
 import { AwarenessMarkers } from '../render/markers';
 import { Compass } from './compass';
+import { reasonText } from './radial';
 
 /**
  * The HUD's own starting values. DEVIATION (P36): §13.0 adds no tuning table after P05 and §9.1 has no HUD table; these
@@ -230,6 +234,19 @@ export function targetModel(t: Fighter): TargetModel {
   return { name: t.name, hp: t.stats.maxHp > 0 ? Math.min(1, Math.max(0, t.hp / t.stats.maxHp)) : 0, ruler: null };
 }
 
+/**
+ * What a refused verb says over the player's head (§10.7), in §5.13's words ("take: too heavy (300 kg)"); null for one
+ * that worked, someone else's, or a `focus` (the UI checks a focus before sending it; a target leaving reach in the tick
+ * between is not news).
+ */
+export function refusalText(e: Extract<WorldEvent, { type: 'verb' }>, player: Fighter | null, world: World | null): string | null {
+  if (e.ok || e.f !== player || e.verb === 'focus') return null;
+  if (!e.reason) return `can't ${e.verb}`;
+  let kg: number | undefined;
+  if (e.reason === 'tooHeavy' && e.entity !== undefined && world?.entities.get(e.entity)) kg = heldShape(world, e.entity).massKg;
+  return `${e.verb}: ${reasonText(e.reason, kg)}`;
+}
+
 /** The death banner's line: "back in N s" (whole seconds, rounded up; never below 0). */
 export function bannerText(secondsLeft: number): string {
   return `back in ${Math.max(0, Math.ceil(secondsLeft))} s`;
@@ -421,13 +438,21 @@ export class Hud implements HudPort {
     this.popupAt(text, overHead(p, 2.1), cam, '');
   }
 
-  /** DS's combat markers (always on) and cues popups (prefs.cues) for an event: what a blow did, where it landed. */
-  handle(e: SimEvent, _world: World): void {
+  /**
+   * DS's combat markers (always on) and cues popups (prefs.cues) for an event: what a blow did, where it landed; and a
+   * refused verb's reason.
+   */
+  handle(e: SimEvent, world: World): void {
     const me = this.player;
     const cam = this.ctx?.camera();
     if (!cam) return;
     const cues = (this.ctx?.prefs() ?? DEFAULT_PREFS).cues;
     switch (e.type) {
+      case 'verb': {
+        const text = refusalText(e, me, world);
+        if (text) this.popup(text);
+        return;
+      }
       case 'attackStart':
         if (e.f === me && ++this.attacksThrown === HUD_TUNING.hintFadeAfter) this.fadeHint();
         return;
@@ -505,10 +530,12 @@ export class Hud implements HudPort {
       <span>${k('up')}${k('left')}${k('down')}${k('right')} move</span>
       <span>${k('lpunch')} ${k('rpunch')} punch <span class="dim">· as a strike lands: parry</span></span>
       <span>${k('lkick')} ${k('rkick')} kick</span>
+      <span>${k('target')} target</span>
       <span>${k('pickup')} take / drop</span>
       <span>hold ${k('verb')} verbs</span>
       <span>hold ${k('throw')} throw · hold ${k('place')} place</span>
       <span>${k('belt1')}–${k('back')} belt / back</span>
+      <span>${k('jump')} jump · ${k('sprint')} sprint · ${k('crouch')} crouch</span>
       <span class="dim"><b>Esc</b> settings</span>
       <span class="dim"><b>B</b> log</span>
       <span class="dim"><b>M</b> mute</span>`;

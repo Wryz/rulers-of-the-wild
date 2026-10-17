@@ -21,9 +21,7 @@ import {
   WebGLRenderer,
 } from 'three';
 import {
-  type AIConfig,
   BONES,
-  DEFAULT_AI,
   defineTuning,
   DT,
   type Fighter,
@@ -31,13 +29,13 @@ import {
   type StepResult,
   strikePoint,
   type V3,
-  type WeaponId,
   type World,
 } from '@wild/sim';
 import type {
   BodyPose,
   CameraPort,
   CinematicsPort,
+  DevViewsPort,
   FxPort,
   GamePorts,
   GoreLevel,
@@ -49,6 +47,7 @@ import type {
   MomentsPort,
   PanelPort,
   PresentationPort,
+  RendererPort,
   SfxPort,
   SimEvent,
   VerbInputPort,
@@ -67,6 +66,28 @@ export const GAME_TUNING = defineTuning(
     showNav: false,
     showSenses: false,
     showZones: false,
+    // How developer mode's world views look (debug/devViews.ts): C-fix's, so none is a bare constant there.
+    devViews: {
+      navLiftM: 0.06,
+      navOpacity: 0.22,
+      navHuman: '#38c8ff',
+      navRuler: '#ff9a3c',
+      navRulerLiftMul: 2,
+      navEdgeOpacityMul: 3,
+      senseColor: '#ffd36b',
+      senseStillColor: '#b98a2e',
+      senseArcSegments: 16,
+      noiseColor: '#ff5a8a',
+      noiseRingS: 1.5,
+      noiseRingSegments: 32,
+      noiseLiftM: 0.1,
+      zoneColor: '#ffe14a',
+      zoneOpacity: 0.55,
+      zoneSphereSegments: 10,
+      zoneSphereRings: 8,
+      zoneCapsuleCapSegments: 3,
+      zoneCapsuleRadialSegments: 8,
+    },
   },
   {
     timeScale: { unit: '×', source: 'DS (game.ts:49)', min: 0.05, max: 1.5, step: 0.05, label: 'time scale' },
@@ -77,6 +98,27 @@ export const GAME_TUNING = defineTuning(
     showNav: { unit: '—', source: 'NEW: dev views (nav polys, P12/P37)', label: 'nav polys' },
     showSenses: { unit: '—', source: 'NEW: dev views (sight cones, hearing rings, P18/P37)', label: 'senses' },
     showZones: { unit: '—', source: 'NEW: dev views (hit zones, P08/P37)', label: 'zones' },
+    devViews: {
+      navLiftM: { unit: 'm', source: 'NEW (C-fix): the nav polygons float this far over the ground (no z-fighting)', min: 0, max: 1, step: 0.01, label: 'nav lift' },
+      navOpacity: { unit: '0-1', source: 'NEW (C-fix): the nav polygons\' fill', min: 0, max: 1, step: 0.01, label: 'nav opacity' },
+      navHuman: { unit: 'colour', source: 'NEW (C-fix): the human layer\'s polygons' },
+      navRuler: { unit: 'colour', source: 'NEW (C-fix): the ruler layer\'s polygons' },
+      navRulerLiftMul: { unit: '× navLiftM', source: 'NEW (C-fix): the ruler layer floats higher, so both read where they overlap', min: 1, max: 10, step: 0.5, label: 'ruler nav lift' },
+      navEdgeOpacityMul: { unit: '× navOpacity', source: 'NEW (C-fix): the nav polygons\' edges (capped at 1)', min: 1, max: 10, step: 0.5, label: 'nav edge opacity' },
+      senseColor: { unit: 'colour', source: 'NEW (C-fix): a creature\'s sight cone at sightRangeM (§6.2)' },
+      senseStillColor: { unit: 'colour', source: 'NEW (C-fix): the cone\'s inner arc, sightRangeStillM (§6.2: a still target is seen nearer)' },
+      senseArcSegments: { unit: 'segments', source: 'NEW (C-fix): the sight cone\'s arcs', min: 2, max: 64, step: 1, label: 'cone segments' },
+      noiseColor: { unit: 'colour', source: 'NEW (C-fix): a noise\'s hearing ring (its radius, §6.2)' },
+      noiseRingS: { unit: 's (real)', source: 'NEW (C-fix): a hearing ring stays this long after its noise', min: 0.1, max: 10, step: 0.1, label: 'hearing ring shown' },
+      noiseRingSegments: { unit: 'segments', source: 'NEW (C-fix): a hearing ring\'s circle', min: 8, max: 128, step: 1, label: 'ring segments' },
+      noiseLiftM: { unit: 'm', source: 'NEW (C-fix): a hearing ring floats this far over the ground at the noise', min: 0, max: 2, step: 0.05, label: 'ring lift' },
+      zoneColor: { unit: 'colour', source: 'NEW (C-fix): the hit zones\' wireframes (§4.8)' },
+      zoneOpacity: { unit: '0-1', source: 'NEW (C-fix)', min: 0, max: 1, step: 0.01, label: 'zone opacity' },
+      zoneSphereSegments: { unit: 'segments', source: 'NEW (C-fix): a ball zone\'s wireframe, around (read when first built)', min: 3, max: 64, step: 1, label: 'ball segments' },
+      zoneSphereRings: { unit: 'rings', source: 'NEW (C-fix): a ball zone\'s wireframe, top to bottom (read when first built)', min: 2, max: 64, step: 1, label: 'ball rings' },
+      zoneCapsuleCapSegments: { unit: 'segments', source: 'NEW (C-fix): a capsule zone\'s end caps (read when first built)', min: 1, max: 32, step: 1, label: 'capsule cap segments' },
+      zoneCapsuleRadialSegments: { unit: 'segments', source: 'NEW (C-fix): a capsule zone, around (read when first built)', min: 3, max: 64, step: 1, label: 'capsule segments' },
+    },
   },
 );
 
@@ -129,8 +171,6 @@ export interface Beat {
   respawnTick: number | null | undefined;
   /** A respawn: the camera behind, the body snapped back, the death banner gone. */
   snap: Fighter | null;
-  /** A callout over the player's head. */
-  popup: string | null;
 }
 
 /**
@@ -152,7 +192,6 @@ export function beatOf(e: SimEvent, c: BeatContext): Beat {
     treeLanded: null,
     respawnTick: undefined,
     snap: null,
-    popup: null,
   };
   const me = c.player;
   switch (e.type) {
@@ -230,17 +269,15 @@ export function beatOf(e: SimEvent, c: BeatContext): Beat {
         b.snap = e.f;
       }
       return b;
-    case 'verb':
-      // A refused verb says why (§10.7).
-      if (!e.ok && e.f === me) b.popup = e.reason ? `${e.verb}: ${e.reason}` : `can't ${e.verb}`;
-      return b;
     default:
+      // (A refused verb's popup is the HUD's own reaction, in §5.13's words: ui/hud.ts.)
       return b;
   }
 }
 
 export class Game {
-  readonly renderer: WebGLRenderer;
+  /** The three.js renderer (GamePorts.renderer, else a WebGLRenderer on the canvas). */
+  readonly renderer: RendererPort;
   readonly scene: Scene;
   /** render/*View.ts (P32): terrain, trees, entities, ropes, grass, sky and the fighters. */
   readonly views: WorldViewsPort;
@@ -264,6 +301,8 @@ export class Game {
   readonly sfx: SfxPort;
   /** P37 (developer mode sets the real one: setPanel). */
   panel: PanelPort;
+  /** Developer mode's nav, senses and zones views (setDevViews), or null. */
+  devViews: DevViewsPort | null = null;
   /** P35: settings, the battle log and the session recording. */
   readonly menus: MenusPort;
   /** The local player (player number 1, 'p1'): the same Fighter across respawns. */
@@ -293,6 +332,8 @@ export class Game {
     target: new MeshBasicMaterial({ color: 0x40d0ff }),
   };
   private readonly sphereGeo = new SphereGeometry(1, 10, 8);
+  /** Where the camera looks (the listener's facing). */
+  private readonly camForward = new Vector3();
 
   static create(world: World, canvas: HTMLCanvasElement, ports: GamePorts): Game {
     return new Game(world, canvas, ports);
@@ -320,14 +361,7 @@ export class Game {
     this.panel = ports.panel;
     this.menus = ports.menus;
 
-    const r = new WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
-    r.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    r.shadowMap.enabled = true;
-    r.shadowMap.type = PCFShadowMap;
-    r.toneMapping = ACESFilmicToneMapping;
-    r.toneMappingExposure = 1.0;
-    r.outputColorSpace = SRGBColorSpace;
-    this.renderer = r;
+    this.renderer = ports.renderer ?? Game.webgl(canvas);
     this.scene.add(this.debugGroup);
 
     // Cuts stand on the terrain and keep a clear line to what they film: no shooting through the ground or a trunk
@@ -339,6 +373,18 @@ export class Game {
     this.resize();
   }
 
+  /** The game's WebGL renderer on `canvas` (DS's settings: shadows, ACES tone mapping, sRGB). */
+  private static webgl(canvas: HTMLCanvasElement): WebGLRenderer {
+    const r = new WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+    r.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    r.shadowMap.enabled = true;
+    r.shadowMap.type = PCFShadowMap;
+    r.toneMapping = ACESFilmicToneMapping;
+    r.toneMappingExposure = 1.0;
+    r.outputColorSpace = SRGBColorSpace;
+    return r;
+  }
+
   /** A menu is open: the loop pauses and turns no input into commands. */
   get menuOpen(): boolean {
     return this.menus.open;
@@ -347,6 +393,12 @@ export class Game {
   /** Developer mode's panel (main.ts builds it once the game exists). */
   setPanel(panel: PanelPort): void {
     this.panel = panel;
+  }
+
+  /** Developer mode's world views (main.ts builds them with the panel). */
+  setDevViews(views: DevViewsPort): void {
+    this.devViews?.dispose();
+    this.devViews = views;
   }
 
   resize(): void {
@@ -428,12 +480,14 @@ export class Game {
     this.cams.setSlowMotion((this.loop?.slowmo ?? 0) > 0);
     this.cams.update(realDt, w, p, p.target && p.target.alive ? p.target : null, this.look);
     this.cams.cutoutFocus(p.pos);
-    this.sfx.setListener(this.cams.camera.position);
+    const cam = this.cams.camera;
+    this.sfx.setListener(cam.position, cam.getWorldDirection(this.camForward));
     this.sfx.ambience(w, realDt, gameDt);
     this.hud.update(w, p, realDt);
     this.hud.deathBanner(this.respawnTick === null ? null : Math.max(0, (this.respawnTick - w.tick) * DT));
     if (this.panel.visible) this.panel.refresh(w);
     this.updateDebug();
+    this.devViews?.update(w, realDt);
     this.renderer.render(this.scene, this.cams.camera);
     this.menus.afterRender();
   }
@@ -450,6 +504,7 @@ export class Game {
   }
 
   dispose(): void {
+    this.devViews?.dispose();
     this.views.dispose();
     this.presentation.dispose();
     this.renderer.dispose();
@@ -479,7 +534,6 @@ export class Game {
       this.cams.snapBehind(b.snap);
       this.presentation.snapTo(b.snap);
     }
-    if (b.popup !== null) this.hud.popup(b.popup);
     if (e.type === 'launch') this.presentation.onLaunch(e.f, e.vel, e.angVel);
     this.dispatch(e);
   }
@@ -494,6 +548,8 @@ export class Game {
     this.sfx.handle(e, w);
     this.hud.handle(e, w);
     this.menus.handle(e, w);
+    this.panel.handle?.(e, w);
+    this.devViews?.handle(e, w);
   }
 
   /** Is the line from a cut's camera spot to what it films blocked by the terrain or a trunk? (Read-only queries.) */
@@ -529,35 +585,5 @@ export class Game {
       if (f.move && f.inActiveFrames()) use(this.debugMats.strike, strikePoint(f, f.move, new Vector3()), (f.move.radius + f.stats.reach) * f.scale);
     }
     for (; i < this.debugPool.length; i++) this.debugPool[i].visible = false;
-  }
-
-  // ---------------------------------------------------------------------------
-  // The DS tuning panel's calls (debug/panel.ts, until P37 rebuilds the panel from the registry and dev-op commands).
-  // TODO(P37): once the rewritten panel no longer calls these, a follow-up (Pnn-fix) removes them from game.ts.
-  // ---------------------------------------------------------------------------
-
-  /** @deprecated DS panel only. Inert: in M1 every creature's mind owns its AIConfig (no client write of sim state). */
-  readonly aiCfg: AIConfig = { ...DEFAULT_AI };
-
-  /** @deprecated DS panel: "Step frame (.)". */
-  requestStep(): void {
-    this.loop?.requestStep();
-  }
-
-  /** @deprecated DS panel: "Restart (Backspace)": rebuilds the world from the same seed. */
-  restart(): void {
-    this.onRebuild?.();
-  }
-
-  /** @deprecated DS panel: "Respawn enemy". In M1 that is the dev op `spawnApe` (a command; P22 implements it). */
-  spawnEnemy(): void {
-    // TODO(P22): send this.loop.dev('spawnApe', …) once world/devOps.ts applies it (it throws until P22).
-    console.warn('Spawning an ape is the dev op spawnApe, which arrives with P22.');
-  }
-
-  /** @deprecated DS panel: "Give to player". In M1 that is the dev op `giveTool` (a command; P22 implements it). */
-  giveWeapon(id: WeaponId | null): void {
-    // TODO(P22): send this.loop.dev('giveTool', …): putting a weapon in a fighter's hands from the client breaks rule 6.
-    console.warn(`Giving ${id ?? 'nothing'} is the dev op giveTool, which arrives with P22.`);
   }
 }

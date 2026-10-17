@@ -9,9 +9,10 @@
 //   CameraPort, CinematicsPort       P34  render/cameraDirector.ts (render/followCam, cameraRig, cinematics, cutout)
 //   VerbInputPort, MenusPort         P35  input/verbInput.ts; ui/menusPort.ts (ui/settings.ts, ui/battleLog.ts,
 //                                         game/recorder.ts)
-//   KillCamPort, MomentsPort, HudPort P36 game/killcam.ts, game/moments.ts; ui/hudPort.ts (ui/hud.ts, ui/compass.ts,
+//   KillCamPort, MomentsPort, HudPort P36 game/killcam.ts, game/moments.ts; ui/hud.ts (ui/compass.ts,
 //                                         render/markers.ts)
 //   SfxPort, PanelPort               P37  feel/sfxPort.ts (feel/audio.ts); debug/panel.ts
+//   DevViewsPort                     C-fix debug/devViews.ts (developer mode: the panel's nav, senses and zones views)
 //
 // Every method game.ts calls is here, and nothing else. §10.1 lists the methods M1 adds; the DungeonStyle ones game.ts
 // keeps calling are here too (marked "DS"), and so are a few P31 needed to keep DS's behaviour behind a port (marked
@@ -68,7 +69,9 @@ export interface WorldViewsPort {
 export interface FighterViewPort {
   syncFromRig(f: Fighter): void;
   setHeld(entity: number | null, world: World): void;
-  scar(bone: BoneName, local: V3, kind: 'scar' | 'gash' | 'eye'): void;
+  // DEVIATION (C-fix): §10.1's scar(bone, local, kind) is not here. The adapter draws every ruler wound from the sim's
+  // own wound records each frame (a gash healing into a scar, a wound gone), so a scar() call could only add a second,
+  // untracked mark on top of one it already draws.
   setGore(level: GoreLevel): void;
   /** DS: the hit-pause jitter of the struck body (0 stills it). */
   setShiver(amount: number): void;
@@ -168,7 +171,7 @@ export interface MomentsPort {
   fromStep(r: StepResult): Moment[];
 }
 
-/** P36: ui/hud.ts (changed DS), ui/compass.ts, render/markers.ts, behind ui/hudPort.ts. */
+/** P36: ui/hud.ts (changed DS, which implements it), ui/compass.ts, render/markers.ts. */
 export interface HudPort {
   update(world: World, player: Fighter | null, dt: number): void;
   mood(m: '' | 'death'): void;
@@ -181,7 +184,8 @@ export interface HudPort {
 /** P37: feel/audio.ts (changed DS), behind feel/sfxPort.ts. */
 export interface SfxPort {
   handle(e: SimEvent, world: World): void;
-  setListener(p: Vector3): void;
+  /** The ears: the camera's position, and where it looks (sounds pan to their side of it). */
+  setListener(p: Vector3, forward?: Vector3): void;
   /** Per rendered frame: the ambience, and DS's panting when the player is gassed (it stops when the game does). */
   ambience(world: World, realDt: number, gameDt: number): void;
   /** DS: the mute key toggles between 0 and GAME_TUNING.volume. */
@@ -195,6 +199,17 @@ export interface PanelPort {
   readonly visible: boolean;
   /** DS: the L key. */
   toggle(): void;
+  /** Every event of every stepped tick (the impact and tripwire read-outs); a panel without read-outs leaves it out. */
+  handle?(e: SimEvent, world: World): void;
+}
+
+/** Developer mode: the panel's world views (GAME_TUNING.showNav, showSenses, showZones). Presentation only. */
+export interface DevViewsPort {
+  /** Per rendered frame: draws what the toggles ask for (nothing when they are off). */
+  update(world: World, realDt: number): void;
+  /** Every event of every stepped tick (the noises the senses view rings). */
+  handle(e: SimEvent, world: World): void;
+  dispose(): void;
 }
 
 /**
@@ -242,9 +257,18 @@ export interface LoopPort {
   save(): void;
 }
 
+/** What Game asks of its three.js renderer (a WebGLRenderer; tests hand in one that draws nothing). */
+export interface RendererPort {
+  render(scene: Scene, camera: PerspectiveCamera): void;
+  setSize(width: number, height: number, updateStyle?: boolean): void;
+  dispose(): void;
+}
+
 /** One of each port (Game.create). `scene` is the three.js scene every view draws into. */
 export interface GamePorts {
   scene: Scene;
+  /** The renderer (absent: Game makes a WebGLRenderer on its canvas). */
+  renderer?: RendererPort;
   views: WorldViewsPort;
   presentation: PresentationPort;
   fx: FxPort;
