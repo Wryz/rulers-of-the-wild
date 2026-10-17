@@ -72,7 +72,8 @@ export interface WorldOptions {
    * Build the world a save is loaded into (save/load.ts): generation runs, but the player isn't spawned, the spawner
    * isn't initialised and the navmesh isn't built; the loader adds the save's fighters, restores the spawner from its
    * record and builds the navmesh once over the loaded ground. `player` and `sparringApe` still say what the saved world
-   * was built with (they are saved again as they are). Not one of `options`. Default false.
+   * was built with (they are saved again as they are). Not one of `options`. Default false. DEVIATION (§1.5.1's
+   * WorldOptions has no such flag; core-fix: it spares the loader removing what construction made and a navmesh build).
    * TODO(P22): Spawner.restoreRecord has to put back whatever Spawner.init sets up besides the creatures it makes.
    */
   load?: boolean;

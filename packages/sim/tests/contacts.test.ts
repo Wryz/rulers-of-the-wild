@@ -328,6 +328,10 @@ describe('a log on a standing player', () => {
     expect(before).toBeLessThan(6.22);
     expect(rows[i + 1].post!.y).toBeLessThan(0); // still falling
     expect(after).toBeGreaterThanOrEqual(0.8 * before);
+    // The real rig's pins at 3.75 m: 5.89 m/s, Δv 4.74 down (hitstun), 85.9 % of the speed kept.
+    expect(before).toBeCloseTo(5.89, 2);
+    expect(rows[i].hit!.dv.y).toBeCloseTo(-4.74, 2);
+    expect(after / before).toBeCloseTo(0.859, 3);
     const hit = rows[i].hit!;
     expect(hit.damage).toBeGreaterThan(0);
     expect(hit.cause).toMatchObject({ kind: 'entity', entityId: id, held: false });
@@ -379,6 +383,11 @@ describe('a log on a standing player', () => {
     const before = speed(rows[i].pre);
     const after = speed(rows[i + 1].post);
     expect(rows[i].hit!.damage).toBeGreaterThan(0);
+    // The real rig's numbers at 4 m (§11.6's pins for the lab rig were 6.21 m/s and Δv 4.99): 6.38 m/s, Δv 5.09 down,
+    // the press branch by name (RF-27).
+    expect(before).toBeCloseTo(6.38, 2);
+    expect(rows[i].hit!.dv.y).toBeCloseTo(-5.09, 2);
+    expect(rows[i].hit!).toMatchObject({ knockdown: true, launched: false });
     expect(rows[i + 1].post!.y).toBeLessThan(0); // still falling
     expect(after).toBeGreaterThanOrEqual(0.8 * before);
     // It lands on the terrain, never on the body: no rest above 0.5 m on the way.

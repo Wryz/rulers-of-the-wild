@@ -11,8 +11,9 @@
 //   pop (liftBase + liftPerLift × the move's lift) when a melee blow put it down this tick, and any queued Δv; it topples
 //   at toppleRadS/√scale about up × dir. f.vel and f.walkVel go to 0 (the body owns the momentum); the controller and the
 //   zones are disabled; a `launch` event carries the velocities to the client's ragdoll.
-// - Clear of dynamic bodies (core-fix): a slab is never solved against a dynamic body that is inside it. In every phase
-//   4a each active slab lists the dynamic bodies (entities, other slabs, a tripped ruler) that reach its spine (its long
+// - Clear of dynamic bodies (core-fix). DEVIATION (§4.5 enables the slab where the fighter stood and leaves the rest to
+//   Rapier): a slab is never solved against a dynamic body that is inside it. In every phase 4a each active slab
+//   lists the dynamic bodies (entities, other slabs, a tripped ruler) that reach its spine (its long
 //   axis thickened to the core's half-thickness, halfThick × scale: the body's centre line), and the step leaves those
 //   pairs out (PhysicsWorld.addPairFilter) until they are clear of it. A slab enabled where the fighter stood inside a
 //   falling log no longer has Rapier throw the log out of it (a 300 kg log that pressed the player from 4 m went back up

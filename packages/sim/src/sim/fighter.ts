@@ -364,13 +364,14 @@ export class Fighter {
    * The posture as the body shows it (world mode: a fighter on a world's ground): `posture` ramped in, or the last one
    * ramped out first, by 1/CHARACTER_TUNING.postureRampFrames of full weight a tick, so a posture set or cleared at once
    * (the hands' carry and drag, a mind's sniff) never jumps the pose: a jump moves the head up to 0.2 m in one tick, a
-   * 12 m/s self-motion contact (§4.3). Saved (FighterRecord.postureShown).
+   * 12 m/s self-motion contact (§4.3). Saved (FighterRecord.postureShown). DEVIATION (§1.5.3 and §8.3's FighterRecV1
+   * list no such field): the ramp has to survive a load.
    */
   private postureShown: Posture | null = null;
   /**
    * A world point the near hand reaches for over the posture, as far as the arm allows: the grip of a dragged load.
    * Written by the world in every phase 3 before updatePose (CharacterControllers.resolve); null without one. Not
-   * saved: written before it is read.
+   * saved: written before it is read. DEVIATION (§1.5.3 lists no such field): the sim's fighter sees no entity.
    */
   reachAt: WorldV3 | null = null;
   /** A committed work action (state 'pickup'); see startWork. */
@@ -1119,7 +1120,8 @@ export class Fighter {
    * shown last tick, the pose goes only that far toward it. DungeonStyle's pickup squat, which a take plays over its
    * first half (9 frames for a stick), swung the head 0.53 m at up to 4.7 m/s, plus the step-in's 2.7 m/s: a 6.2 m/s
    * self-motion hit on a block in front, past a human's 6 m/s v_safe, whose hitstun cancelled the take. The pose catches
-   * up within the track's hold.
+   * up within the track's hold. DEVIATION (§5.0 plays a work action's pose track as the verb gives it): the verb's
+   * timing (its actAt) is unchanged; only the pose may trail its keys.
    */
   private limitWorkBend(target: Pose): void {
     const max = (characterTuning('workHeadSpeedMps') * DT) / this.scale;

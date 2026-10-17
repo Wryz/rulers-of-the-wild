@@ -147,7 +147,8 @@ export class Footwork {
   private gaitLead = 0;
   /**
    * m, fighter-local (unscaled): how far the hips are lowered for a downhill foot (updateHipDrop; core-fix). 0 on level
-   * ground, and always outside a world. Saved.
+   * ground, and always outside a world. Saved. DEVIATION (MAP gap-7 §3.5's footwork Save list has no such field): the
+   * drop is rate-limited, so it is state.
    */
   hipDrop = 0;
 
