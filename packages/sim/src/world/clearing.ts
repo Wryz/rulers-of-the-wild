@@ -217,8 +217,22 @@ export const CLEARING_TUNING = defineTuning(
     starterCoilOffset: [1.1, 0.25],
     starterCoilM: 8,
     boundaryWallThickM: 1,
-    boundaryWallAboveM: 4,
+    boundaryWallAboveM: 60,
     boundaryWallBelowM: 2,
+    corridorLegSpan: [0.25, 0.75],
+    corridorAlongFrac: 0.5,
+    groveCentreMarginFrac: 0.5,
+    boulderLegSpan: [0.2, 0.8],
+    routeLogLegSpan: [0.3, 0.7],
+    outcropEdgeMarginM: 1,
+    outcropRimMarginM: 2,
+    outcropSpacingRadii: 3,
+    looseEdgeMarginM: 0.5,
+    looseRimMarginM: 1,
+    snagHollowDepthFrac: 0.5,
+    tiltSampleM: [0.25, 2.5],
+    homeLoopProbes: 12,
+    apeHomeDistJitterM: 4,
   },
   {
     trees: { unit: 'trees', source: 'SPEC:869' },
@@ -380,8 +394,58 @@ export const CLEARING_TUNING = defineTuning(
     starterCoilOffset: { unit: 'm (x, z) from starterCacheAt', source: 'NEW (P21)' },
     starterCoilM: { unit: 'm', source: 'NEW: §6.7 starter cache (an 8 m vine coil)' },
     boundaryWallThickM: { unit: 'm', source: 'NEW (P21): §6.7 (four fixed boxes behind the rim top)' },
-    boundaryWallAboveM: { unit: "m above the terrain's edge", source: 'NEW (P21): §6.7 (they catch anything flung over the rim)' },
+    boundaryWallAboveM: {
+      unit: "m above the terrain's edge",
+      source: 'NEW (P21): §6.7 (they catch anything flung over the rim; fixed boxes cost nothing, so high enough for a high arc)',
+    },
     boundaryWallBelowM: { unit: "m below the terrain's edge", source: 'NEW (P21)' },
+    corridorLegSpan: {
+      unit: "fraction of the leg [from, to]",
+      source: 'NEW (P21): where on its leg a corridor grove is centred (away from the waypoints, so the corridor is along one leg)',
+    },
+    corridorAlongFrac: {
+      unit: "× the grove's radius (±)",
+      source: "NEW (P21): how far along the leg from a split grove's centre its gate and corridor-lining trunks stand",
+    },
+    groveCentreMarginFrac: {
+      unit: "× the grove's radius",
+      source: "NEW (P21): a disk grove's centre keeps this far inside the rim's foot and off the ledge's hollow",
+    },
+    boulderLegSpan: { unit: 'fraction of the leg [from, to]', source: 'NEW (P21): where along the leg the two boulders above it lie' },
+    routeLogLegSpan: { unit: 'fraction of the leg [from, to]', source: 'NEW (P21): where along its leg the ≈ 300 kg log lies' },
+    outcropEdgeMarginM: {
+      unit: 'm beyond the outcrop radius',
+      source: "NEW (P21): an outcrop keeps this far from the terrain's edge, trunks and rooted things",
+    },
+    outcropRimMarginM: { unit: 'm beyond the outcrop radius', source: "NEW (P21): an outcrop's centre keeps this far inside the rim's foot" },
+    outcropSpacingRadii: { unit: '× outcropR', source: "NEW (P21): outcrop centres at least this far apart" },
+    looseEdgeMarginM: {
+      unit: "m beyond the thing's reach",
+      source: "NEW (P21): a loose or rooted thing keeps this far from the terrain's edge",
+    },
+    looseRimMarginM: {
+      unit: "m beyond the thing's reach",
+      source: "NEW (P21): a loose thing (or a vine's lying end) keeps this far inside the rim's foot",
+    },
+    snagHollowDepthFrac: {
+      unit: '× ledgeDropM',
+      source: "NEW (P21): the ledge's snag lies where the hollow is at least this deep (at the cliff's foot)",
+    },
+    tiltSampleM: {
+      unit: 'm [min, max]',
+      source: "NEW (P21): the half-span over which a lying prism's ground slope is sampled (its half-length, clamped)",
+    },
+    homeLoopProbes: {
+      unit: 'start angles',
+      source: "NEW (P21): how many evenly spaced start angles test whether a home's loop fits on the valley floor",
+      min: 1,
+      step: 1,
+    },
+    apeHomeDistJitterM: {
+      unit: 'm (±)',
+      source: "NEW (P21): §6.7 (B ≈ 62 m; C ≈ 78 m): how far B and C may lie from that distance where it leaves no room for a loop",
+      min: 0,
+    },
   },
 );
 
@@ -393,8 +457,16 @@ export interface ClearingSpawnData {
   apeHomes: { home: XZ; loop: XZ[] }[];
   /** The giant's lair; null in an empty scene. */
   lair: XZ | null;
-  /** The giant's patrol route (waypoint 0 at the lair approach). */
+  /**
+   * The giant's patrol route: 8 waypoints, waypoint 0 at the lair approach. The ≈ 400 m loop of §6.7 is the whole patrol
+   * cycle, lair → waypoint 0 → 1 → … → 7 → 0 → lair (the 8-gon alone is ≈ 337 m); P20 times that cycle.
+   */
   route: XZ[];
+  /**
+   * How many placements found no try that kept every hard rule and fell back to the least-bad one (§6.7's checks
+   * assume 0; the tests assert it on their seeds). Diagnostic only: nothing reads it.
+   */
+  hardFallbacks: number;
 }
 
 /**
@@ -559,7 +631,10 @@ interface Footprint {
   r: number;
 }
 
-/** Weight of a broken hard rule in a candidate's score (any soft rule weighs 1). */
+/**
+ * Weight of a broken hard rule in a candidate's score: more than any sum of soft scores a candidate can collect (each
+ * soft rule adds about 1), so the fallback always prefers breaking soft rules. A scoring constant, not a layout value.
+ */
 const HARD = 1000;
 const DEG = Math.PI / 180;
 
@@ -590,6 +665,8 @@ class ClearingGen {
   private outcropCentres: XZ[] = [];
   private homes: { home: XZ; loop: XZ[] }[] = [];
   private readonly cache: XZ;
+  /** Placements that fell back to a try breaking a hard rule (ClearingSpawnData.hardFallbacks). */
+  private hardFallbacks = 0;
 
   constructor(w: World, rng: Rng) {
     this.w = w;
@@ -631,6 +708,7 @@ class ClearingGen {
       apeHomes: this.homes.map((h) => ({ home: { ...h.home }, loop: h.loop.map((p) => ({ ...p })) })),
       lair: { ...this.lair },
       route: this.route.map((p) => ({ ...p })),
+      hardFallbacks: this.hardFallbacks,
     };
   }
 
@@ -690,7 +768,7 @@ class ClearingGen {
     return clearingRimNorm(p.x, p.z) <= this.rimR(p.x, p.z) - margin;
   }
 
-  private onTerrain(p: XZ, margin = 0.5): boolean {
+  private onTerrain(p: XZ, margin = this.T.looseEdgeMarginM): boolean {
     return Math.abs(p.x) <= this.half - margin && Math.abs(p.z) <= this.half - margin;
   }
 
@@ -834,14 +912,15 @@ class ClearingGen {
           // Soft, graded by how much of the grove each rule takes, so the fallback keeps the most room for its trees:
           // other groves, the route's lanes, the spawn's and the lair's clearings, the rim and the ledge.
           let s = 0;
-          if (!this.insideRim(gr.c, gr.r * 0.5)) s += HARD;
+          if (!this.insideRim(gr.c, gr.r * T.groveCentreMarginFrac)) s += HARD;
+          // (Each overlap counts up to twice the radius: a score cap, so one rule can't swamp the others.)
           const over = (d: number): number => (d > 0 ? Math.min(2, d / gr.r) : 0);
           for (const o of groves) if (o) s += over(o.r + gr.r + (o.split ? o.lane : 0) - dist(o.c, gr.c));
           s += over(gr.r + T.routeClearM - this.routeDist(gr.c));
           s += over(gr.r + T.spawnClearM - dist(gr.c, this.spawn));
           s += over(gr.r + T.lairClearM - dist(gr.c, this.lair));
           s += over(clearingRimNorm(gr.c.x, gr.c.z) + gr.r - this.rimR(gr.c.x, gr.c.z));
-          if (this.inLedgeZone(gr.c, gr.r * 0.5)) s += 1;
+          if (this.inLedgeZone(gr.c, gr.r * T.groveCentreMarginFrac)) s += 1;
           return s;
         },
       );
@@ -889,7 +968,8 @@ class ClearingGen {
     if (!best) return null;
     const a = this.route[best.k];
     const b = this.route[(best.k + 1) % n];
-    return { p: lerpXZ(a, b, clamp(best.s, 0.25, 0.75)), dir: unit({ x: b.x - a.x, z: b.z - a.z }) };
+    const [s0, s1] = this.T.corridorLegSpan;
+    return { p: lerpXZ(a, b, clamp(best.s, s0, s1)), dir: unit({ x: b.x - a.x, z: b.z - a.z }) };
   }
 
   /** The middle of a split grove's half on `side` (±1 along its normal): the centre of its flat edge, on the corridor. */
@@ -1023,7 +1103,8 @@ class ClearingGen {
     const T = this.T;
     let s = 0;
     if (dist(p, this.spawn) - d / 2 < T.spawnClearM) s += HARD;
-    if (this.routeDist(p) - d / 2 < lane) s += HARD;
+    // (A gate's and a lining trunk's surface lies exactly on the lane's edge: rounding mustn't put it inside.)
+    if (this.routeDist(p) - d / 2 < lane - 1e-9) s += HARD;
     if (dist(p, this.lair) - d / 2 < T.lairClearM) s += HARD;
     if (clearingRimNorm(p.x, p.z) + d / 2 > this.rimR(p.x, p.z)) s += HARD;
     if (this.slopeDeg(p) >= T.maxSlopeDeg) s += HARD;
@@ -1057,7 +1138,7 @@ class ClearingGen {
     const pair = this.pick(
       () => {
         const side = gr.split ? (rng.next() < 0.5 ? -1 : 1) : towardGrove;
-        const along = rng.range(-gr.r / 2, gr.r / 2);
+        const along = rng.range(-T.corridorAlongFrac * gr.r, T.corridorAlongFrac * gr.r);
         const off = gr.lane + Math.max(d1, d2) / 2;
         const E = { x: near.q.x + along * near.dir.x + side * off * N.x, z: near.q.z + along * near.dir.z + side * off * N.z };
         const k1 = T.gateGapM / 2 + d1 / 2;
@@ -1077,12 +1158,13 @@ class ClearingGen {
 
   /** A trunk lining a split grove's corridor on `side`: its surface at the lane's edge. */
   private placeLaneTree(d: number, g: number, side: number): void {
+    const T = this.T;
     const rng = this.rng;
     const gr = this.groves[g];
     const { dir, n } = gr.split!;
     const p = this.pick(
       () => {
-        const along = rng.range(-gr.r / 2, gr.r / 2);
+        const along = rng.range(-T.corridorAlongFrac * gr.r, T.corridorAlongFrac * gr.r);
         const off = side * (gr.lane + d / 2);
         return { x: gr.c.x + along * dir.x + off * n.x, z: gr.c.z + along * dir.z + off * n.z };
       },
@@ -1208,7 +1290,7 @@ class ClearingGen {
       this.trees.forEach((o, j) => {
         if (j !== i) clear = Math.min(clear, segDist(o.p, a, b) - o.d / 2);
       });
-      if (!this.insideRim(b, 1) || this.slopeDeg(b) > T.maxSlopeDeg || this.inLedgeZone(b, 0)) clear -= HARD;
+      if (!this.insideRim(b, T.looseRimMarginM) || this.slopeDeg(b) > T.maxSlopeDeg || this.inLedgeZone(b, 0)) clear -= HARD;
       if (clear > bestScore + 1e-9) {
         bestScore = clear;
         best = yaw;
@@ -1243,6 +1325,12 @@ class ClearingGen {
   /** A point just outside a drawn grove's ring (groveEdgeGapM). */
   private groveEdgePoint(): XZ {
     return this.groveRingPoint(this.drawGrove(), this.T.groveEdgeGapM);
+  }
+
+  /** A stone prototype drawn from the gen stream: one of FACTORY_TUNING.stoneProtos. */
+  private drawProto(): 0 | 1 | 2 | 3 {
+    const n = FACTORY_TUNING.stoneProtos.length;
+    return (Math.floor(this.rng.next() * n) % n) as 0 | 1 | 2 | 3;
   }
 
   /** A grove drawn from the gen stream. */
@@ -1294,14 +1382,16 @@ class ClearingGen {
         () => polar(this.spawn, rng.range(T.outcropDistM[0], T.outcropDistM[1]), rng.range(0, 2 * Math.PI)),
         (q) => {
           let s = 0;
-          if (!this.onTerrain(q, R + 1) || !this.insideRim(q, R + 2) || this.slopeDeg(q) > T.maxSlopeDeg || this.inLedgeZone(q, R)) s += HARD;
+          if (!this.onTerrain(q, R + T.outcropEdgeMarginM) || !this.insideRim(q, R + T.outcropRimMarginM) || this.slopeDeg(q) > T.maxSlopeDeg || this.inLedgeZone(q, R)) {
+            s += HARD;
+          }
           if (this.routeDist(q) < T.routeClearM + R) s += HARD;
           if (dist(q, this.lair) < T.lairClearM + R) s += HARD;
           if (dist(q, this.spawn) < T.spawnClearM) s += HARD;
           for (const g of this.groves) for (const c of this.groveCircles(g)) if (dist(c, q) < g.r + R) s += 1;
-          for (const t of this.trees) if (dist(t.p, q) < R + t.d / 2 + 1) s += 1;
-          for (const f of this.fixed) if (capDist(q, f) < R + 1) s += 1;
-          for (const o of this.outcropCentres) if (dist(o, q) < 3 * R) s += 1;
+          for (const t of this.trees) if (dist(t.p, q) < R + t.d / 2 + T.outcropEdgeMarginM) s += 1;
+          for (const f of this.fixed) if (capDist(q, f) < R + T.outcropEdgeMarginM) s += 1;
+          for (const o of this.outcropCentres) if (dist(o, q) < T.outcropSpacingRadii * R) s += 1;
           return s;
         },
       );
@@ -1333,7 +1423,7 @@ class ClearingGen {
   private placeStone(material: MaterialId, kg: readonly number[], nearM: number | null): void {
     const T = this.T;
     const rng = this.rng;
-    const proto = Math.floor(rng.next() * 4) % 4;
+    const proto = this.drawProto();
     const mass = rng.range(kg[0], kg[1]);
     const shape = stoneHull(mass, proto, material);
     const r = horizontalReach(shape);
@@ -1348,7 +1438,7 @@ class ClearingGen {
     this.loose.push(circle(p, r));
     if (!this.onTerrain(p)) return;
     const y = groundRestY(this.w, p.x, p.z, shape);
-    spawnStone(this.w, { p: { x: p.x, y, z: p.z }, mass, proto: proto as 0 | 1 | 2 | 3, material, generated: true });
+    spawnStone(this.w, { p: { x: p.x, y, z: p.z }, mass, proto, material, generated: true });
   }
 
   /** 3 boulders (§6.7): one 20 m from the spawn, two on the slope above one route leg (off the route: they block it). */
@@ -1364,7 +1454,7 @@ class ClearingGen {
     const leg = legs.length > 0 ? legs[Math.floor(rng.next() * legs.length) % legs.length] : 0;
     const c: XZ = { x: T.routeCentre[0], z: T.routeCentre[1] };
     for (let k = 0; k < n; k++) {
-      const proto = Math.floor(rng.next() * 4) % 4;
+      const proto = this.drawProto();
       const shape = stoneHull(T.boulderKg, proto, 'stone');
       const r = horizontalReach(shape);
       let legPoint: XZ = this.spawn;
@@ -1373,7 +1463,7 @@ class ClearingGen {
           if (k === 0) return polar(this.spawn, T.boulderNearSpawnM, rng.range(0, 2 * Math.PI));
           const a = this.route[leg];
           const b = this.route[(leg + 1) % this.route.length];
-          legPoint = lerpXZ(a, b, rng.range(0.2, 0.8));
+          legPoint = lerpXZ(a, b, rng.range(T.boulderLegSpan[0], T.boulderLegSpan[1]));
           const dir = unit({ x: b.x - a.x, z: b.z - a.z });
           let N = { x: -dir.z, z: dir.x };
           // Outward: away from the route's centre, toward the rim.
@@ -1394,7 +1484,7 @@ class ClearingGen {
       this.loose.push(circle(p, r));
       if (!this.onTerrain(p)) continue;
       const y = groundRestY(this.w, p.x, p.z, shape);
-      spawnStone(this.w, { p: { x: p.x, y, z: p.z }, mass: T.boulderKg, proto: proto as 0 | 1 | 2 | 3, material: 'stone', generated: true });
+      spawnStone(this.w, { p: { x: p.x, y, z: p.z }, mass: T.boulderKg, proto, material: 'stone', generated: true });
     }
   }
 
@@ -1464,7 +1554,7 @@ class ClearingGen {
           r,
           yaw,
           () => {
-            const m = lerpXZ(a, b, rng.range(0.3, 0.7));
+            const m = lerpXZ(a, b, rng.range(T.routeLogLegSpan[0], T.routeLogLegSpan[1]));
             return { x: m.x - side * dir.z * T.routeLogOffsetM, z: m.z + side * dir.x * T.routeLogOffsetM };
           },
           (p, q) => spawnLog(this.w, { p, q, length, mass, generated: true }),
@@ -1554,7 +1644,7 @@ class ClearingGen {
     });
     const c = this.pick(centre, (q) => this.looseViolations(fp(q)));
     this.loose.push(fp(c));
-    if (!this.onTerrain(c, length / 2 + 0.5)) return;
+    if (!this.onTerrain(c, length / 2 + this.T.looseEdgeMarginM)) return;
     const q = mulQuat(this.tiltAt(c, length / 2), mulQuat(yawQuat(yaw), LYING_ALONG_X));
     make({ x: c.x, y: groundRestY(this.w, c.x, c.z, shape, q), z: c.z }, q);
   }
@@ -1562,7 +1652,7 @@ class ClearingGen {
   /** The rotation taking up to the ground's mean normal over ±reach around c (central differences of the heights). */
   private tiltAt(c: XZ, reach: number): Quat {
     const t = this.w.terrain;
-    const s = clamp(reach, 0.25, 2.5);
+    const s = clamp(reach, this.T.tiltSampleM[0], this.T.tiltSampleM[1]);
     const dx = (t.originalHeightAt(c.x + s, c.z) - t.originalHeightAt(c.x - s, c.z)) / (2 * s);
     const dz = (t.originalHeightAt(c.x, c.z + s) - t.originalHeightAt(c.x, c.z - s)) / (2 * s);
     const n = Math.hypot(dx, 1, dz);
@@ -1592,8 +1682,8 @@ class ClearingGen {
   private groundViolations(p: XZ, r: number): number {
     const T = this.T;
     let s = 0;
-    if (!this.onTerrain(p, r + 0.5)) s += HARD;
-    if (!this.insideRim(p, r + 1)) s += HARD;
+    if (!this.onTerrain(p, r + T.looseEdgeMarginM)) s += HARD;
+    if (!this.insideRim(p, r + T.looseRimMarginM)) s += HARD;
     if (this.slopeDeg(p) > T.maxSlopeDeg) s += HARD;
     if (this.inLedgeZone(p, r)) s += HARD;
     return s;
@@ -1604,9 +1694,10 @@ class ClearingGen {
   // -------------------------------------------------------------------------
 
   /**
-   * The 3 ape homes (§6.7): A, B and C at apeHomeDistM from the spawn, bearings ≥ 100° apart, each where that circle
-   * meets a drawn grove's ring (homeEdgeGapM outside it: a grove edge facing open ground); then each home's 3-waypoint
-   * loop of radius homeLoopR on walkable ground.
+   * The 3 ape homes (§6.7): A at apeHomeDistM[0] from the spawn, B and C at about apeHomeDistM[1], [2] (within
+   * apeHomeDistJitterM), bearings ≥ 100° apart, where that circle meets a drawn grove's ring (homeEdgeGapM outside it: a
+   * grove edge facing open ground) when that keeps every hard rule; then each home's 3-waypoint loop of radius homeLoopR
+   * on walkable ground. Every home keeps room for its loop and for the homes still to come.
    */
   private apeHomes(): void {
     const T = this.T;
@@ -1618,23 +1709,55 @@ class ClearingGen {
     const homes: ({ home: XZ; loop: XZ[] } | null)[] = new Array<{ home: XZ; loop: XZ[] } | null>(n).fill(null);
     // Drawn farthest first (C, B, A): the farther the home, the less of the valley floor its loop fits on.
     const order = Array.from({ length: n }, (_, h) => h).sort((a, b) => T.apeHomeDistM[b] - T.apeHomeDistM[a] || a - b);
-    // The last home's whole-degree bearings whose spot breaks no hard rule: the home before it leaves one of them open.
-    const lastSpots: number[] = [];
-    if (n >= 2) {
-      const rl = T.apeHomeDistM[order[n - 1]];
-      for (let d = 0; d < 360; d++) if (this.spotViolations(polar(this.spawn, rl, d * DEG)) < HARD) lastSpots.push(d * DEG);
-    }
+    // The distances a home may take: A's exactly ("38 m"); B's and C's "≈", so its nominal distance first, then nearer
+    // or farther by up to apeHomeDistJitterM (where the rim leaves a far home no room for its loop).
+    const radii = (h: number): number[] => {
+      const r = T.apeHomeDistM[h];
+      const j = Math.max(0, T.apeHomeDistJitterM);
+      return h === 0 || j === 0 ? [r] : [r, r - j / 2, r + j / 2, r - j, r + j];
+    };
+    // The spot on whole-degree bearing d that keeps every hard rule of a lone home (its distance from radii), or null;
+    // found once per home and bearing, when first asked. (Whole degrees: a probe resolution, not a layout value. No
+    // draws.)
+    const memo = new Map<number, XZ | null>();
+    const spotOn = (h: number, d: number): XZ | null => {
+      const key = h * 360 + d;
+      let q = memo.get(key);
+      if (q !== undefined) return q;
+      q = null;
+      for (const r of radii(h)) {
+        const c = polar(this.spawn, r, d * DEG);
+        if (this.spotOk(c) && this.loopFits(c)) {
+          q = c;
+          break;
+        }
+      }
+      memo.set(key, q);
+      return q;
+    };
+    // Whether the last home keeps a spot apart from all of `bearings` (the home before it must leave one open).
+    const lastHasRoom = (bearings: readonly number[]): boolean => {
+      for (let d = 0; d < 360; d++) {
+        if (bearings.every((bo) => Math.abs(angleDelta(d * DEG, bo)) >= sep - 1e-12) && spotOn(order[n - 1], d)) return true;
+      }
+      return false;
+    };
     order.forEach((h, k) => {
       const rh = T.apeHomeDistM[h];
       const placed = homes.filter((x): x is { home: XZ; loop: XZ[] } => x !== null).map((x) => bearingOf(x.home));
       // Bearings that keep the separation and leave room for the homes still to come.
       const bearingOk = (b: number): boolean => placed.every((bo) => Math.abs(angleDelta(b, bo)) >= sep - 1e-12) && roomForBearings([...placed, b], n - k - 1, sep);
-      // The whole-degree ones whose spot breaks no hard rule (no draws): where the open-bearing tries go.
-      const open: number[] = [];
-      for (let d = 0; d < 360; d++) {
-        const b = d * DEG;
-        if (bearingOk(b) && this.spotViolations(polar(this.spawn, rh, b)) < HARD) open.push(b);
-      }
+      // An open spot: from a drawn whole degree onward, the first bearing that keeps the separation and has a spot.
+      const openSpot = (): XZ | null => {
+        const d0 = Math.floor(rng.next() * 360) % 360;
+        for (let i = 0; i < 360; i++) {
+          const d = (d0 + i) % 360;
+          if (!bearingOk(d * DEG)) continue;
+          const q = spotOn(h, d);
+          if (q) return q;
+        }
+        return null;
+      };
       let onEdge = false;
       const home = this.pick(
         (i) => {
@@ -1651,8 +1774,7 @@ class ClearingGen {
               return pts[side];
             }
           }
-          const b = open.length > 0 ? open[Math.floor(rng.next() * open.length) % open.length] : rng.range(0, 2 * Math.PI);
-          return polar(this.spawn, rh, b);
+          return openSpot() ?? polar(this.spawn, rh, rng.range(0, 2 * Math.PI));
         },
         (q) => {
           let s = this.spotViolations(q);
@@ -1660,16 +1782,18 @@ class ClearingGen {
           for (const bo of placed) if (Math.abs(angleDelta(bq, bo)) < sep - 1e-12) s += HARD;
           // Room left for the homes still to come, each ≥ apeHomeMinSepDeg from every other.
           if (!roomForBearings([...placed, bq], n - k - 1, sep)) s += HARD;
-          if (k === n - 2 && !lastSpots.some((b) => [...placed, bq].every((bo) => Math.abs(angleDelta(b, bo)) >= sep - 1e-12))) s += HARD;
-          // (The loop probe is the costly rule: a spot already out on a hard rule needn't pay for it.)
+          // (The loop probe and the last home's room are the costly rules: a spot already out needn't pay for them.)
           if (s < HARD && !this.loopFits(q)) s += HARD;
+          if (s < HARD && k === n - 2 && !lastHasRoom([...placed, bq])) s += HARD;
           if (!onEdge) s += 1;
           return s;
         },
       );
+      // Half the tries at a drawn start angle, the rest at the probe angles where the loop keeps every hard rule.
+      const fits = this.loopAngles(home, false);
       const loop = this.pick(
-        () => {
-          const a = rng.range(0, 2 * Math.PI);
+        (i) => {
+          const a = i < tries / 2 || fits.length === 0 ? rng.range(0, 2 * Math.PI) : fits[(i - Math.ceil(tries / 2)) % fits.length];
           return [0, 1, 2].map((j) => polar(home, T.homeLoopR, a + (j * 2 * Math.PI) / 3));
         },
         (pts) => {
@@ -1685,25 +1809,48 @@ class ClearingGen {
     this.homes = homes as { home: XZ; loop: XZ[] }[];
   }
 
-  /** A home's 3-waypoint loop of radius homeLoopR fits on the valley floor at some start angle (12 tried; no draws). */
+  /** A home's 3-waypoint loop of radius homeLoopR fits on the valley floor at some start angle (homeLoopProbes tried; no draws). */
   private loopFits(home: XZ): boolean {
-    for (let i = 0; i < 12; i++) {
-      const a = (i * 2 * Math.PI) / 12;
-      if ([0, 1, 2].every((k) => this.spotViolations(polar(home, this.T.homeLoopR, a + (k * 2 * Math.PI) / 3)) === 0)) return true;
+    return this.loopAngles(home, true).length > 0;
+  }
+
+  /**
+   * The start angles, of homeLoopProbes evenly spaced ones, at which a home's 3-waypoint loop keeps every hard rule
+   * (no draws); with `first`, only the first one found.
+   */
+  private loopAngles(home: XZ, first: boolean): number[] {
+    const probes = Math.max(1, Math.round(this.T.homeLoopProbes));
+    const out: number[] = [];
+    for (let i = 0; i < probes; i++) {
+      const a = (i * 2 * Math.PI) / probes;
+      if ([0, 1, 2].every((k) => this.spotOk(polar(home, this.T.homeLoopR, a + (k * 2 * Math.PI) / 3)))) {
+        out.push(a);
+        if (first) break;
+      }
     }
-    return false;
+    return out;
   }
 
   /** A spot a creature stands at (a home, a loop waypoint): walkable, clear of trunks, rooted and loose things. */
   private spotViolations(p: XZ): number {
     const T = this.T;
     let s = 0;
-    if (!this.onTerrain(p, 1) || !this.insideRim(p, T.homeLoopRimMarginM)) s += HARD;
+    if (!this.onTerrain(p, T.homeClearM) || !this.insideRim(p, T.homeLoopRimMarginM)) s += HARD;
     if (this.slopeDeg(p) > T.maxSlopeDeg || this.inLedgeZone(p, T.ledgeKeepOutM)) s += HARD;
     for (const t of this.trees) if (dist(t.p, p) - t.d / 2 < T.homeClearM) s += HARD;
     for (const f of this.fixed) if (capDist(p, f) < T.homeClearM) s += HARD;
     for (const f of this.loose) if (capDist(p, f) < T.homeClearM) s += 1;
     return s;
+  }
+
+  /** spotViolations' hard rules alone, stopping at the first broken one (the searches for open spots ask only this). */
+  private spotOk(p: XZ): boolean {
+    const T = this.T;
+    if (!this.onTerrain(p, T.homeClearM) || !this.insideRim(p, T.homeLoopRimMarginM)) return false;
+    if (this.slopeDeg(p) > T.maxSlopeDeg || this.inLedgeZone(p, T.ledgeKeepOutM)) return false;
+    for (const t of this.trees) if (dist(t.p, p) - t.d / 2 < T.homeClearM) return false;
+    for (const f of this.fixed) if (capDist(p, f) < T.homeClearM) return false;
+    return true;
   }
 
   /** 4 snags (§6.7): one at the edge of each ape home, one at the foot of the ledge, lying along it. */
@@ -1746,7 +1893,7 @@ class ClearingGen {
         return s;
       });
       this.loose.push(fp(c));
-      if (!this.onTerrain(c, length / 2 + 0.5)) continue;
+      if (!this.onTerrain(c, length / 2 + T.looseEdgeMarginM)) continue;
       const q = mulQuat(this.tiltAt(c, length / 2), mulQuat(yawQuat(yaw), LYING_ALONG_X));
       spawnLog(this.w, { p: { x: c.x, y: groundRestY(this.w, c.x, c.z, shape, q), z: c.z }, q, length, mass, snags: T.snagPoints, generated: true });
     }
@@ -1757,8 +1904,8 @@ class ClearingGen {
     const T = this.T;
     let s = 0;
     for (const p of [f.a, lerpXZ(f.a, f.b, 0.5), f.b]) {
-      if (!this.onTerrain(p, f.r + 0.5) || !this.insideRim(p, f.r + 1) || this.slopeDeg(p) > T.maxSlopeDeg) s += HARD;
-      if (this.ledgeDepth(p.x, p.z) < T.ledgeDropM * 0.5) s += 1;
+      if (!this.onTerrain(p, f.r + T.looseEdgeMarginM) || !this.insideRim(p, f.r + T.looseRimMarginM) || this.slopeDeg(p) > T.maxSlopeDeg) s += HARD;
+      if (this.ledgeDepth(p.x, p.z) < T.ledgeDropM * T.snagHollowDepthFrac) s += 1;
     }
     for (const t of this.trees) if (capDist(t.p, f) - t.d / 2 < T.trunkClearM) s += HARD;
     for (const x of this.fixed) if (capCapDist(x, f) < T.trunkClearM) s += HARD;
@@ -1774,7 +1921,7 @@ class ClearingGen {
     const T = this.T;
     const w = this.w;
     const at = this.cache;
-    if (!this.onTerrain(at, 2)) return;
+    if (!this.onTerrain(at, T.cacheClearM)) return;
     spawnStarterAxe(w, { x: at.x, y: w.terrain.heightAt(at.x, at.z), z: at.z }, { generated: true });
     const D = T.diggingStick;
     const r = prismRForRoundDiam(D.diamM, PHYSICS_TUNING.cylinderFacets);
@@ -1826,7 +1973,8 @@ class ClearingGen {
         size: [wl.size[0], hi - lo, wl.size[1]],
         material: 'stone',
         state: 'fixed',
-        look: 'rock',
+        // Invisible bounds, not scenery: the rim is the visible cliff (rule 3). The client draws nothing for this look.
+        look: 'boundary',
         generated: true,
       });
     }
@@ -1843,7 +1991,8 @@ class ClearingGen {
 
   /**
    * Up to rejectionTries proposals: the first with no violation, else the one with the lowest score (the earliest on a
-   * tie). Pure in the gen stream: the proposals draw from it, the scores never do.
+   * tie). Pure in the gen stream: the proposals draw from it, the scores never do. A fallback that still breaks a hard
+   * rule is counted (ClearingSpawnData.hardFallbacks).
    */
   private pick<C>(propose: (i: number) => C, score: (c: C) => number): C {
     const tries = this.tries();
@@ -1858,6 +2007,7 @@ class ClearingGen {
         bestScore = s;
       }
     }
+    if (bestScore >= HARD) this.hardFallbacks++;
     return best as C;
   }
 }

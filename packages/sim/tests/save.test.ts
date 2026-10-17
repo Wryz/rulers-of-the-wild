@@ -107,6 +107,8 @@ function populate(w: World): Record<string, number> {
   // A hole and its spoil, away from everything.
   for (let k = 0; k < 6; k++) w.terrain.lower(-6, 6, 1);
   w.terrain.raise(-8, 8, 0.05);
+  // Ground cover written in the empty scene: it gets a grid, and the save a cover edit.
+  w.cover.set(6, -6, 0.6);
   return ids;
 }
 
@@ -511,7 +513,10 @@ const INVENTORY: Record<string, Record<string, string>> = {
     nearDug: 'not saved: derived from the dug mask',
     nearDugSetback: 'not saved: TERRAIN_TUNING.spoilSetbackM',
   },
-  GroundCover: { world: 'not saved: a link' },
+  GroundCover: {
+    world: 'not saved: a link',
+    grid: "saved: cover (edits against the generated cover; the grid's size and generated values regenerate from the seed)",
+  },
   EntityStore: {
     world: 'not saved: a link',
     byId: 'saved: entities',
@@ -831,7 +836,6 @@ function missingStep(v: unknown, path: string): string | null {
  * inventory above.
  */
 const AWAITING: Record<string, string> = {
-  cover: 'GroundCover (P21)',
   spawner: 'Spawner (P22)',
 };
 

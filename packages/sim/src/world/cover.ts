@@ -33,10 +33,10 @@ export class GroundCover {
   /** The world (its terrain sizes the grid). */
   readonly world: World;
   /**
-   * The grid, made by `generate` (the Clearing) or by the first write of a non-zero value: an empty scene holds none.
-   * (`declare`: the field exists only once the grid is made.)
+   * The grid, made by `generate` (the Clearing) or by the first write of a non-zero value: null in an empty scene until
+   * then. Saved as the edits against its generated values (`cover`); its size and generated values regenerate.
    */
-  declare private grid?: CoverGrid;
+  private grid: CoverGrid | null = null;
 
   constructor(world: World) {
     this.world = world;
@@ -44,7 +44,7 @@ export class GroundCover {
 
   /** Whether the world has a cover grid (generated, or written to). */
   get hasGrid(): boolean {
-    return this.grid !== undefined;
+    return this.grid !== null;
   }
 
   /** m, a cell's side: the grid's, or CLEARING_TUNING.coverCellM before there is one. */
