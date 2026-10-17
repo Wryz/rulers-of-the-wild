@@ -1045,9 +1045,20 @@ const SCRIPT_POSTURES: Readonly<Record<PostureId, true>> = {
  * BrawlerAI.restoreRecord itself (P04's readers).
  */
 function mind(v: unknown, p: string): MindRecV1 {
-  const o = exactKeys(obj(v, p), MIND_KEYS, p);
+  const o = exactKeys(obj(v, p), MIND_KEYS, p, ['route']);
   nat(o.fighter, `${p}.fighter`);
-  oneOf(o.kind, { ape: true, giantApe: true }, `${p}.kind`);
+  const kind = oneOf(o.kind, { ape: true, giantApe: true }, `${p}.kind`);
+  // The giant's hand-set route (P20, RulerMind): on every giant's record (null: the spawn data's), never on an ape's.
+  if (kind === 'giantApe') {
+    nullable(o.route, `${p}.route`, (x, q) =>
+      arr(x, q).forEach((pt, k) => {
+        const r = `${q}[${k}]`;
+        const xz = exactKeys(obj(pt, r), ['x', 'z'], r);
+        fin(xz.x, `${r}.x`);
+        fin(xz.z, `${r}.z`);
+      }),
+    );
+  } else if (o.route !== undefined) fail(`${p}.route`, o.route, "absent (only a giant's mind has a route)");
   oneOf(o.state, MIND_STATE_DOMAIN, `${p}.state`);
   nullable(o.resume, `${p}.resume`, (x, q) => oneOf(x, MIND_STATE_DOMAIN, q));
   bool(o.paused, `${p}.paused`);
