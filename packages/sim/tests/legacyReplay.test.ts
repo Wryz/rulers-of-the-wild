@@ -2,26 +2,24 @@
 // commands and the DS brawler AI, replay to the fighter-state hashes and the event stream recorded at the integration
 // commit before any seam landed (tests/fixtures/legacy-fight.json), plus exactly one `ko` event per knockout.
 //
-// The scenario below uses only APIs that existed when the fixture was recorded, so the same code records and
-// replays. To re-record (only ever at a commit whose legacy behaviour is the reference):
+// The default scenario (no FighterOpts) uses only behaviour that existed when the fixture was recorded at the
+// integration commit (ca53ce7). To re-record (only ever at a commit whose legacy behaviour is the reference):
 //   ROTW_RECORD_LEGACY=1 npx vitest run packages/sim/tests/legacyReplay.test.ts
-import { readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+// (The sim's tsconfig has no Node types: the fixture is a JSON import, and recording reaches node:fs dynamically.)
 import { describe, expect, it } from 'vitest';
+import recorded from './fixtures/legacy-fight.json';
 import { BONES } from '../src/body/skeleton';
 import { BRAWLER_PLAN, BrawlerAI, DEFAULT_AI } from '../src/sim/ai';
 import { type CombatEvent, CombatSim } from '../src/sim/combat';
 import { type Command, moveCommand } from '../src/sim/commands';
 import { createEnemy, type EnemyKind } from '../src/sim/enemies';
-import { BUTTONS, Fighter } from '../src/sim/fighter';
+import { BUTTONS, Fighter, type FighterOpts, IdCounter, LEGACY_IDS } from '../src/sim/fighter';
 import { Rng } from '../src/sim/math';
 import { ENEMY_MOVES } from '../src/sim/moves';
 import { BRAWLER_STYLE, createPlayer } from '../src/sim/roster';
 import { WEAPONS } from '../src/sim/weapons';
 import { ArenaWalkable } from '../src/world/collision';
 
-const FIXTURE = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'legacy-fight.json');
 const CHECK_EVERY = 30;
 
 export interface LegacyCheckpoint {
@@ -184,8 +182,8 @@ interface Scenario {
   throwEvery?: number;
 }
 
-function enemy(sim: CombatSim, kind: EnemyKind, x: number, z: number): Fighter {
-  const { fighter, ai } = createEnemy(kind, sim.rng);
+function enemy(sim: CombatSim, kind: EnemyKind, x: number, z: number, opts?: FighterOpts): Fighter {
+  const { fighter, ai } = createEnemy(kind, sim.rng, {}, {}, opts);
   fighter.pos.set(x, 0, z);
   fighter.yaw = Math.atan2(-x, -z);
   sim.add(fighter, ai);
@@ -193,8 +191,8 @@ function enemy(sim: CombatSim, kind: EnemyKind, x: number, z: number): Fighter {
 }
 
 /** An armed brawler on the player's team, run by the DS AI. */
-function ally(sim: CombatSim, x: number, z: number): Fighter {
-  const f = new Fighter('player', 'Ally', ENEMY_MOVES, { maxHp: 120, walkSpeed: 2.3, staggerResist: 0.1 }, BRAWLER_STYLE);
+function ally(sim: CombatSim, x: number, z: number, opts?: FighterOpts): Fighter {
+  const f = new Fighter('player', 'Ally', ENEMY_MOVES, { maxHp: 120, walkSpeed: 2.3, staggerResist: 0.1 }, BRAWLER_STYLE, opts);
   f.weapon = WEAPONS.katana;
   f.autoDefense = true;
   f.pos.set(x, 0, z);
@@ -203,20 +201,21 @@ function ally(sim: CombatSim, x: number, z: number): Fighter {
   return f;
 }
 
-function scenarios(): (() => Scenario)[] {
+/** The fights; `opts` (none when recorded) gives every fighter an id counter, as a world would. */
+function scenarios(opts?: FighterOpts): (() => Scenario)[] {
   return [
     // 1: an axe against three different fighters (cuts, severing, kunai throws, blocks, dodges).
     () => {
       const sim = new CombatSim(101);
-      const player = createPlayer();
+      const player = createPlayer(opts);
       player.weapon = WEAPONS.axe;
       player.stats.damageMul = 1.5;
       player.stats.maxHp = player.hp = 900;
       player.pos.set(0, 0, 0);
       sim.add(player);
-      enemy(sim, 'brawler', 2.2, 0.4);
-      enemy(sim, 'samurai', -2.4, 1.2);
-      enemy(sim, 'ninja', 0.6, -3.2);
+      enemy(sim, 'brawler', 2.2, 0.4, opts);
+      enemy(sim, 'samurai', -2.4, 1.2, opts);
+      enemy(sim, 'ninja', 0.6, -3.2, opts);
       return { sim, player, driver: new Rng(9001), ticks: 2400 };
     },
     // 2: bare hands in an arena with props and weapons on the floor (pickups, clangs, wall thuds, a boss).
@@ -228,24 +227,24 @@ function scenarios(): (() => Scenario)[] {
         { kind: 'box', x: -3, z: -2, hx: 0.6, hz: 0.6, h: 1.1 },
         { kind: 'box', x: 0.4, z: -2.2, hx: 0.25, hz: 0.6, h: 2 },
       ]);
-      const player = createPlayer();
+      const player = createPlayer(opts);
       player.stats.damageMul = 2.2;
       player.stats.maxHp = player.hp = 900;
       player.pos.set(0, 0, -0.5);
       sim.add(player);
       sim.addDrop(WEAPONS.machete, 1, -1);
       sim.addDrop(WEAPONS.sledgehammer, -1.2, 0.6);
-      enemy(sim, 'knifeFighter', 3, -1);
-      enemy(sim, 'kicker', -3.5, 2.5);
-      enemy(sim, 'minotaur', 4, 3);
+      enemy(sim, 'knifeFighter', 3, -1, opts);
+      enemy(sim, 'kicker', -3.5, 2.5, opts);
+      enemy(sim, 'minotaur', 4, 3, opts);
       return { sim, player, driver: new Rng(9002), ticks: 2400 };
     },
     // 3: AI against AI (an armed ally against a berserker and an imp), no commands.
     () => {
       const sim = new CombatSim(303);
-      ally(sim, 0, 0);
-      enemy(sim, 'berserker', 2.5, 0.5);
-      enemy(sim, 'imp', -2, -1.5);
+      ally(sim, 0, 0, opts);
+      enemy(sim, 'berserker', 2.5, 0.5, opts);
+      enemy(sim, 'imp', -2, -1.5, opts);
       return { sim, player: null, driver: new Rng(9003), ticks: 2400 };
     },
     // 4: throwing (the player's axe, brawlers' bottles and cleavers, kunai) round props in a ring.
@@ -255,7 +254,7 @@ function scenarios(): (() => Scenario)[] {
         { kind: 'circle', x: 2, z: 0, r: 0.45 },
         { kind: 'box', x: -2, z: 2.5, hx: 1, hz: 0.4, h: 0.9 },
       ]);
-      const player = createPlayer();
+      const player = createPlayer(opts);
       player.weapon = WEAPONS.axe;
       player.stats.maxHp = player.hp = 900;
       player.stats.damageMul = 1.5;
@@ -265,16 +264,16 @@ function scenarios(): (() => Scenario)[] {
       sim.addDrop(WEAPONS.pan, -3, -1);
       sim.addDrop(WEAPONS.pipe, 0, 3);
       sim.addDrop(WEAPONS.fireaxe, -1, -4.5);
-      enemy(sim, 'brawler', 4, 2).weapon = WEAPONS.bottle;
-      enemy(sim, 'brawler', -4, 3).weapon = WEAPONS.cleaver;
-      enemy(sim, 'ninja', 0, 6);
+      enemy(sim, 'brawler', 4, 2, opts).weapon = WEAPONS.bottle;
+      enemy(sim, 'brawler', -4, 3, opts).weapon = WEAPONS.cleaver;
+      enemy(sim, 'ninja', 0, 6, opts);
       return { sim, player, driver: new Rng(9004), ticks: 2400, throwEvery: 200 };
     },
     // 5: swinging a pipe at a post with nobody about (clangs).
     () => {
       const sim = new CombatSim(505);
       sim.walkable = new ArenaWalkable({ kind: 'rect', hx: 4, hz: 4 }, [{ kind: 'box', x: 0, z: 1.05, hx: 0.5, hz: 0.25, h: 2.5 }]);
-      const player = createPlayer();
+      const player = createPlayer(opts);
       player.weapon = WEAPONS.pipe;
       player.pos.set(0, 0, 0);
       sim.add(player);
@@ -382,23 +381,56 @@ function firstDivergence(got: LegacyCheckpoint[], want: LegacyCheckpoint[]): str
   return null;
 }
 
-const recording = process.env.ROTW_RECORD_LEGACY === '1';
+const env = (globalThis as { process?: { env: Record<string, string | undefined> } }).process?.env ?? {};
+const recording = env.ROTW_RECORD_LEGACY === '1';
+
+/** Writes the fixture (recording only). */
+async function writeFixture(text: string) {
+  const fsModule = 'node:fs';
+  const fs = (await import(/* @vite-ignore */ fsModule)) as { writeFileSync(path: unknown, text: string): void };
+  const Url = (globalThis as unknown as { URL: new (url: string, base: string) => unknown }).URL;
+  fs.writeFileSync(new Url('./fixtures/legacy-fight.json', (import.meta as unknown as { url: string }).url), text);
+}
 
 describe('the recorded legacy fights', () => {
-  it.runIf(recording)('records the fixture', () => {
-    const r = runLegacyFights();
-    writeFileSync(FIXTURE, JSON.stringify(record(r), null, 1) + '\n');
-  });
+  it.runIf(recording)(
+    'records the fixture',
+    async () => {
+      const r = runLegacyFights();
+      await writeFixture(JSON.stringify(record(r), null, 1) + '\n');
+    },
+    60_000,
+  );
 
-  it.skipIf(recording)('replay bit-identically: same fighter-state hashes, same events, same knockouts', () => {
-    const want = JSON.parse(readFileSync(FIXTURE, 'utf8')) as LegacyRecord;
-    const got = runLegacyFights();
-    // The fixture's fighters were numbered from 1 in a fresh module: this file must make the first fighters.
+  const want = recorded as unknown as LegacyRecord;
+  const matches = (got: LegacyRun) => {
     expect(got.ids).toEqual(want.ids);
     expect(firstDivergence(got.checkpoints, want.checkpoints)).toBeNull();
     expect(got.counts).toEqual(want.counts);
     expect(got.kos).toEqual(want.kos);
     // Exactly one `ko` event per knockout, on the tick it happened, naming who went down.
     expect(got.koEvents).toEqual(want.kos);
-  });
+  };
+
+  it.skipIf(recording)(
+    'replay bit-identically: same fighter-state hashes, same events, same knockouts',
+    () => {
+      // The fixture's fighters were numbered from 1 in a fresh module: this test makes the file's first fighters,
+      // from the legacy counter.
+      expect(LEGACY_IDS.next).toBe(1);
+      matches(runLegacyFights());
+    },
+    60_000,
+  );
+
+  it.skipIf(recording)(
+    'replay the same with world-owned id counters, twice in one process, leaving the legacy counter alone',
+    () => {
+      const before = LEGACY_IDS.next;
+      matches(runLegacyFights(scenarios({ ids: new IdCounter() })));
+      matches(runLegacyFights(scenarios({ ids: new IdCounter(1) })));
+      expect(LEGACY_IDS.next).toBe(before);
+    },
+    60_000,
+  );
 });

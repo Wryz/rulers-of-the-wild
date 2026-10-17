@@ -1,10 +1,12 @@
 import { Vector3 } from 'three';
 import { type BoneName, bonePoint, fistPoint, footPoint, SKELETON } from '../body/skeleton';
 import type { PoseName } from '../body/poses';
-import { AIDirector, BrawlerAI, MAX_HEFT } from './ai';
+import { AIDirector, type Brain, MAX_HEFT } from './ai';
 import { type Button, type Fighter } from './fighter';
 import { RectWalkable, type Walkable } from '../world/collision';
-import { CommandQueue, moveVector } from './commands';
+import type { Finish, FighterMover, GroundQuery, ImpactCause, RulerZoneId, WorldPort } from '../world/types';
+import { type Command, CommandQueue, moveVector } from './commands';
+import { DAMAGE_TUNING, hpFromEnergy, MOVE_TUNING, zoneToughness } from './rules';
 import { bodyCapsules, overlap as capsuleOverlap, segDist as segDistance, strikingLimbs } from './bodyShapes';
 import { angleDelta, approachAngle, DT, Rng } from './math';
 import { aimBallistic, centreOfMass, integrate, type Projectile, projectileDir, projectilePoints, pointVelocity, substeps } from './projectiles';
@@ -57,6 +59,11 @@ export type CombatEvent =
       fatal: Fatal | null;
       /** A piece torn away (an ear, scalp, a chunk of flesh). */
       tear: Tear | null;
+      /** The ruler zone struck (rulers only, docs/M1-DESIGN.md §2.13). */
+      rulerZone?: RulerZoneId;
+      /** The blow's energy (J) and the zone's toughness (J), when the zone has any (the damage rule, §4.4). */
+      energy?: number;
+      toughness?: number;
     }
   | { type: 'block'; attacker: Fighter; defender: Fighter; move: MoveDef; point: Vector3; dir: Vector3; guardBreak: boolean; wound: Wound | null; parry: boolean; perfect?: boolean }
   | { type: 'pickup'; f: Fighter; drop: Drop }
@@ -71,7 +78,21 @@ export type CombatEvent =
   /** A weapon thrown (or let fly from the belt). */
   | { type: 'throw'; f: Fighter; projectile: Projectile }
   /** A weapon in flight hit something that isn't a person: the floor, a wall, a prop. */
-  | { type: 'thud'; projectile: Projectile; point: Vector3; speed: number; wall: boolean };
+  | { type: 'thud'; projectile: Projectile; point: Vector3; speed: number; wall: boolean }
+  /**
+   * A knockout, once per fighter that goes down for good (CombatSim.koFighter, docs/M1-DESIGN.md §2.13, §4.4): how
+   * (`by`), by whom, with what cause; `environmental` and `credit` come from the world (legacy: false and nobody).
+   */
+  | {
+      type: 'ko';
+      victim: Fighter;
+      by: Finish['by'];
+      killer: Fighter | null;
+      cause: ImpactCause | null;
+      environmental: boolean;
+      credit: string[];
+      point: Vector3;
+    };
 
 export type Fatal = 'split' | 'cleft' | 'crush';
 export type TearPiece = 'earL' | 'earR' | 'scalp' | 'cheek' | 'flesh';
@@ -237,10 +258,61 @@ export function buttonMove(f: Fighter, button: Button): { move: MoveDef | null; 
   return { move, ready, counter: ctx.counter !== null, chain: f.state === 'attack' && ctx.chainFrom !== null };
 }
 
+/** A flat floor at y = 0: legacy CombatSim's ground (every height test below reads 0 from it, as DS did). */
+export const FLAT_GROUND: GroundQuery = Object.freeze({ heightAt: () => 0 });
+
+/** What a DS knockback or strike by `a` records as its cause (a creature's body, or a weapon it holds or threw). */
+function creatureCause(a: Fighter, held: boolean): ImpactCause {
+  return { kind: 'creature', entityId: null, fighterId: a.id, credit: a.playerId ? [a.playerId] : [], held, feature: 'creature' };
+}
+
+/** A strike that lands while the defender's armour frames are on, or that a big, hard man walks through. */
+function armoredAgainst(d: Fighter, m: MoveDef): boolean {
+  const armor = d.state === 'attack' && d.move?.armor;
+  // A big, hard man walks through a jab: it doesn't stop what he's throwing.
+  const tough = d.state === 'attack' && !!d.move && !d.move.noHit && d.stats.staggerResist >= 0.4;
+  return m.weight === 'light' && ((!!armor && d.stateFrame >= armor[0] && d.stateFrame < armor[1]) || tough);
+}
+
+/**
+ * The DungeonStyle damage of a blow by `a` with move `m` on `d` (docs/M1-DESIGN.md §1.5.2): the perk-free formula of
+ * CombatSim.hit, the same operations in the same order, so hit() gets the same number. `d` null: no defender
+ * (a world strike: no defence, no armour frames, no counter on their wind-up). `power` is the share of the swing
+ * behind a weapon (1 for fists and feet), `haft` a blow caught on the handle, `thrown` the weapon in flight.
+ */
+export function blowDamage(a: Fighter, d: Fighter | null, m: MoveDef, power: number, haft: boolean, thrown: WeaponDef | null): number {
+  // (A thrown weapon is no longer in the thrower's hand.)
+  const held = thrown ?? a.weapon;
+  // Caught on the haft: a blunt knock, not a cut.
+  const w = m.weapon && !haft ? held : null;
+  const caughtInStartup = !!d && d.state === 'attack' && !!d.move && d.stateFrame < d.move.startup;
+  const counter = caughtInStartup || (!thrown && a.isCounterAttack);
+  const armored = !!d && armoredAgainst(d, m);
+  // A tired arm hits softer (nothing behind it).
+  const behind = thrown ? 1 : 0.5 + 0.5 * a.swingStamina;
+  // A heavy weapon's whole weight behind a committed swing hits like nothing else, and
+  // armour stops less of it — the reward for getting a slow swing to land.
+  const weight = heavyBlow(m, held, haft);
+  const defense = d ? d.stats.defense * (1 - 0.5 * weight) : 0;
+  // (Off a perfect dodge, the counter goes in all the harder.)
+  let dmg = m.damage * a.stats.damageMul * (counter ? (!thrown && a.isPerfectCounter ? 1.6 : 1.25) : 1) * (1 - defense) * behind;
+  if (armored) dmg *= 0.5;
+  if (w) dmg *= w.damageMul;
+  if (weight > 0) dmg *= 1 + 0.7 * weight;
+  // (How much of the swing is behind it matters more the heavier it is: caught early
+  // it's a shove, caught at full speed it's devastating.)
+  if (m.weapon) dmg *= Math.min(1, power) ** (1 + weight) * (haft ? 0.45 : 1);
+  return dmg;
+}
+
+/** What a KO reports without a world: not environmental, nobody's credit. */
+const NO_WORLD_KO = { environmental: false, credit: [] as readonly string[] };
+
 export class CombatSim {
   readonly fighters: Fighter[] = [];
   readonly events: CombatEvent[] = [];
-  readonly ais = new Map<Fighter, BrawlerAI>();
+  /** What drives each non-player fighter: DS's BrawlerAI or a creature's mind. */
+  readonly ais = new Map<Fighter, Brain>();
   /** Turn-taking between enemies (only one starts an attack per window). */
   readonly director = new AIDirector();
   /** Weapons lying around. */
@@ -254,18 +326,54 @@ export class CombatSim {
   /** Where fighters can stand (the arena floor minus its props). */
   walkable: Walkable = new RectWalkable(-7.5, 7.5, -4.5, 4.5);
   readonly rng: Rng;
-  /** When set, knocked-down fighters' positions are driven externally (ragdoll). */
-  externalKnockdown = false;
   /** Player input, as tick-tagged commands applied at the start of their tick. */
   readonly commands = new CommandQueue();
   private readonly speeds = new Map<Fighter, { speed: number; lx: number; lz: number; turn: number }>();
+
+  // ---------------------------------------------------------------------------
+  // Seams (docs/M1-DESIGN.md §1.5.2). Every default runs DungeonStyle's arithmetic; a World sets them all.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Resolves each standing fighter's proposed position against the world, y included (character controllers, the
+   * ruler's mover). null: the arena floor (walkable.resolve) at the ground's height.
+   */
+  mover: FighterMover | null = null;
+  private groundQuery: GroundQuery = FLAT_GROUND;
+  /** The world's way back in (strikes on entities, verbs, knockouts, thrown things); null in legacy CombatSim. */
+  world: WorldPort | null = null;
+  /**
+   * Downed bodies (knockdown, ko, tripped) are moved by physics bodies (the world's slabs and ruler bodies), not by
+   * locomote's slide. Set only by World. (Renames DS's `externalKnockdown`.)
+   */
+  physicsOwnsDowned = false;
+  /** Maps a command's player number to that player's fighter (World.players). null: M0's reading, the fighter id. */
+  playerFighter: ((player: number) => Fighter | undefined) | null = null;
 
   constructor(seed = 7) {
     this.rng = new Rng(seed);
   }
 
-  add(f: Fighter, ai?: BrawlerAI) {
+  /** The ground fighters stand on (FLAT_GROUND: y = 0 everywhere). Setting it reaches every fighter's footwork. */
+  get ground(): GroundQuery {
+    return this.groundQuery;
+  }
+  set ground(g: GroundQuery) {
+    this.groundQuery = g;
+    for (const f of this.fighters) f.ground = g === FLAT_GROUND ? null : g;
+  }
+
+  /** @deprecated alias of physicsOwnsDowned, kept until P31 removes game.ts:181's write (RF-8). */
+  get externalKnockdown(): boolean {
+    return this.physicsOwnsDowned;
+  }
+  set externalKnockdown(v: boolean) {
+    this.physicsOwnsDowned = v;
+  }
+
+  add(f: Fighter, ai?: Brain) {
     this.fighters.push(f);
+    if (this.groundQuery !== FLAT_GROUND) f.ground = this.groundQuery;
     if (ai) {
       ai.director ??= this.director;
       ai.drops = this.drops;
@@ -285,11 +393,27 @@ export class CombatSim {
     return this.fighters.filter((o) => o.team !== f.team);
   }
 
+  /** One legacy tick: beginTick() then stepBody() (verb and meta commands have no effect without a world). */
   step(): CombatEvent[] {
+    this.beginTick();
+    return this.stepBody();
+  }
+
+  /**
+   * The start of a tick (docs/M1-DESIGN.md §3 phase 1a): clears the events, advances the frame, applies the move and
+   * button commands due now in queue order, and returns the verb and meta commands due now, in queue order, for the
+   * world to apply.
+   */
+  beginTick(): Command[] {
     this.events.length = 0;
     this.frame++;
-    this.applyCommands();
+    const rest = this.applyCommands();
     this.director.frame = this.frame;
+    return rest;
+  }
+
+  /** The rest of the tick (§3 phase 3), in DungeonStyle's order; returns this tick's events. */
+  stepBody(): CombatEvent[] {
     const fs = this.fighters;
 
     for (const f of fs) this.retarget(f);
@@ -312,22 +436,34 @@ export class CombatSim {
     return this.events;
   }
 
-  /** Applies the player commands due this tick, in the order they were queued. */
-  private applyCommands() {
+  /**
+   * Applies the move and button commands due this tick, in the order they were queued, to their player's fighter;
+   * returns the verb and meta commands, in queue order.
+   */
+  private applyCommands(): Command[] {
+    const rest: Command[] = [];
     for (const c of this.commands.take(this.frame)) {
-      const f = this.fighters.find((o) => o.id === c.player);
+      if (c.kind === 'verb' || c.kind === 'meta') {
+        rest.push(c);
+        continue;
+      }
+      const f = this.playerFighter ? this.playerFighter(c.player) : this.fighters.find((o) => o.id === c.player);
       if (!f) continue;
       switch (c.kind) {
         case 'move':
           moveVector(c, f.moveInput);
+          f.moveFlags = c.flags ?? 0;
           break;
         case 'button':
           if (!f.alive) break;
-          if (c.button !== 'pickup') f.press(c.button);
-          else if (f.state !== 'pickup') f.pickupRequest = 12;
+          if (c.button === 'pickup') {
+            if (f.state !== 'pickup') f.pickupRequest = 12;
+          } else if (c.button === 'jump') f.jumpRequest = MOVE_TUNING.jumpBufferFrames;
+          else f.press(c.button);
           break;
       }
     }
+    return rest;
   }
 
   // ---------------------------------------------------------------------------
@@ -338,6 +474,8 @@ export class CombatSim {
    * switches, so two enemies at similar range don't make it flip back and forth.
    */
   private retarget(f: Fighter) {
+    // A creature's mind chooses its own target (docs/M1-DESIGN.md §6.1).
+    if (this.ais.get(f)?.ownsTarget) return;
     const cur = f.target && f.target.alive ? f.target : null;
     if (cur && f.state === 'attack') return;
     const reach = (o: Fighter) => f.distanceTo(o) - (o.scale - 1) * 0.35;
@@ -612,8 +750,11 @@ export class CombatSim {
       const tc = rel.dot(p.vel) / v2;
       if (tc <= 0 || tc > 0.7) continue;
       const y = p.pos.y + p.vel.y * tc - 4.9 * tc * tc;
-      const miss = Math.hypot(p.pos.x + p.vel.x * tc - _c.x, p.pos.z + p.vel.z * tc - _c.z);
-      if (miss > 0.5 * f.scale || y < 0 || y > f.rig.head.pos.y + 0.3 * f.scale) continue;
+      const px = p.pos.x + p.vel.x * tc;
+      const pz = p.pos.z + p.vel.z * tc;
+      const miss = Math.hypot(px - _c.x, pz - _c.z);
+      // (Below the ground there, it has landed before it gets to them.)
+      if (miss > 0.5 * f.scale || y < this.groundQuery.heightAt(px, pz) || y > f.rig.head.pos.y + 0.3 * f.scale) continue;
       const fta = Math.round(tc * 60);
       const height: Height = y > f.rig.head.pos.y - 0.14 * f.scale ? 'high' : y > f.rig.abdomen.pos.y - 0.12 * f.scale ? 'mid' : 'low';
       const kind = chooseDefense(f, { blockable: true, kind: 'straight', height } as MoveDef, fta, height);
@@ -653,7 +794,8 @@ export class CombatSim {
     // Squaring up to a giant happens further out.
     const big = lockT ? Math.max(f.scale, lockT.scale) : 1;
     f.lockedOn = lockD < (f.lockedOn ? FACING.unlockRange : FACING.lockRange) * big;
-    const external = this.externalKnockdown && (f.state === 'knockdown' || f.state === 'ko');
+    // A downed or tripped body's position belongs to its physics body (the world's slab or ruler body).
+    const external = this.physicsOwnsDowned && (f.state === 'knockdown' || f.state === 'ko' || f.state === 'tripped');
     if (!external) {
       f.pos.x += f.vel.x * DT;
       f.pos.z += f.vel.z * DT;
@@ -768,7 +910,7 @@ export class CombatSim {
       for (let j = i + 1; j < fs.length; j++) {
         const a = fs[i];
         const b = fs[j];
-        if (!a.alive || !b.alive || a.state === 'knockdown' || b.state === 'knockdown') continue;
+        if (!a.alive || !b.alive || a.state === 'knockdown' || b.state === 'knockdown' || a.state === 'tripped' || b.state === 'tripped') continue;
         const dx = b.pos.x - a.pos.x;
         const dz = b.pos.z - a.pos.z;
         const d = Math.hypot(dx, dz);
@@ -789,10 +931,20 @@ export class CombatSim {
         }
       }
     }
+    const mover = this.mover;
     for (const f of fs) {
-      // Feet and knees reach past the hips: keep them out of furniture too.
-      if (f.state !== 'knockdown' && f.state !== 'ko') this.walkable.resolve(f.pos, BODY_RADIUS * f.scale, 0.14 * f.scale);
-      f.pos.y = 0;
+      const down = f.state === 'knockdown' || f.state === 'ko' || f.state === 'tripped';
+      if (mover) {
+        // World mode (docs/M1-DESIGN.md §3 phase 3, departure X1): the mover resolves a standing fighter's proposal,
+        // y included; a downed or tripped body is placed by its physics body (phase 13).
+        if (!down) mover.resolve(f, BODY_RADIUS * f.scale, 0.14 * f.scale);
+      } else {
+        // Feet and knees reach past the hips: keep them out of furniture too.
+        if (!down) this.walkable.resolve(f.pos, BODY_RADIUS * f.scale, 0.14 * f.scale);
+        f.pos.y = this.groundQuery.heightAt(f.pos.x, f.pos.z);
+      }
+      // A buffered jump press lasts jumpBufferFrames ticks of chances for the mover to take it.
+      if (f.jumpRequest > 0) f.jumpRequest--;
     }
   }
 
@@ -862,6 +1014,7 @@ export class CombatSim {
           a.hitThisAttack = true;
           a.impact('rebound', 2, 10);
           const mass = (a.scale * a.scale) / (d.scale * d.scale);
+          this.knock(d, a, false);
           d.vel.addScaledVector(dir, Math.min(2.5, 1.6 * mass));
           a.vel.addScaledVector(dir, -Math.min(2.5, 1.6 / mass));
           this.events.push({ type: 'bump', attacker: a, defender: d, point: at });
@@ -1032,6 +1185,7 @@ export class CombatSim {
     // weapon just thuds against the body and stops.
     if (m.weapon && power < MIN_POWER) {
       a.impact('rebound', 2, 10);
+      this.knock(d, a, true);
       d.vel.addScaledVector(dir, 0.4);
       this.events.push({ type: 'bump', attacker: a, defender: d, point: point.clone() });
       return;
@@ -1081,10 +1235,12 @@ export class CombatSim {
       guardBreak = true;
       d.guard = d.stats.maxGuard * 0.5;
       d.enterGuardBreak(48);
+      this.knock(d, a, !!m.weapon);
       d.vel.addScaledVector(dir, kb * 0.9);
     } else {
       // (A jab on the gloves barely stops you; a big shot on them does.)
       d.enterBlockstun(Math.round(m.blockstun * (m.weight === 'light' ? 0.6 : 1)));
+      this.knock(d, a, !!m.weapon);
       d.vel.addScaledVector(dir, kb * 0.6);
       if (d.autoDefense) d.counter = { kind: 'block', frames: DEFENSES.block.counterWindow + m.blockstun };
     }
@@ -1103,6 +1259,8 @@ export class CombatSim {
     if (thrown) return;
     if (parry) {
       a.enterHitstun(16, 'stagger', 0.7);
+      // Knocked off balance by the parry.
+      this.knock(a, d, false);
       a.vel.addScaledVector(dir, -0.6);
       return;
     }
@@ -1117,25 +1275,19 @@ export class CombatSim {
     const w = m.weapon && !haft ? held : null;
     const caughtInStartup = d.state === 'attack' && !!d.move && d.stateFrame < d.move.startup;
     const counter = caughtInStartup || (!thrown && a.isCounterAttack);
-    const armor = d.state === 'attack' && d.move?.armor;
-    // A big, hard man walks through a jab: it doesn't stop what he's throwing.
-    const tough = d.state === 'attack' && !!d.move && !d.move.noHit && d.stats.staggerResist >= 0.4;
-    const armored = m.weight === 'light' && ((!!armor && d.stateFrame >= armor[0] && d.stateFrame < armor[1]) || tough);
-
+    const armored = armoredAgainst(d, m);
     // A tired arm hits softer (nothing behind it).
     const behind = thrown ? 1 : 0.5 + 0.5 * a.swingStamina;
-    // A heavy weapon's whole weight behind a committed swing hits like nothing else, and
-    // armour stops less of it — the reward for getting a slow swing to land.
-    const weight = heavyBlow(m, held, haft);
-    const defense = d.stats.defense * (1 - 0.5 * weight);
-    // (Off a perfect dodge, the counter goes in all the harder.)
-    let dmg = m.damage * a.stats.damageMul * (counter ? (!thrown && a.isPerfectCounter ? 1.6 : 1.25) : 1) * (1 - defense) * behind;
-    if (armored) dmg *= 0.5;
-    if (w) dmg *= w.damageMul;
-    if (weight > 0) dmg *= 1 + 0.7 * weight;
-    // (How much of the swing is behind it matters more the heavier it is: caught early
-    // it's a shove, caught at full speed it's devastating.)
-    if (m.weapon) dmg *= Math.min(1, power) ** (1 + weight) * (haft ? 0.45 : 1);
+    let dmg = blowDamage(a, d, m, power, haft, thrown);
+    // The one damage rule (rule 2, SPEC:283; docs/M1-DESIGN.md §4.4): the blow carries dmg × meleeJPerDmg joules and
+    // the zone's toughness (hide + worn armour) takes its share first. With no toughness (every M1 human and ape)
+    // the line is skipped, so dmg stays exactly DungeonStyle's ((x·18)/18 is not always x).
+    const toughness = zoneToughness(d, zone);
+    let energy = 0;
+    if (toughness > 0) {
+      energy = dmg * DAMAGE_TUNING.meleeJPerDmg;
+      dmg = hpFromEnergy(energy, toughness);
+    }
     d.hp = Math.max(d.minHp, d.hp - dmg);
     // Body shots empty the tank.
     d.stamina = Math.max(0, d.stamina - (zone === 'abdomen' ? 0.09 : zone === 'chest' ? 0.04 : 0.02) * Math.min(2, dmg / 8));
@@ -1153,10 +1305,12 @@ export class CombatSim {
     const kb = thrown ? m.knockback : m.knockback * a.stats.knockbackMul * push;
     let ko = false;
     let knockdown = false;
+    // Every branch below shoves them: remember who did (environmental kills, §4.4).
+    const cause = this.knock(d, a, !!m.weapon);
     if (d.hp <= 0) {
       d.hp = 0;
       ko = true;
-      d.enterKO();
+      this.koFighter(d, { by: thrown ? 'thrown' : 'strike', killer: a, cause, point });
       d.vel.addScaledVector(dir, kb + 1.5);
     } else if (armored) {
       d.vel.addScaledVector(dir, 0.3);
@@ -1184,7 +1338,7 @@ export class CombatSim {
       if (!ko) {
         ko = true;
         knockdown = false;
-        d.enterKO();
+        this.koFighter(d, { by: 'fatal', killer: a, cause, point });
         d.vel.addScaledVector(dir, 0.6);
       }
     }
@@ -1207,7 +1361,7 @@ export class CombatSim {
         d.hp = 0;
         ko = true;
         knockdown = false;
-        d.enterKO();
+        this.koFighter(d, { by: 'sever', killer: a, cause, point });
         d.vel.addScaledVector(dir, 1);
       }
     }
@@ -1257,6 +1411,35 @@ export class CombatSim {
       sever,
       fatal,
       tear,
+      ...(toughness > 0 ? { energy, toughness } : {}),
+    });
+  }
+
+  /** Records on `d` that `by` just knocked it about (every DS knockback site, docs/M1-DESIGN.md §4.4). */
+  private knock(d: Fighter, by: Fighter, weapon: boolean): ImpactCause {
+    const cause = creatureCause(by, weapon);
+    d.lastKnock = { tick: this.frame, cause, by: by.id };
+    return cause;
+  }
+
+  /**
+   * The only way into 'ko' (docs/M1-DESIGN.md §4.4): once per fighter (a second call does nothing), it knocks them
+   * out, lets the world classify the kill and run parts and death (legacy: not environmental, nobody's credit), and
+   * reports it as a `ko` event.
+   */
+  koFighter(d: Fighter, finish: Finish) {
+    if (d.state === 'ko') return;
+    d.enterKO();
+    const r = this.world ? this.world.onKO(d, finish) : NO_WORLD_KO;
+    this.events.push({
+      type: 'ko',
+      victim: d,
+      by: finish.by,
+      killer: finish.killer,
+      cause: finish.cause,
+      environmental: r.environmental,
+      credit: [...r.credit],
+      point: new Vector3(finish.point.x, finish.point.y, finish.point.z),
     });
   }
 
@@ -1356,7 +1539,7 @@ export class CombatSim {
     f.hp = Math.max(f.minHp, f.hp - rate * BLEED_DPS * DT);
     if (f.hp <= 0) {
       f.hp = 0;
-      f.enterKO();
+      this.koFighter(f, { by: 'bleed', killer: null, cause: null, point: f.rig.pelvis.pos });
       this.dropWeapon(f);
       this.events.push({ type: 'bleedout', f });
     }
@@ -1366,6 +1549,7 @@ export class CombatSim {
   addDrop(weapon: WeaponDef, x: number, z: number, yaw = 0, from?: Vector3): Drop {
     const p = new Vector3(x, 0, z);
     this.walkable.resolve(p, 0.25);
+    p.y = this.groundQuery.heightAt(p.x, p.z);
     const drop: Drop = { id: ++this.dropSerial, weapon, pos: p, yaw, from: from?.clone() };
     this.drops.push(drop);
     this.events.push({ type: 'drop', drop });
@@ -1504,15 +1688,16 @@ export class CombatSim {
           w.resolve(p.pos, 0.1);
           p.omega *= 0.4;
         }
-        // The floor.
+        // The floor (the ground's height under it; 0 on a flat floor).
         let low = Infinity;
         for (const q of points) low = Math.min(low, q.y);
-        if (low <= 0.01 && p.vel.y < 0) {
+        const g = this.groundQuery.heightAt(p.pos.x, p.pos.z);
+        if (low <= g + 0.01 && p.vel.y < 0) {
           const speed = p.vel.length();
           if (speed > 3 && p.age < 600) {
             this.events.push({ type: 'thud', projectile: p, point: p.pos.clone(), speed, wall: false });
             p.live = false;
-            p.pos.y += -low + 0.01;
+            p.pos.y += g - low + 0.01;
             p.vel.set(p.vel.x * 0.45, -p.vel.y * 0.25, p.vel.z * 0.45);
             p.omega *= 0.4;
           } else {
