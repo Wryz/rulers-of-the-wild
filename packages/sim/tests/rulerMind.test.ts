@@ -695,7 +695,8 @@ describe('down in a pit (§6.4, §4.7, RR-1)', () => {
   it('after a trip into a 2.5 m pit it gets up, climbs out in 6-9 s (roaring as it starts) and only then recovers', async () => {
     const w = await make();
     const p = w.player!;
-    digPit(w, -6, 6, -6, 6, 2.5);
+    // AC-3's pit (§11.3): 8 × 6 × 2.5 m, uncovered here, across the line of the charge.
+    digPit(w, -4, 4, -3, 3, 2.5);
     w.teleport(p, 22, 0, -EAST);
     const { g, mind } = giantAt(w, -26, 0, EAST);
     steps(w, 2);
@@ -741,9 +742,12 @@ describe('down in a pit (§6.4, §4.7, RR-1)', () => {
     // Roared as the climb began (the rise's own roar is the bus's, at the rise).
     expect(roars).toContain(climbStart);
     expect(out).toBeGreaterThan(climbStart);
-    const climb = (out - leaveFloor) * DT;
+    // The climb, from its start (the first tick it drives with climb set, up and still in the pit: the walk to the
+    // wall at climbWalkMps included) to the rim; the wall itself at climbRateMps (2.5 m: 6.25 s).
+    const climb = (out - climbStart) * DT;
     expect(climb).toBeGreaterThanOrEqual(6);
     expect(climb).toBeLessThanOrEqual(9);
+    expect((out - leaveFloor) * DT).toBeGreaterThanOrEqual(2.5 / RULER_BODY_TUNING.climbRateMps - 0.1);
     expect(recover).toBeGreaterThanOrEqual(out);
     expect(g.ruler!.inPit).toBe(false);
     expect(g.pos.y).toBeGreaterThan(-0.5);
@@ -783,10 +787,13 @@ describe('chargeLineClear (§6.4)', () => {
     const to: V3 = { x: 15, y: 0, z: 0 };
     // A fixed 1 m log (its top 1 m up, 1.3 t) across the line.
     spawnLog(w, { p: { x: -5, y: 0.5, z: 0 }, q: LOG_Z, length: 4, r: 0.5, state: 'fixed' });
+    // A 2.5 m pit across the line, covered by a deck resting on its rim.
+    digPit(w, -12, -9, -2, 2, 2.5);
+    spawnBox(w, { p: { x: -10.5, y: 0.1, z: 0 }, size: [4.5, 0.2, 5.5], material: 'dryWood', look: 'plank' });
     // A light fixed post (6 m, 0.2 m square, dry wood: ≈ 100 kg) on the line, and a free 1.5 t log standing on end.
     spawnBox(w, { p: { x: 0, y: 3, z: 0 }, size: [0.2, 6, 0.2], material: 'dryWood', state: 'fixed', look: 'post' });
     spawnLog(w, { p: { x: 5, y: 3.0, z: 0 }, q: UP, length: 6, mass: 1500 });
-    steps(w, 2);
+    steps(w, 40);
     expect(chargeLineClear(w, from, to)).toBe(true);
     // A 30 cm trunk 12 m tall (≈ 600 kg, fixed) on the line stops it.
     spawnTree(w, { at: { x: 10, z: 0.2 }, diameter: 0.3, height: 12 });
