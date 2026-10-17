@@ -7,6 +7,12 @@ import type { Finish } from './types';
 import type { World } from './world';
 
 export class Deaths {
+  readonly world: World;
+
+  constructor(world: World) {
+    this.world = world;
+  }
+
   /** At the KO site (WorldPort.onKO), after the environmental classification. */
   onKO(_w: World, _d: Fighter, _finish: Finish): void {}
 

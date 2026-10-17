@@ -165,12 +165,12 @@ export class World implements WorldPort {
     this.terrain = new Terrain(this.physics, this.options.size);
     this.physics.primeQueries();
 
-    this.cover = new GroundCover();
+    this.cover = new GroundCover(this);
     this.entities = new EntityStore(this);
     this.joints = new JointStore(this);
-    this.breaking = new Breaking();
-    this.loads = new Loads();
-    this.felling = new Felling();
+    this.breaking = new Breaking(this);
+    this.loads = new Loads(this);
+    this.felling = new Felling(this);
     this.queries = new WorldQueries(this.physics, {
       mass: (id) => this.entities.get(id)?.mass ?? 0,
       collider: (id) => this.entities.get(id)?.collider ?? null,
@@ -183,12 +183,12 @@ export class World implements WorldPort {
     this.zones = new ZoneBodies(this);
     this.downed = new DownedBodies(this);
     this.rulers = new RulerBodies(this);
-    this.contacts = new ContactSystem();
-    this.deaths = new Deaths();
+    this.contacts = new ContactSystem(this);
+    this.deaths = new Deaths(this);
     this.verbs = new VerbSystem(this);
-    this.minds = new MindRegistry();
-    this.noise = new NoiseBus();
-    this.spawner = new Spawner();
+    this.minds = new MindRegistry(this);
+    this.noise = new NoiseBus(this);
+    this.spawner = new Spawner(this);
     this.nav = this.options.nav === 'full' ? new NavSystem(this) : null;
 
     const kcc = this.kcc;

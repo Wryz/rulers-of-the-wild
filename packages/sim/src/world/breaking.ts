@@ -28,6 +28,12 @@ export const BREAK_TUNING = defineTuning(
 );
 
 export class Breaking {
+  readonly world: World;
+
+  constructor(world: World) {
+    this.world = world;
+  }
+
   /** An impact of energy E on e (phase 9c): integrity loss above its break energy. */
   hit(e: Entity, E: number, point: V3, breaker: Owner | null): void {
     notImplemented('hit', e, E, point, breaker);

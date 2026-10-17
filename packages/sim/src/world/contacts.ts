@@ -8,6 +8,12 @@ import type { ContactPair } from './physics';
 import type { World } from './world';
 
 export class ContactSystem {
+  readonly world: World;
+
+  constructor(world: World) {
+    this.world = world;
+  }
+
   /** Phase 9: the drained pairs, in their sorted order. */
   process(_w: World, _pairs: readonly ContactPair[]): void {}
 

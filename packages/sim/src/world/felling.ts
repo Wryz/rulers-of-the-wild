@@ -40,6 +40,12 @@ export const FELL_TUNING = defineTuning(
 );
 
 export class Felling {
+  readonly world: World;
+
+  constructor(world: World) {
+    this.world = world;
+  }
+
   /** One chop on a tree from `fromDir` (§4.12). */
   chop(tree: number, fromDir: V3, depthM: number, credit: string[]): { remaining: number; fell: boolean } {
     return notImplemented('chop', tree, fromDir, depthM, credit);

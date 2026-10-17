@@ -7,6 +7,12 @@ import type { ClearingSpawnData } from '../clearing';
 import type { World } from '../world';
 
 export class Spawner {
+  readonly world: World;
+
+  constructor(world: World) {
+    this.world = world;
+  }
+
   /** At creation: ape homes, the giant's lair and route, the sparring ape (`scene 'empty'` spawns nothing). */
   init(_w: World, _data: ClearingSpawnData | null): void {}
 

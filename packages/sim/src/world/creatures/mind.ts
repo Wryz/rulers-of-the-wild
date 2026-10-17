@@ -100,7 +100,12 @@ export abstract class CreatureMind implements Brain {
 }
 
 export class MindRegistry {
+  readonly world: World;
   private readonly minds = new Map<Fighter, CreatureMind>();
+
+  constructor(world: World) {
+    this.world = world;
+  }
 
   add(f: Fighter, mind: CreatureMind): void {
     this.minds.set(f, mind);

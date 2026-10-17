@@ -26,6 +26,12 @@ export const LOAD_TUNING = defineTuning(
 );
 
 export class Loads {
+  readonly world: World;
+
+  constructor(world: World) {
+    this.world = world;
+  }
+
   /** Phase 11. */
   update(_w: World): void {}
 

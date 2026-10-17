@@ -18,6 +18,12 @@ export interface Noise {
 }
 
 export class NoiseBus {
+  readonly world: World;
+
+  constructor(world: World) {
+    this.world = world;
+  }
+
   emit(_n: Noise): void {}
 
   /** Phase 17b: noises from this tick's events and footsteps. */

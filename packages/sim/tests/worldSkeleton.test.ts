@@ -266,6 +266,28 @@ describe('the tick pipeline (§3)', () => {
   });
 });
 
+describe('the default empty world and the RNG record', () => {
+  it("createWorld({ seed, scene: 'empty' }) with every other option at its default steps 600 ticks", async () => {
+    const w = await make({ seed: 21, scene: 'empty' });
+    expect(w.options.nav).toBe('full');
+    for (let t = 0; t < 600; t++) w.step();
+    expect(w.tick).toBe(600);
+    for (const v of [w.player!.pos.x, w.player!.pos.y, w.player!.pos.z, w.player!.hp]) expect(Number.isFinite(v)).toBe(true);
+  });
+
+  it("the world-level stream states round-trip through WorldRngs' record", async () => {
+    const w = await make({ seed: 22, scene: 'empty', nav: 'off' });
+    for (let t = 0; t < 30; t++) w.step();
+    w.rngs.world.next();
+    const rec = w.rngs.toRecord();
+    expect(rec).toEqual({ combat: w.combat.rng.state, world: w.rngs.world.state });
+    const next = [w.rngs.combat.next(), w.rngs.world.next(), w.rngs.world.next()];
+    w.rngs.restoreRecord(rec);
+    expect([w.rngs.combat.next(), w.rngs.world.next(), w.rngs.world.next()]).toEqual(next);
+    expect(w.rngs.toRecord()).not.toEqual(rec);
+  });
+});
+
 describe('support, teleport and dispose', () => {
   it('supportAt is the terrain where no entity rests', async () => {
     const w = await make({ seed: 9, scene: 'empty', nav: 'off' });

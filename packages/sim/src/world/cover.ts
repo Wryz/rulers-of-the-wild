@@ -2,8 +2,16 @@
 // undergrowth hides", SPEC:754) and the grass renderer; digging clears a cell; edits are saved.
 //
 // STUB (P05; P21 fills it): final exported signatures. Until P21 there is no cover anywhere (at() is 0) and set() throws.
+import type { World } from './world';
 
 export class GroundCover {
+  /** The world (its options.size and terrain size the grid). */
+  readonly world: World;
+
+  constructor(world: World) {
+    this.world = world;
+  }
+
   /** Cover 0..1 at (x, z). */
   at(_x: number, _z: number): number {
     return 0;
