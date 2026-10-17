@@ -1045,6 +1045,10 @@ describe('records round-trip', () => {
       ['an unknown verb', (r) => (r.work = { ...(DONOR.work as Rec), kind: 'juggle' }), /work\.kind/],
       ['an unknown cause', (r) => (r.lastKnock = { tick: 1, cause: { ...((DONOR.lastKnock as Rec).cause as Rec), feature: 'magic' }, by: null }), /cause\.feature/],
       ['an unknown weapon', (r) => (r.weapon = { id: 'lightsaber', def: null }), /lightsaber/],
+      // One weapon reader for fighters and CombatSim (fighter.ts weaponFromRecord, core-fix): a definition by value of
+      // another weapon, or a weapon that is no record, is refused by name.
+      ['a definition by value of another weapon', (r) => (r.weapon = { id: 'katana', def: { ...WEAPONS.katana, id: 'kunai' } }), /weapon\.def\.id/],
+      ['a weapon that is no record', (r) => (r.ammo = { weapon: 'kunai', count: 3 }), /ammo\.weapon is "kunai", not an object/],
       ['a move from no table', (r) => (r.move = { source: 'pocket', id: 'jab', tempoKey: null }), /move\.source/],
       ['a move its table lacks', (r) => (r.move = { source: 'own', id: 'moonPunch', tempoKey: null }), /moonPunch/],
       ['a tempo bucket as a number', (r) => (r.move = { source: 'own', id: Object.keys(PLAYER_MOVES)[0], tempoKey: 1.1 }), /move\.tempoKey/],

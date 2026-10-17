@@ -1467,13 +1467,13 @@ export class Fighter {
       const drop = pt.drop === null ? undefined : ctx.drops.find((x) => x.id === pt.drop);
       this.pickupTarget = {
         pos: drop ? drop.pos : readV3(pt.pos, new Vector3(), 'pickupTarget.pos'),
-        weapon: drop ? drop.weapon : weaponFromRecord(pt.weapon),
+        weapon: drop ? drop.weapon : weaponFromRecord(pt.weapon, 'pickupTarget.weapon'),
         grabAt: n(pt.grabAt, 'pickupTarget.grabAt'),
       };
     } else this.pickupTarget = null;
-    this.ammo = r.ammo ? { weapon: weaponFromRecord(r.ammo.weapon), count: n(r.ammo.count, 'ammo.count') } : null;
+    this.ammo = r.ammo ? { weapon: weaponFromRecord(r.ammo.weapon, 'ammo.weapon'), count: n(r.ammo.count, 'ammo.count') } : null;
     readV3(r.airStep, this.airStep, 'airStep');
-    this.weapon = r.weapon ? weaponFromRecord(r.weapon) : null;
+    this.weapon = r.weapon ? weaponFromRecord(r.weapon, 'weapon') : null;
     this.wounds.length = 0;
     for (const wr of r.wounds) this.wounds.push(woundFromRecord(wr));
     this.severed.clear();
@@ -1983,8 +1983,11 @@ function fighterById(fighters: readonly Fighter[], id: number, of: number): Figh
   return f;
 }
 
-/** A deep copy of plain data (numbers, strings, booleans, arrays, plain objects); undefined fields are left out. */
-function clonePlain<T>(v: T): T {
+/**
+ * A deep copy of plain data (numbers, strings, booleans, arrays, plain objects) in its key order; undefined fields are
+ * left out. (CombatSim's records use it too.)
+ */
+export function clonePlain<T>(v: T): T {
   if (Array.isArray(v)) return v.map((x) => clonePlain(x)) as T;
   if (v !== null && typeof v === 'object') {
     const o: Record<string, unknown> = {};
@@ -1997,19 +2000,35 @@ function clonePlain<T>(v: T): T {
   return v;
 }
 
-function weaponRecord(w: WeaponDef): WeaponRecord {
+/** A weapon as a record: null `def` for the shared WEAPONS entry, else its definition by value (the one shape in a save). */
+export function weaponRecord(w: WeaponDef): WeaponRecord {
   return { id: w.id, def: own(WEAPONS, w.id) === w ? null : clonePlain(w) };
 }
 
 /**
- * A WEAPONS entry by id, or a synthesised tool's definition by value. (The definition by value is copied as it is:
- * its fields are the WeaponDef type's, checked by P13's schema validation of the save, docs/M1-DESIGN.md §8.3.)
+ * A weapon record read back: a WEAPONS entry by id, or a synthesised tool's definition by value, whose id must be the
+ * record's (fighters' and CombatSim's records alike). Anything else (not an object, an unknown id, a definition of
+ * another id) is a broken record and throws a `save record:` error naming `field`. The definition by value is copied as
+ * it is: its fields are the WeaponDef type's, checked by P13's schema validation of the save (docs/M1-DESIGN.md §8.3).
  */
-function weaponFromRecord(r: WeaponRecord): WeaponDef {
-  if (r.def) return clonePlain(r.def);
-  const w = own(WEAPONS, strFromRecord(r.id, 'weapon.id'));
-  if (!w) throw new Error(`save record: no weapon ${r.id}`);
+export function weaponFromRecord(v: unknown, field: string): WeaponDef {
+  if (v === null || typeof v !== 'object' || Array.isArray(v)) throw brokenRecord(field, v, 'an object');
+  const r = v as Readonly<Record<string, unknown>>;
+  const id = strFromRecord(r.id, `${field}.id`);
+  if (r.def !== null) {
+    const def = r.def;
+    if (def === null || typeof def !== 'object' || Array.isArray(def)) throw brokenRecord(`${field}.def`, def, 'an object');
+    const did = (def as Readonly<Record<string, unknown>>).id;
+    if (did !== id) throw brokenRecord(`${field}.def.id`, did, `the record's weapon id ${JSON.stringify(id)}`);
+    return clonePlain(def) as unknown as WeaponDef;
+  }
+  const w = own(WEAPONS, id);
+  if (!w) throw new Error(`save record: ${field} is weapon ${JSON.stringify(id)}, which doesn't exist`);
   return w;
+}
+
+function brokenRecord(field: string, v: unknown, what: string): Error {
+  return new Error(`save record: ${field} is ${v === undefined ? 'missing' : JSON.stringify(v)}, not ${what}`);
 }
 
 function woundRecord(w: Wound): FighterRecord['wounds'][number] {
