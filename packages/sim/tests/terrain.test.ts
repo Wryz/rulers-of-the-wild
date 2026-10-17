@@ -112,14 +112,37 @@ describe('terrain heights against Rapier', () => {
     }
   });
 
-  it('edits reach the collider at once (setShape) and bump the tile version', () => {
+  it('edits reach the collider at once (setShape) through its old bounds, and bump the tile version', () => {
     const before = terrain.version[terrain.tileCount - 1];
     const x = 90;
     const z = 90;
     terrain.lower(x, z, 1);
     expect(terrain.version[terrain.tileCount - 1]).toBe(before + 1);
+    // A downward ray meets the tile's old bounding box, so it already tests the new shape.
     const hit = queries.castRay({ x, y: 40, z }, { x: 0, y: -1, z: 0 }, 80, {})!;
     expect(Math.abs(hit.point.y - terrain.heightAt(x, z))).toBeLessThan(2e-5);
+  });
+
+  it('below the old bounds (a pit dug in flat ground), queries find the edit after the next step', () => {
+    const p = new PhysicsWorld();
+    try {
+      const t = new Terrain(p, 50);
+      p.primeQueries();
+      const q = new WorldQueries(p, { mass: () => 0, collider: () => null });
+      for (let k = 0; k < 20; k++) for (let x = -1; x <= 1; x += 0.25) for (let z = -1; z <= 1; z += 0.25) t.lower(x + 5, z + 5, 1);
+      expect(t.heightAt(5, 5)).toBe(-TERRAIN_TUNING.maxDigDepthM);
+      // Exact at once: the heights are the terrain's own.
+      expect(t.supportAt(5, 5)).toBe(-TERRAIN_TUNING.maxDigDepthM);
+      p.step();
+      p.drain();
+      const wall = q.castRay({ x: 2, y: -1.5, z: 5 }, { x: 1, y: 0, z: 0 }, 10, { terrain: true });
+      expect(wall?.owner).toEqual({ kind: 'terrain' });
+      expect(wall!.point.x).toBeGreaterThan(3);
+      expect(wall!.point.x).toBeLessThan(5);
+      expect(q.overlaps({ kind: 'ball', r: 0.3 }, { p: { x: 5, y: t.heightAt(5, 5) + 0.1, z: 5 }, q: { x: 0, y: 0, z: 0, w: 1 } }, {})).toEqual([{ kind: 'terrain' }]);
+    } finally {
+      p.free();
+    }
   });
 });
 

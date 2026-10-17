@@ -11,7 +11,10 @@
 // `original` keeps the generated heights (the 3 m dig floor, the spoil rule, the nav extrusion rule); `dug` marks every
 // vertex `lower` has ever left more than `spoilUndugTolM` below its original height (never cleared, so ground dug and
 // refilled still counts, RT-2); `version[t]` bumps on every edit of tile t (client mesh, nav). An edit calls
-// `collider.setShape(new Heightfield(…))` on the tile at once (it keeps the handle; queries see it without a step).
+// `collider.setShape(new Heightfield(…))` on the tile at once (it keeps the handle). Like every collider change, queries
+// find the new shape at once only where they meet the tile's old bounding box (a downward ray through the old surface);
+// below it (a horizontal ray into a fresh pit's wall, an overlap at its floor) they find it after the next step.
+// heightAt, normalAt and supportAt read the heights, so they are exact at once.
 import RAPIER from '@dimforge/rapier3d-compat';
 import { defineTuning } from '../tuning/registry';
 import { collisionGroups, solverGroups } from './groups';
