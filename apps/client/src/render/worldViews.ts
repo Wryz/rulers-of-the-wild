@@ -5,10 +5,10 @@
 // Each frame, in this order (each view draws from what the ones before it placed):
 //   sky (the sun's shadow over the player) → terrain → fighters (from the ragdoll, else the rig; species looks, held
 //   things, wounds, ruler scars) → trees → entities (held ones at the drawn hand, stowed ones at the drawn belt and back)
-//   → ropes (ends on entities as drawn, held ends at the drawn fist) → grass.
+//   → ropes (ends on entities as drawn, held ends at the drawn fist) → drag links (a dragging hand to its grip) → grass.
 // Every view reads the sim's state and writes nothing back (rule 6). Rule 3 is the point of all of it: every material
 // state a rule depends on is drawn (see each view's header).
-import { type Group, Matrix4, Mesh, type Object3D, type Scene, Vector3 } from 'three';
+import { CylinderGeometry, type Group, Matrix4, Mesh, type MeshStandardMaterial, type Object3D, Quaternion, type Scene, Vector3 } from 'three';
 import {
   BONES,
   type Entity,
@@ -21,7 +21,7 @@ import {
   type Wound,
 } from '@wild/sim';
 import type { BodyPose, FighterViewPort, GoreLevel, SimEvent, ViewFrame, WorldViewsPort } from '../game/ports';
-import { type CarrySlot, EntityViews, poseMatrix, stowedMatrix } from './entityViews';
+import { type CarrySlot, EntityViews, flatMaterial, poseMatrix, stowedMatrix } from './entityViews';
 import { FighterView, type ScarKind } from './fighterView';
 import { ForestView } from './forestView';
 import { GrassView } from './grassView';
@@ -40,6 +40,78 @@ interface Hold {
 const _a = new Matrix4();
 const _b = new Matrix4();
 const _v = new Vector3();
+const _w = new Vector3();
+const _q = new Quaternion();
+const _yAxis = new Vector3(0, 1, 0);
+
+/**
+ * The link drawn from a dragging fighter's drawn fist to the grip it pulls by (rule 3: the sim tethers the hands to the
+ * grip, VERB_TUNING.tetherM; without the link the dragged thing seems to follow on its own). RENDER_TUNING.drag.
+ */
+export class DragLinks {
+  private readonly links = new Map<Fighter, Mesh>();
+  private readonly material: MeshStandardMaterial = flatMaterial({ roughness: 0.95 });
+  private geo: CylinderGeometry | null = null;
+  private sides = 0;
+
+  constructor(private readonly scene: Scene) {}
+
+  /** The link of `f`, if one is drawn (tests). */
+  linkOf(f: Fighter): Mesh | null {
+    const m = this.links.get(f);
+    return m && m.visible ? m : null;
+  }
+
+  /** Draws a link from `from` to `to` for `f`, or hides it (null). */
+  set(f: Fighter, from: Vector3 | null, to: Vector3 | null): void {
+    let m = this.links.get(f);
+    if (!from || !to) {
+      if (m) m.visible = false;
+      return;
+    }
+    const D = RENDER_TUNING.drag;
+    if (!this.geo || this.sides !== D.linkSides) {
+      this.sides = D.linkSides;
+      const old = this.geo;
+      // A unit-length strap along +y from its foot (scaled to the hand-grip distance).
+      this.geo = new CylinderGeometry(1, 1, 1, Math.max(3, Math.round(D.linkSides)), 1).translate(0, 0.5, 0);
+      for (const l of this.links.values()) l.geometry = this.geo;
+      old?.dispose();
+    }
+    if (!m) {
+      m = new Mesh(this.geo, this.material);
+      m.name = 'drag link';
+      m.castShadow = true;
+      this.scene.add(m);
+      this.links.set(f, m);
+    }
+    this.material.color.set(D.linkColor);
+    const len = _w.subVectors(to, from).length();
+    m.visible = len > 1e-4;
+    if (!m.visible) return;
+    _q.setFromUnitVectors(_yAxis, _w.divideScalar(len));
+    const r = D.linkRadiusM * f.scale;
+    m.position.copy(from);
+    m.quaternion.copy(_q);
+    m.scale.set(r, len, r);
+  }
+
+  /** Drops the links of fighters no longer in `keep`. */
+  prune(keep: (f: Fighter) => boolean): void {
+    for (const [f, m] of this.links) {
+      if (keep(f)) continue;
+      this.scene.remove(m);
+      this.links.delete(f);
+    }
+  }
+
+  dispose(): void {
+    for (const m of this.links.values()) this.scene.remove(m);
+    this.links.clear();
+    this.geo?.dispose();
+    this.material.dispose();
+  }
+}
 
 export class WorldViews implements WorldViewsPort {
   readonly sky: Sky;
@@ -48,6 +120,7 @@ export class WorldViews implements WorldViewsPort {
   readonly entities: EntityViews;
   readonly ropes: RopeViews;
   readonly grass: GrassView;
+  readonly dragLinks: DragLinks;
   private readonly fighters = new Map<Fighter, FighterViewAdapter>();
   private cues = false;
   private gore: GoreLevel = 'full';
@@ -66,6 +139,7 @@ export class WorldViews implements WorldViewsPort {
     this.entities = new EntityViews(scene);
     this.ropes = new RopeViews(scene);
     this.grass = new GrassView(scene);
+    this.dragLinks = new DragLinks(scene);
   }
 
   sync(world: World, alpha: number, cam: Vector3, frame: ViewFrame): void {
@@ -103,6 +177,7 @@ export class WorldViews implements WorldViewsPort {
       matrixOf: (id) => this.entities.matrixOf(id) ?? this.forest.matrixOf(id),
       handOf: (id) => byId.get(id)?.fist() ?? null,
     });
+    this.syncDragLinks(world);
     this.grass.sync(world, player ? player.pos : cam);
     for (const id of this.struck.keys()) if (!world.entities.get(id)) this.struck.delete(id);
   }
@@ -155,9 +230,25 @@ export class WorldViews implements WorldViewsPort {
     this.entities.dispose();
     this.ropes.dispose();
     this.grass.dispose();
+    this.dragLinks.dispose();
   }
 
   // -------------------------------------------------------------------------
+
+  /** A dragging fighter's link: from its drawn fist to the grip (entity frame) on the entity as drawn. */
+  private syncDragLinks(world: World): void {
+    this.dragLinks.prune((f) => this.fighters.has(f));
+    for (const [f, v] of this.fighters) {
+      const h = f.inventory?.hands ?? null;
+      const m = h && h.mode === 'drag' ? (this.entities.matrixOf(h.entity) ?? this.forest.matrixOf(h.entity)) : null;
+      if (!h || !m || !world.entities.get(h.entity)) {
+        this.dragLinks.set(f, null, null);
+        continue;
+      }
+      const grip = _v.set(h.grip.x, h.grip.y, h.grip.z).applyMatrix4(m);
+      this.dragLinks.set(f, v.fist(), grip);
+    }
+  }
 
   private syncFighters(world: World, alpha: number, frame: ViewFrame): void {
     const fighters = world.combat.fighters;
@@ -267,11 +358,10 @@ function capacityOf(world: World, e: Entity): number | null {
     }
   }
   if (!any) return null;
-  try {
-    return world.loads.capacityN(e);
-  } catch {
-    return null;
-  }
+  // (No catch: P10's loads are in, and an error from them is a real one. A material with no break energy, a rope, has
+  // an infinite capacity: nothing to show.)
+  const cap = world.loads.capacityN(e);
+  return Number.isFinite(cap) ? cap : null;
 }
 
 /** A ruler wound's mark: a missing eye for a severe eye wound, an open gash until it heals, then a scar (SPEC:845). */

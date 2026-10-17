@@ -16,6 +16,14 @@ export function sunDirection(out = new Vector3()): Vector3 {
   return out.set(Math.sin(az) * Math.cos(el), Math.sin(el), Math.cos(az) * Math.cos(el)).normalize();
 }
 
+/** The unit vector toward the fill light (RENDER_TUNING.sky.fill*: a shadowless sky bounce opposite the sun). */
+export function fillDirection(out = new Vector3()): Vector3 {
+  const S = RENDER_TUNING.sky;
+  const az = S.fillAzimuthDeg * DEG;
+  const el = S.fillElevationDeg * DEG;
+  return out.set(Math.sin(az) * Math.cos(el), Math.sin(el), Math.cos(az) * Math.cos(el)).normalize();
+}
+
 /** One shadow-map texel, m: the shadow camera's width over the map's size. */
 export function shadowTexelM(): number {
   const T = RENDER_TUNING;
@@ -55,6 +63,13 @@ export class Sky {
   readonly background = new Color();
   readonly hemi = new HemisphereLight();
   readonly sun = new DirectionalLight();
+  /**
+   * C-fix: a shadowless fill from opposite the sun. With only the hemisphere light, a face turned from the sun (the
+   * valley rim, a pit wall, a crown's far side) took ambient alone, which three.js's physical lighting divides by π:
+   * near-black and with no facets showing (rule 3: the rim must read as rock). The fill gives those faces a direction
+   * to shade by, so they read as lit, faceted rock.
+   */
+  readonly fill = new DirectionalLight();
   readonly fog: Fog;
   private readonly snapped = new Vector3();
   private mapSize = 0;
@@ -65,7 +80,7 @@ export class Sky {
     scene.background = this.background;
     scene.fog = this.fog;
     this.sun.castShadow = true;
-    scene.add(this.hemi, this.sun, this.sun.target);
+    scene.add(this.hemi, this.sun, this.sun.target, this.fill, this.fill.target);
     this.look();
   }
 
@@ -96,13 +111,18 @@ export class Sky {
     s.position.copy(this.snapped).addScaledVector(sunDirection(_l), T.shadowFarM / 2);
     s.target.updateMatrixWorld();
     s.updateMatrixWorld();
+    this.fill.target.position.copy(this.snapped);
+    this.fill.position.copy(this.snapped).add(fillDirection(_l));
+    this.fill.target.updateMatrixWorld();
+    this.fill.updateMatrixWorld();
     this.look();
   }
 
   dispose(): void {
-    this.scene.remove(this.hemi, this.sun, this.sun.target);
+    this.scene.remove(this.hemi, this.sun, this.sun.target, this.fill, this.fill.target);
     if (this.scene.fog === this.fog) this.scene.fog = null;
     this.sun.dispose();
+    this.fill.dispose();
     this.hemi.dispose();
   }
 
@@ -118,6 +138,9 @@ export class Sky {
     this.hemi.intensity = S.hemiIntensity;
     this.sun.color.set(S.sun);
     this.sun.intensity = S.sunIntensity;
+    this.fill.color.set(S.fill);
+    this.fill.intensity = S.fillIntensity;
+    this.fill.visible = S.fillIntensity > 0;
     this.sun.shadow.bias = S.shadowBias;
     this.sun.shadow.normalBias = S.shadowNormalBias;
   }

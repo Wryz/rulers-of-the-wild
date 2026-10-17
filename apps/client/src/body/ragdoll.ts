@@ -31,14 +31,21 @@ import {
 
 type R = typeof RAPIER_NS;
 
+/** The terrain (every body, standing or down, stands on it). */
 export const GROUP_ENV = 0x0001;
 export const GROUP_BODY = 0x0002;
+/**
+ * The entities mirrored into the presentation world (C-fix): only a body that is down touches them. A fighter the sim
+ * has standing is never shoved by a mirrored log or stone (rule 6: the sim decides; what a falling log did to a standing
+ * fighter arrives as the sim's own `impact`, which the ragdoll takes as a blow).
+ */
+export const GROUP_MIRROR = 0x8000;
 export const groups = (membership: number, filter: number) => (membership << 16) | filter;
 
-/** Each ragdoll gets its own collision bit (bits 2..15) so bodies can touch each other. */
-export const SLOT_BITS = 0xfffc;
+/** Each ragdoll gets its own collision bit (bits 2..14) so bodies can touch each other. */
+export const SLOT_BITS = 0x7ffc;
 /** How many ragdolls one presentation world can hold (one bit each). */
-export const SLOT_COUNT = 14;
+export const SLOT_COUNT = 13;
 
 /**
  * The collision bits of one presentation world's ragdolls (D-42: owned by that world, never module state, so two
@@ -51,8 +58,8 @@ export class RagdollSlots {
   /** The lowest free bit, now in use; 0 when every slot is taken. */
   claim(): number {
     let bit = 0x0004;
-    while (bit & this.used && bit < 0x10000) bit <<= 1;
-    if (bit >= 0x10000) return 0;
+    while (bit & this.used && bit & SLOT_BITS) bit <<= 1;
+    if (!(bit & SLOT_BITS)) return 0;
     this.used |= bit;
     return bit;
   }
@@ -274,10 +281,10 @@ export class Ragdoll {
    * Which other bodies this one is solid against. Two fighters on their feet are kept
    * apart by the fight sim (powered bodies pressing on each other would only shake);
    * a body that's down collides with everyone, so a fighter falls against and onto the
-   * other, not through them.
+   * other, not through them. Only a body that's down touches the mirrored entities (GROUP_MIRROR).
    */
   setContacts(down: boolean, downSlots: number) {
-    const others = (down ? SLOT_BITS : downSlots) & ~this.slot;
+    const others = ((down ? SLOT_BITS : downSlots) & ~this.slot) | (down ? GROUP_MIRROR : 0);
     if (others === this.contactMask) return;
     this.contactMask = others;
     const g = groups(GROUP_BODY | this.slot, GROUP_ENV | others);

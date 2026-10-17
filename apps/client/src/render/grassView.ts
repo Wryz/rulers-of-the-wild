@@ -1,8 +1,9 @@
 // Ground cover on screen (docs/M1-DESIGN.md §10.4): one InstancedMesh of crossed-quad tufts laid from the cover grid
-// (world.cover, 2 m cells, CLEARING_TUNING.coverCellM) within RENDER_TUNING.grassRadiusM of the camera, at most
+// (world.cover, in its own cells of world.cover.cellM) within RENDER_TUNING.grassRadiusM of the camera, at most
 // grassPerCell per cell (round(cover × grassPerCell)), taller where the cover is denser. Rule 3: dense dry grass is pale
 // (the meadows, cover ≥ terrain.dryCoverFrom), and dug ground is bare (a tuft is never laid where the ground is more
-// than terrain.dugM off its generated height, nor on rock too steep to climb). Re-laid when the camera has moved
+// than terrain.dugM off its generated height, nor on rock too steep to climb; C-fix: and the tuft's whole footprint must
+// be such ground, so none stands on the edge of raised spoil or hangs off a cliff or a pit's lip). Re-laid when the camera has moved
 // grass.rebuildMoveM or the terrain changed (a dig also clears the cover cell, §4.13).
 import { BufferAttribute, BufferGeometry, Color, Group, Matrix4, Quaternion, type Scene, Vector3 } from 'three';
 import { CLEARING_TUNING, type Terrain } from '@wild/sim';
@@ -12,8 +13,38 @@ import { hash2, RENDER_TUNING } from './terrainView';
 /** What the grass view reads from the world. */
 export interface GrassSource {
   terrain: Terrain;
-  cover: { at(x: number, z: number): number };
+  /** The cover grid; `cellM` is its cell size (absent: CLEARING_TUNING.coverCellM, as the sim's own default). */
+  cover: { at(x: number, z: number): number; readonly cellM?: number };
 }
+
+/**
+ * Can a tuft `w` m wide stand at (x, z)? Its root and the four points of its footprint (±w/2 on each axis) must all be
+ * undug, unheaped ground (within terrain.dugM of the generated height), and none of them may rise or drop from the root
+ * more than a slope of terrain.rockSlopeDeg would: so no tuft on raised spoil, on rock, or on the lip of a cliff or a pit.
+ */
+export function tuftFits(t: Terrain, x: number, z: number, w: number, n = new Vector3()): boolean {
+  const T = RENDER_TUNING.terrain;
+  const y = t.heightAt(x, z);
+  if (Math.abs(y - t.originalHeightAt(x, z)) > T.dugM) return false;
+  t.normalAt(x, z, n);
+  if (n.y < Math.cos((T.rockSlopeDeg * Math.PI) / 180)) return false;
+  const r = w / 2;
+  const rise = r * Math.tan((T.rockSlopeDeg * Math.PI) / 180);
+  for (const [dx, dz] of FOOTPRINT) {
+    const px = x + dx * r;
+    const pz = z + dz * r;
+    const h = t.heightAt(px, pz);
+    if (Math.abs(h - y) > rise || Math.abs(h - t.originalHeightAt(px, pz)) > T.dugM) return false;
+  }
+  return true;
+}
+
+const FOOTPRINT: readonly [number, number][] = [
+  [1, 0],
+  [-1, 0],
+  [0, 1],
+  [0, -1],
+];
 
 /**
  * A tuft 1 m wide and 1 m tall standing on the origin: two crossed rows of three pointed blades, leaning out, darker at
@@ -105,9 +136,8 @@ export class GrassView {
     const T = RENDER_TUNING;
     const G = T.grass;
     const t = world.terrain;
-    const cell = CLEARING_TUNING.coverCellM;
+    const cell = world.cover.cellM ?? CLEARING_TUNING.coverCellM;
     const radius = T.grassRadiusM;
-    const rockCos = Math.cos((T.terrain.rockSlopeDeg * Math.PI) / 180);
     _green.set(G.green);
     _dry.set(G.dry);
     this.tufts.begin();
@@ -128,13 +158,11 @@ export class GrassView {
         for (let k = 0; k < count; k++) {
           const x = cx + (hash2(i * 7 + k, j * 13 + 1) - 0.5) * cell;
           const z = cz + (hash2(i * 11 + 3, j * 5 + k) - 0.5) * cell;
-          const y = t.heightAt(x, z);
-          // Bare where dug or heaped, and on rock.
-          if (Math.abs(y - t.originalHeightAt(x, z)) > T.terrain.dugM) continue;
-          t.normalAt(x, z, n);
-          if (n.y < rockCos) continue;
-          const h = G.heightM * (0.45 + 0.55 * cover) * (0.75 + 0.5 * hash2(i + k * 31, j));
           const w = G.widthM * (0.8 + 0.4 * hash2(j + k * 17, i));
+          // Bare where dug or heaped, on rock, and where the tuft would overhang either (its whole footprint).
+          if (!tuftFits(t, x, z, w, n)) continue;
+          const y = t.heightAt(x, z);
+          const h = G.heightM * (0.45 + 0.55 * cover) * (0.75 + 0.5 * hash2(i + k * 31, j));
           _q.setFromAxisAngle(_up, hash2(i * 3 + k, j * 3) * Math.PI);
           _m.compose(_p.set(x, y - 0.02, z), _q, _s.set(w, h, w));
           const dry = cover >= T.terrain.dryCoverFrom ? 1 : 0.4 * cover;
