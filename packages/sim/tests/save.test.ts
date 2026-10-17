@@ -1013,6 +1013,35 @@ describe('tuning on load', () => {
 // ---------------------------------------------------------------------------
 
 const FIXTURE = new URL('./fixtures/save-v1.json', import.meta.url);
+/**
+ * What a load of the fixture must give back as it was: the M1 loader's scope (entities, joints, terrain with the dug
+ * mask, rulers) and what it restores from records whose format v1 fixes (P04's fighter, CombatSim's own state, the
+ * counters, streams, commands, impulses, tuning). The lists of systems that fill their records in later packages
+ * (minds, verbs, the spawner, felling, deaths) are left out: a later build may write an entry for an idle owner that a
+ * v1 save from before it never had, without a format change.
+ */
+const FIXTURE_EXACT = [
+  'seed',
+  'options',
+  'tick',
+  'tuningOverrides',
+  'counters',
+  'rng',
+  'director',
+  'pending',
+  'terrain',
+  'dug',
+  'cover',
+  'entities',
+  'removed',
+  'impulses',
+  'joints',
+  'fighters',
+  'drops',
+  'projectiles',
+  'prevBlade',
+  'rulers',
+] as const;
 const writingFixture = process.env.ROTW_WRITE_SAVE_FIXTURE === '1';
 
 /** The fixture's world: every entity body kind, a dug hole, a walk, overrides, pending commands and an impulse. */
@@ -1045,9 +1074,9 @@ describe('the v1 fixture', () => {
     const l = await load(bytes, { applyTuning: true });
     expect(l.tick).toBe(75);
     expect(WORLD_TUNING.corpseDespawnS).toBe(95);
-    const again = sections(serializeWorld(l), EXACT);
-    const want = sections(bytes, EXACT);
-    for (const k of EXACT) expect(again[k] === want[k], `section ${k}`).toBe(true);
+    const again = sections(serializeWorld(l), FIXTURE_EXACT);
+    const want = sections(bytes, FIXTURE_EXACT);
+    for (const k of FIXTURE_EXACT) expect(again[k] === want[k], `section ${k}`).toBe(true);
     // The loaded world runs (the pending setTuning lands at its tick).
     for (let i = 0; i < 4; i++) l.step();
     expect(WORLD_TUNING.corpseDespawnMinDistM).toBe(Infinity);

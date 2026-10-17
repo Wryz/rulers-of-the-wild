@@ -160,7 +160,7 @@ export interface BodiesRecV1 {
   fighter: number;
   /**
    * §8.3 writes `kcc: KccRecV1`; null here because a ruler has no character controller (§4.7: its body is the
-   * RulerBodies one, saved in `ruler`), and before P08 nobody has one. Players and apes always have one.
+   * RulerBodies one, saved in `ruler`). Players and apes always have one.
    */
   kcc: KccRecV1 | null;
   /** ZoneBodies.historyRecord: per bone, the last stored pose and the one before it (P08). */
