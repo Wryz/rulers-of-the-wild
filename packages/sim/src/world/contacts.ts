@@ -153,6 +153,8 @@ interface Fresh {
   land: { f: Fighter; energy: number; point: V3 } | null;
   /** The first started pair of a rope episode that may load the tripwire. */
   rope: { joint: number; by: Owner } | null;
+  /** A standing ruler's shin meeting an entity (RulerBodies.legStrike, 9b): the first such pair of the episode. */
+  leg: { f: Fighter; e: Entity; point: V3; n: V3 } | null;
 }
 
 const ZERO: Readonly<V3> = Object.freeze({ x: 0, y: 0, z: 0 });
@@ -240,7 +242,7 @@ export class ContactSystem {
       }
       if (ep.touching === 0) {
         ep.episodeStart = tick;
-        const fr: Fresh = { ep, pairs: [], bounce: tick <= ep.cooldownUntil, creature: [], entity: [], land: null, rope: null };
+        const fr: Fresh = { ep, pairs: [], bounce: tick <= ep.cooldownUntil, creature: [], entity: [], land: null, rope: null, leg: null };
         fresh.push(fr);
         freshByEp.set(ep, fr);
       } else this.unscored.continuing++;
@@ -274,8 +276,10 @@ export class ContactSystem {
       this.evaluate(w, fr, fighters, held, tick);
     }
 
-    // 9b: creatures (HP, Δv, knockdown, launch, KO; rulers: wounds), reactions queued for the next 4d, impact trips.
+    // 9b: creatures (HP, Δv, knockdown, launch, KO; rulers: wounds), reactions queued for the next 4d, impact trips;
+    // then a standing ruler's shin striking an obstacle (§4.7 step 6 for the leg, before 9c can break what it struck).
     for (const fr of fresh) for (const h of fr.creature) this.applyCreatureHit(w, h);
+    for (const fr of fresh) if (fr.leg) w.rulers.legStrike(fr.leg.f, fr.leg.e, fr.leg.point, fr.leg.n);
     // 9c: entities (integrity; a notched tree's fall-direction moment), after the creature damage (SPEC:344).
     for (const fr of fresh) for (const h of fr.entity) this.applyEntityHit(w, h);
     // 9d: rope sensors → tripwires (a plain call: a joint store without the method fails loudly, never silently).
@@ -503,6 +507,9 @@ export class ContactSystem {
         [sb, sa, neg(g.n), 1],
       ];
       for (const [self, other, n, k] of sides) {
+        if (!fr.leg && self.f?.ruler && other.e && (self.bone === 'shinL' || self.bone === 'shinR') && self.f.state !== 'tripped') {
+          fr.leg = { f: self.f, e: other.e, point: { ...g.point }, n: { ...n } };
+        }
         if (self.kind === 'creature' && self.f && self.bone) {
           const hit = this.creatureHit(self, other, n, vn, s, sensor, g.point);
           const E = hit.impact.energy;
@@ -723,8 +730,9 @@ export class ContactSystem {
     // Impact trip (§4.7 step 9, SPEC:305): a blocking-class impactor (≥ impactTripMinKg, or static) on a leg between
     // ankle and knee faster than tripSpeed along the normal trips a standing ruler; smaller momenta are dropped. It runs
     // on scored impacts only. A static impactor meets a standing ruler only by the ruler's own motion, so a blunt one is
-    // a brush (v_safe 14.07 m/s takes its energy) and RulerMover's obstacle trip (§4.7 step 6.2) is what trips on it; a
-    // sharp one keeps its energy (SPEC:415), is scored, and trips here.
+    // a brush (v_safe 14.07 m/s takes its energy) and the obstacle trip (§4.7 step 6.2: RulerBodies.legStrike for the
+    // shin that meets it, RulerMover's sweep for the body) is what trips on it; a sharp one keeps its energy (SPEC:415),
+    // is scored, and trips here.
     if (standingRuler && f.state !== 'ko' && shinBand(f, i.bone, i.point)) {
       const T = RULER_BODY_TUNING;
       if ((i.impactorMass === Infinity || i.impactorMass >= T.impactTripMinKg) && i.vn > T.tripSpeed) w.rulers.requestTrip(f, 'impact', i.cause);
