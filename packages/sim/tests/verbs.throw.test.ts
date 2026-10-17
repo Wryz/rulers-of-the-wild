@@ -178,6 +178,8 @@ describe('speeds (§5.11)', () => {
     const e = ent(w, id);
     expect(e.state).toBe('free');
     expect(e.thrown?.by).toBe(p.id);
+    // Released by its thrower (§4.3) as it leaves the hands, as the projectile path is.
+    expect(e.releasedBy?.fighter).toBe(p.id);
     expect(e.credit).toEqual(['p1']);
     expect(p.inventory!.hands).toBeNull();
     expect(p.load).toBeNull();
@@ -334,6 +336,15 @@ describe('aim, the projectile’s entity, and held until first contact (§5.11, 
     expect(thrownEntityOf(loaded, loaded.combat.projectiles[0])).toBe(id);
     expect(loaded.entities.get(id)?.state).toBe('projectile');
 
+    // Another of the thrower's objects in flight, released a tick earlier (a stand-in: its state and `thrown` are all
+    // the link reads). The projectile is the spear alone: the link is its exact release tick, never the nearest one.
+    const decoy = spawnStone(w, { p: { x: -3, y: 0.1, z: -3 }, mass: 1 });
+    w.step();
+    expect(w.combat.projectiles).toEqual([pr]);
+    w.entities.setState(ent(w, decoy), 'projectile');
+    ent(w, decoy).thrown = { by: p.id, tick: w.tick - pr.age };
+    expect(thrownEntityOf(w, pr)).toBe(id);
+
     // Back as a body (what P15's landing does): the same id, its axis along the flight, its grip at the projectile's.
     expect(landThrown(w, pr)).toBe(id);
     const e = ent(w, id);
@@ -349,8 +360,12 @@ describe('aim, the projectile’s entity, and held until first contact (§5.11, 
     expect(Math.hypot(e.vel.lin.x - pr.vel.x, e.vel.lin.y - pr.vel.y, e.vel.lin.z - pr.vel.z)).toBeLessThan(1e-4);
     // Still held (D-31) until its first contact.
     expect(e.thrown?.by).toBe(p.id);
-    // Nothing else is in flight for it.
+    // Nothing else is in flight for it: a second landing of the same projectile is a no-op (it never takes the other
+    // object in flight).
     expect(thrownEntityOf(w, pr)).toBeNull();
+    expect(landThrown(w, pr)).toBeNull();
+    expect(ent(w, decoy).state).toBe('projectile');
+    expect(ent(w, decoy).thrown).toEqual({ by: p.id, tick: w.tick - pr.age });
   });
 });
 

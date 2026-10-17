@@ -1,9 +1,11 @@
 // Place (docs/M1-DESIGN.md §5.7; package P17), headless, through commands only: a point-up stake driven into dirt and
-// anchored (D-19), free on a boulder; a blunt stick set upright free unless `drive: 1`; lying things on a flat face, a
-// branch across a 2 m trench resting on its ends; the AC-2(a) lean (§11.2(a): a 40 kg, 5 m log placed sloped onto a
-// free 2.4 m prop rests on its lower end and the prop's top at 32.9° and stays set 120 s awake); the refusals (no second
-// support, overlap, reach, hands); the work action, its step-in and its re-validation at actAt (RF-15); releasedBy and
-// credit; the noise of a driven stake.
+// anchored (D-19), free on a boulder; a blunt stick set upright free unless `drive: 1`; which end goes up (D-49: the
+// point's within headZoneM, else the heavier end down); upright and lying under an overhang (the casts never start above
+// it); lying things on a flat face, a branch across a 2 m trench resting on its ends; the AC-2(a) lean (§11.2(a): a
+// 40 kg, 5 m log placed sloped onto a free 2.4 m prop rests on its lower end and the prop's top at 32.9° and stays set
+// 120 s awake), a lean from a pit's floor onto its rim (terrain under both), a stake driven sloped; the refusals (no
+// second support, overlap, reach, hands); the work action, its step-in and its re-validation at actAt (RF-15);
+// releasedBy and credit; the noise of a driven stake.
 //
 // Scene numbers (masses, lengths, positions, tick counts) are test constants, never tuning (§9).
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -11,7 +13,7 @@ import { COMMAND_STEPS, toCm, type VerbCommand } from '../src/sim/commands';
 import { resetTuning } from '../src/tuning/registry';
 import { prismRForMass, spawnBox, spawnGrass, spawnLog, spawnStick, spawnStone, spawnTree } from '../src/world/factory';
 import { PHYSICS_TUNING, physicsReady } from '../src/world/physics';
-import type { Entity, V3, WorldEvent } from '../src/world/types';
+import type { Anchor, Entity, JointRecord, V3, WorldEvent } from '../src/world/types';
 import { axisPitch, PLACE_TUNING, planPlace, shrinkShape } from '../src/world/verbs/place';
 import { verbGeom } from '../src/world/verbs/tools';
 import { TOOL_TUNING, VERB_TUNING } from '../src/world/verbs/tuning';
@@ -35,6 +37,7 @@ afterEach(() => {
   for (const w of live.splice(0)) w.dispose();
   resetTuning('VERB_TUNING');
   resetTuning('PLACE_TUNING');
+  vi.restoreAllMocks();
 });
 
 // ---------------------------------------------------------------------------
@@ -227,6 +230,166 @@ describe('upright: stakes driven into soft ground, free otherwise (§5.7 step 4,
       // Free: set placeDropM up and come to rest on the ground, a prop that a kick or a yank can take out.
       else expect(lowestY(e), label).toBeGreaterThan(-0.01);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Which end goes up (D-49): the sharpest point's end (within headZoneM of it), else the heavier end down
+// ---------------------------------------------------------------------------
+
+/** A stand-in for P10's joint store (a stub until then): real lash JointRecords, listed on their entities (sorted). */
+function standInLashes(w: World): void {
+  const recs = new Map<number, JointRecord>();
+  vi.spyOn(w.joints, 'get').mockImplementation((id) => recs.get(id));
+  vi.spyOn(w.joints, 'all').mockImplementation(() => [...recs.values()].sort((x, y) => x.id - y.id));
+  vi.spyOn(w.joints, 'lash').mockImplementation((a: Anchor, b: Anchor, rope, credit) => {
+    const id = w.ids.joint.take();
+    recs.set(id, { id, kind: 'lash', a, b, rope, breakEnergyJ: Infinity, axis: null, limits: null, motor: null, holdsBend: null, tension: [0, 0, 0], pullN: 0, credit });
+    for (const end of [a, b]) {
+      const e = end.entity === null ? undefined : w.entities.get(end.entity);
+      if (e) e.joints = [...e.joints, id].sort((x, y) => x - y);
+    }
+    return id;
+  });
+}
+
+describe('which end goes up (D-49)', () => {
+  it('no sharp point: the heavier end goes down; a stick with a stone lashed to either end stands on its stone end', async () => {
+    for (const end of [1, -1] as const) {
+      const w = await make();
+      const p = w.player!;
+      standInLashes(w);
+      // A 1.2 m stick along x (its local +y at world +x), a blunt 1.5 kg stone lashed just past its `end` end.
+      const L = 1.2;
+      const id = stick(w, L, 0.03, 2, 2);
+      const stone = spawnStone(w, { p: { x: 2 + end * (L / 2 + 0.08), y: 0.12, z: 2 }, mass: 1.5 });
+      w.joints.lash({ entity: id, local: { x: 0, y: (end * L) / 2, z: 0 } }, { entity: stone, local: { x: 0, y: 0, z: 0 } }, { entity: 0, lengthM: 1 }, []);
+      expect(ent(w, id).sharpPoints).toEqual([]);
+      expect(ent(w, stone).sharpPoints).toEqual([]);
+      w.step();
+      hold(w, id);
+      expect(ent(w, stone).state).toBe('held');
+      const rel = verbGeom.relative(ent(w, id).pose, ent(w, stone).pose);
+      const plan = planPlace(w, p, place(w, { x: 0, y: 0.9, z: 1.2 }, 0, 64, 0));
+      const label = `stone at the ${end > 0 ? '+' : '−'} end`;
+      expect(plan.ok, label).toBe(true);
+      if (!plan.ok) continue;
+      // The stone's end is down: the stick's local `end` axis points down, the stone under the stick's centre.
+      expect(verbGeom.dirToWorld(plan.plan.pose, { x: 0, y: end, z: 0 }).y, label).toBeLessThan(-0.999);
+      expect(verbGeom.compose(plan.plan.pose, rel).p.y, label).toBeLessThan(plan.plan.pose.p.y - L / 2 + 0.01);
+      // Blunt: set down free (no drive by default), whatever is lowest on the ground.
+      expect(plan.plan.driven, label).toBe(false);
+      expect(plan.plan.supports, label).toEqual([{ kind: 'terrain' }]);
+    }
+  });
+
+  it('a sharp point within headZoneM of an end puts that end up (and drives it); one further in is no point at an end', async () => {
+    const L = 1.4;
+    for (const inset of [TOOL_TUNING.headZoneM - 0.1, TOOL_TUNING.headZoneM + 0.1]) {
+      const w = await make();
+      const p = w.player!;
+      const id = stick(w, L, 0.04, 2, 2);
+      // A point inset from the +y end, leading out of it (as Shape leaves one, but not at the very end).
+      ent(w, id).sharpPoints = [{ local: { x: 0, y: L / 2 - inset, z: 0 }, dir: { x: 0, y: 1, z: 0 }, sharpness: 0.6 }];
+      w.step();
+      hold(w, id);
+      const plan = planPlace(w, p, place(w, { x: 0, y: L / 2, z: 1.2 }, 0, 64));
+      const within = inset <= TOOL_TUNING.headZoneM;
+      const label = `inset ${inset.toFixed(2)} m`;
+      expect(plan.ok, label).toBe(true);
+      if (!plan.ok) continue;
+      // Within: the point's end up, a point-up stake driven into the dirt by default. Beyond: the stick is uniform, so
+      // its tie-break end (local −y) goes up and nothing is driven.
+      expect(verbGeom.dirToWorld(plan.plan.pose, { x: 0, y: 1, z: 0 }).y, label).toBeCloseTo(within ? 1 : -1, 6);
+      expect(plan.plan.driven, label).toBe(within);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Under an overhang (§5.7 step 4's free prop under a log; rule 3: it goes where its ghost shows)
+// ---------------------------------------------------------------------------
+
+describe('under an overhang: the casts start no higher than the room over the commanded pose (rule 3)', () => {
+  /** A fixed dry-wood beam across x over (0, z), its underside at `bottom`. */
+  const beam = (w: World, z: number, bottom: number): number =>
+    spawnBox(w, { p: { x: 0, y: bottom + 0.05, z }, size: [1.2, 0.1, 0.4], material: 'dryWood', state: 'fixed', look: 'box' });
+
+  it('a blunt 0.8 m stick set upright (drive 0) with 0.1-0.45 m of room under a beam stands on the ground under it', async () => {
+    for (const room of [0.1, 0.3, 0.45]) {
+      const w = await make();
+      const p = w.player!;
+      const z = 1.2;
+      const b = beam(w, z, 0.8 + room);
+      const id = stick(w, 0.8, 0.03, 2, 2);
+      w.step();
+      hold(w, id);
+      const label = `room ${room} m`;
+      const plan = planPlace(w, p, place(w, { x: 0, y: 0.4, z }, 0, 64, 0));
+      expect(plan, label).toEqual({ ok: true, plan: expect.objectContaining({ mode: 'upright', driven: false, supports: [{ kind: 'terrain' }] }) });
+      if (!plan.ok) continue;
+      // Where it was put, placeDropM up: not on the beam.
+      expect(plan.plan.pose.p.y, label).toBeCloseTo(0.4 + VERB_TUNING.placeDropM, 3);
+      const evs = untilFree(w);
+      expect(verbs(evs, 'place'), label).toEqual([expect.objectContaining({ ok: true, entity: id })]);
+      run(w, 30);
+      const e = ent(w, id);
+      expect(e.state, label).toBe('free');
+      expect(Math.abs(axisY(e).y), label).toBeGreaterThan(0.999);
+      expect(lowestY(e), label).toBeGreaterThan(-0.005);
+      expect(lowestY(e), label).toBeLessThan(0.005);
+      // Its top under the beam's underside.
+      const under = w.queries.castRay({ x: 0, y: 0.5, z }, { x: 0, y: 1, z: 0 }, 2, { terrain: false, entities: 'all', exclude: { entities: [id] } });
+      expect(under?.owner, label).toEqual({ kind: 'entity', id: b });
+      expect(e.pose.p.y + 0.4, label).toBeLessThan(under!.point.y);
+    }
+  });
+
+  it('a stick laid on the ground with 0.1-0.45 m of room under a beam lies on the ground where it was put', async () => {
+    const r = 0.03;
+    const inradius = r * Math.cos(Math.PI / 8);
+    for (const room of [0.1, 0.3, 0.45]) {
+      const w = await make();
+      const p = w.player!;
+      const z = 1.2;
+      beam(w, z, 0.06 + r + room);
+      const id = stick(w, 1.0, r, 2, 2);
+      w.step();
+      hold(w, id);
+      const label = `room ${room} m`;
+      const plan = planPlace(w, p, place(w, { x: 0, y: 0.06, z }, 64, 0));
+      expect(plan, label).toEqual({ ok: true, plan: expect.objectContaining({ mode: 'lying', supports: [{ kind: 'terrain' }] }) });
+      if (!plan.ok) continue;
+      // On a flat face on the ground, placeDropM up (the commanded centre was 0.06 m up): not on the beam.
+      expect(plan.plan.pose.p.y, label).toBeCloseTo(inradius + VERB_TUNING.placeDropM, 3);
+      expect(verbs(untilFree(w), 'place'), label).toEqual([expect.objectContaining({ ok: true, entity: id })]);
+      run(w, 30);
+      expect(lowestY(ent(w, id)), label).toBeGreaterThan(-0.005);
+      expect(lowestY(ent(w, id)), label).toBeLessThan(0.005);
+    }
+  });
+
+  it('put up into a beam it is never lifted through onto it: on the ground it is blocked, above the ground it is set down under it; put on the beam it rests there', async () => {
+    const w = await make();
+    const p = w.player!;
+    const r = 0.03;
+    const inradius = r * Math.cos(Math.PI / 8);
+    const high = beam(w, 1.2, 0.75);
+    const low = beam(w, -1.2, 0.25);
+    const id = stick(w, 0.8, r, 2, 2);
+    w.step();
+    hold(w, id);
+    // Upright on the ground with its top 0.05 m into the high beam's underside: in the way.
+    expect(refusal(w, place(w, { x: 0, y: 0.4, z: 1.2 }, 0, 64, 0))).toBe('blocked');
+    // Lying through the low beam's lower half (0.25-0.31 m up): set down where a cast down stops, on the ground under it.
+    const under = planPlace(w, p, place(w, { x: 0, y: 0.28, z: -1.2 }, 64, 0));
+    expect(under).toEqual({ ok: true, plan: expect.objectContaining({ mode: 'lying', supports: [{ kind: 'terrain' }] }) });
+    if (under.ok) expect(under.plan.pose.p.y).toBeCloseTo(inradius + VERB_TUNING.placeDropM, 3);
+    // Lying on the high beam's top (0.85 m up): it rests on the beam.
+    const on = planPlace(w, p, place(w, { x: 0, y: 0.9, z: 1.2 }, 64, 0));
+    expect(on).toEqual({ ok: true, plan: expect.objectContaining({ mode: 'lying', supports: [{ kind: 'entity', id: high }] }) });
+    if (on.ok) expect(on.plan.pose.p.y).toBeCloseTo(0.85 + inradius + VERB_TUNING.placeDropM, 3);
+    void low;
   });
 });
 
@@ -458,6 +621,72 @@ describe('sloped (§5.7 step 2, §11.2(a))', () => {
     const c2 = { ...cmd, pitch: Math.round((34 / 360) * COMMAND_STEPS) };
     expect(refusal(w, c2)).toBe('noSupport');
   });
+
+  it('the terrain is a support under the body: a log leaned from a pit’s floor onto its rim rests on both (§5.0, rule 3)', async () => {
+    for (const x0 of [-2.5, -2, -1.5]) {
+      const w = await make(43);
+      const p = w.player!;
+      // A pit 3 m deep: its floor from x −3.25 to −0.25 (z −0.75 to 0.75), its rim at x = 0.
+      for (let x = -3; x <= -0.5 + 1e-9; x += 0.25) for (let z = -0.5; z <= 0.5 + 1e-9; z += 0.25) w.terrain.lower(x, z, 20);
+      expect(w.terrain.heightAt(-1, 0)).toBeCloseTo(-3, 6);
+      expect(w.terrain.heightAt(0, 0)).toBeCloseTo(0, 6);
+      const L = 5;
+      const r = prismRForMass(40, L, 550, PHYSICS_TUNING.logFacets);
+      const log = spawnLog(w, { p: { x: 3, y: r + 0.01, z: 3 }, length: L, mass: 40 });
+      w.step();
+      w.teleport(p, 1.4, 0, -Math.PI / 2);
+      w.step();
+      hold(w, log);
+      // The client's estimate: the lower end's underside corner on the floor at x0, the underside through the rim's edge.
+      const want = Math.atan2(3, -x0);
+      const steps = Math.round((want / (2 * Math.PI)) * COMMAND_STEPS);
+      const th = (steps / COMMAND_STEPS) * 2 * Math.PI;
+      const rho = r * Math.cos(Math.PI / 6);
+      const lowEnd = { x: x0 - rho * Math.sin(th), y: -3 + 0.02 + rho * Math.cos(th), z: 0 };
+      const centre = { x: lowEnd.x + (Math.cos(th) * L) / 2, y: lowEnd.y + (Math.sin(th) * L) / 2, z: 0 };
+      const label = `lower end at x ${x0}`;
+      const plan = planPlace(w, p, place(w, centre, 64, steps));
+      expect(plan, label).toEqual({ ok: true, plan: expect.objectContaining({ mode: 'sloped', driven: false, supports: [{ kind: 'terrain' }, { kind: 'terrain' }] }) });
+      if (!plan.ok) continue;
+      expect(Math.abs(deg(plan.plan.pitch - want)), label).toBeLessThan(0.5);
+      const evs = untilFree(w);
+      expect(verbs(evs, 'place'), label).toEqual([expect.objectContaining({ ok: true, entity: log })]);
+      run(w, 120);
+      // It stays leaned: on the floor and the rim, at the angle it was set at.
+      const e = ent(w, log);
+      expect(e.state, label).toBe('free');
+      expect(Math.abs(deg(axisPitch(e) - plan.plan.pitch)), label).toBeLessThan(1);
+      expect(lowestY(e), label).toBeGreaterThan(-3.01);
+      expect(lowestY(e), label).toBeLessThan(-2.97);
+    }
+  });
+
+  it('a point-up stake placed sloped on dirt is driven along its axis and anchored, with no second support', async () => {
+    const w = await make();
+    const p = w.player!;
+    const L = 1.4;
+    const id = stick(w, L, 0.05, 2, 2, 0.6);
+    w.step();
+    hold(w, id);
+    // 45° up toward +z, its lower end's centre on the ground at (0, 0, 1).
+    const th = Math.PI / 4;
+    const centre = { x: 0, y: (Math.sin(th) * L) / 2, z: 1 + (Math.cos(th) * L) / 2 };
+    const plan = planPlace(w, p, place(w, centre, 0, 32));
+    expect(plan).toEqual({ ok: true, plan: expect.objectContaining({ mode: 'sloped', driven: true, stake: id, supports: [{ kind: 'terrain' }] }) });
+    const evs = untilFree(w);
+    expect(verbs(evs, 'place')).toEqual([expect.objectContaining({ ok: true, entity: id })]);
+    const e = ent(w, id);
+    expect(e.state).toBe('anchored');
+    expect(w.entities.isAnchored(e)).toBe(true);
+    // At the commanded 45°, the point up, the lower end stakeAnchorDepthM along the axis past where the axis meets the ground.
+    expect(deg(axisPitch(e))).toBeCloseTo(45, 4);
+    expect(verbGeom.dirToWorld(e.pose, e.sharpPoints[0].dir).y).toBeCloseTo(Math.SQRT1_2, 6);
+    const lower = verbGeom.pointToWorld(e.pose, { x: 0, y: -L / 2, z: 0 });
+    const depth = VERB_TUNING.stakeAnchorDepthM;
+    expect(lower.y).toBeCloseTo(-depth * Math.sin(th), 3);
+    expect(lower.z).toBeCloseTo(1 - depth * Math.cos(th), 3);
+    expect(lower.x).toBeCloseTo(0, 3);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -506,7 +735,15 @@ describe('refusals (§5.7 steps 1-3, §5.0)', () => {
     const noAt = cmdAt({ x: 0, y: 0.1, z: 1 });
     delete noAt.at;
     expect(refusal(w, noAt)).toBe('noTarget');
-    expect(refusal(w, cmdAt({ x: 0, y: 0.1, z: 1 }))).toBeNull();
+    // Along z at x = 0 the stick passes through the 120 kg log (along x, to x = 0.5, its top 0.29 m up): put there, it
+    // is in the way (not lifted onto the log: rule 3); put on the log's top, it rests across it; put clear of it, on the
+    // ground.
+    const logTop = w.queries.castRay({ x: 0, y: 3, z: 1.2 }, { x: 0, y: -1, z: 0 }, 5, { terrain: false, entities: 'all' });
+    expect(logTop?.owner).toEqual({ kind: 'entity', id: heavy });
+    expect(refusal(w, cmdAt({ x: 0, y: 0.1, z: 1 }))).toBe('blocked');
+    const across = planPlace(w, p, cmdAt({ x: 0, y: logTop!.point.y + 0.06, z: 1 }));
+    expect(across).toEqual({ ok: true, plan: expect.objectContaining({ mode: 'lying', supports: [{ kind: 'entity', id: heavy }] }) });
+    expect(refusal(w, cmdAt({ x: 0.9, y: 0.1, z: 1 }))).toBeNull();
     // In the air with nothing under it within reach: refused.
     expect(refusal(w, cmdAt({ x: 0, y: 1.4, z: 1 }))).toBe('noSupport');
     verb(w, { verb: 'place', at: toCm({ x: 0, y: 0.1, z: 3.6 }), yaw: 0, pitch: 0 });
@@ -553,6 +790,5 @@ describe('the work action (§5.7 step 5, §5.0)', () => {
     expect(shrinkShape({ kind: 'box', hx: 0.5, hy: 0.25, hz: 0.1 }, s)).toEqual({ kind: 'box', hx: 0.48, hy: 0.23, hz: 0.08 });
     const hull = { kind: 'hull' as const, points: [1, 0, 0, -1, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 1, 0, 0, -1] };
     expect(shapeVolume(shrinkShape(hull, s))).toBeLessThan(shapeVolume(hull));
-    expect(TOOL_TUNING.headZoneM).toBeGreaterThan(0);
   });
 });

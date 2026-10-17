@@ -12,27 +12,41 @@
 // thinnest local axis across the long one faces down (a prism lies on a flat face, as LYING_ALONG_X lays it). Then:
 // - Reach: the placed shape's nearest point within placeReachM horizontally and placeReachVertM vertically of the
 //   player's body (feet to chest), at the commanded pose.
-// - Lying: the shape is cast straight down from supportProbeUpM above the commanded pose by up to supportProbeUpM +
-//   placeSupportM and set where the cast stops, placeDropM above it: it rests on whatever is under it, both ends of a
-//   branch across a trench included. INTERPRETATION (§5.7 step 2 "lying: from both ends"): one cast of the whole shape
-//   instead of a ray from each end, so a wide bundle laid across sparse bearers rests on them (rays from its two ends
-//   would pass between the bearers); a shape with nothing under it within reach is refused 'noSupport'.
-// - Upright: a downward ray from supportProbeUpM above the lower end finds the support within placeSupportM below it
-//   ('noSupport' otherwise). Driven: the lower end goes stakeAnchorDepthM under that support; else the shape is set
-//   where a downward cast stops, placeDropM above it.
-// - Sloped: the lower end's support as upright; then the shape (shrunk by placeShrinkM) is cast straight down from
-//   supportProbeUpM above the commanded pose, ignoring the lower end's support: it must meet another support (the top of
-//   a prop, a rock, a log) beyond the held object's centre of mass along its axis (one nearer the lower end would
-//   see-saw it off), else 'noSupport'. The object then rests on its lower end and that support: its lower-end underside
-//   corner is pinned placeDropM above the lower support and the pitch is the one whose underside plane passes
-//   placeDropM above the support point (the command's quantised pitch is the client's estimate; the sim's is exact).
-//   INTERPRETATIONS: §5.7 casts "from the commanded pose by up to 0.6 m"; here the cast starts supportProbeUpM higher
-//   (as the lower end's ray does), so a client estimate that sinks the shape a little into its support still finds it.
-//   The centre-of-mass condition is added by rule 3 (a lean that would see-saw off is not offered as resting). A sloped
-//   placement that is driven (an angled stake) needs no second support: it is anchored.
+// - The lift (every downward ray and cast below starts this high above the commanded pose, so a client estimate that
+//   sinks the object a little into its support still finds it): supportProbeUpM (§5.7's "from 0.5 m above"), but never
+//   higher than the room over the commanded pose, so nothing is found on top of an overhang the object is put under
+//   (rule 3: a stick set under a log goes under it, as its ghost shows). The room is a cast of the shape straight up,
+//   entities only (the terrain is a heightfield: none of it is over anything). An entity the commanded pose already
+//   overlaps is a support it sinks into when the least-penetration direction lifts it out (Rapier's normal of the struck
+//   collider there points up) and is looked past; one it overlaps from beneath or beside leaves no room. The casts down
+//   look past what they start in when it is over or beside them (the clearance test at the resting pose decides whether
+//   it is in the way: an object put up into a beam with ground under it is set down under the beam, one already on the
+//   ground is 'blocked'), and stop at what they start in when it is under them ('blocked': sunk deeper than the lift).
+// - Lying: the shape is cast straight down from the lift by up to the lift + placeSupportM and set where the cast stops,
+//   placeDropM above it: it rests on whatever is under it, both ends of a branch across a trench included.
+//   INTERPRETATION (§5.7 step 2 "lying: from both ends"): one cast of the whole shape instead of a ray from each end, so
+//   a wide bundle laid across sparse bearers rests on them (rays from its two ends would pass between the bearers); a
+//   shape with nothing under it within reach is refused 'noSupport'.
+// - Upright: a downward ray from supportProbeUpM above the lower end (within its own length plus the room over it)
+//   finds the support within placeSupportM below the lower end ('noSupport' otherwise). Driven: the lower end goes
+//   stakeAnchorDepthM under that support; else the shape is set where a downward cast from the lift stops, placeDropM
+//   above it (on the support, or on whatever else is under its base first).
+// - Sloped: the lower end's support as upright (a ray under its underside corner, from the lift); then the part of the
+//   held object beyond its centre of mass along its axis (shrunk by placeShrinkM) is cast straight down from its own lift
+//   by up to the lift + placeSupportM, terrain included: it must meet a support there (the top of a prop, a rock, a log,
+//   a pit's rim or a bank), else 'noSupport'; only that part is cast, so the ground under or beside the lower end is
+//   never taken for it, and a support nearer the lower end than the centre of mass (which would see-saw it off) is never
+//   found. The object then rests on its lower end and that support: its lower-end underside corner is pinned placeDropM
+//   above the lower support and the pitch is the one whose underside plane passes placeDropM above the support point
+//   (the command's quantised pitch is the client's estimate; the sim's is exact); that pose must keep the support beyond
+//   the centre of mass and pass through no ground ('blocked'). INTERPRETATIONS: §5.7 casts "the shape … from the
+//   commanded pose by up to 0.6 m"; here the part beyond the centre of mass is cast, from the lift. The centre-of-mass
+//   condition is added by rule 3 (a lean that would see-saw off is not offered as resting). A sloped placement that is
+//   driven (an angled stake) needs no second support: it is anchored.
 // - Clearance: every member, shrunk by placeShrinkM, overlaps no entity (other than its supports) and no fighter's
 //   damage colliders, the placer's own excepted (his hands are at it), and no fighter's capsule, the placer's included
-//   (a log through his own body is refused 'blocked'). Terrain is never tested (a driven end is in it).
+//   (a log through his own body is refused 'blocked'). Terrain is not tested (a driven end is in it; a lying or upright
+//   object is set where a cast that meets the terrain stops, and a sloped one is tested for it above).
 //
 // The work action (§5.7 step 5): placeFramesLying (24) frames, or placeFramesDriven (60) when driven, pose `workLow`;
 // the player turns to and steps in toward the placed shape's nearest point; the object is set down at actFrac of the
@@ -67,7 +81,7 @@ export const PLACE_TUNING = defineTuning(
   {
     supportProbeUpM: {
       unit: 'm',
-      source: 'NEW: §5.7 step 2 ("a downward ray from 0.5 m above the lower end"); the place casts start this high too',
+      source: 'NEW: §5.7 step 2 ("a downward ray from 0.5 m above the lower end"); the place casts start this high too, or as high as the room over the commanded pose allows',
       min: 0,
     },
     actFrac: { unit: '× the work action', source: 'NEW: §5.7 step 5 (the object is set down at the end of the push down, then the body rises)', min: 0, max: 1 },
@@ -88,7 +102,7 @@ export interface PlacePlan {
   driven: boolean;
   /** The member driven in and anchored (the longest one, whose axis is the held object's), or null. */
   stake: number | null;
-  /** What it rests on (the lower end's support first; sloped: then the second support), in that order. */
+  /** What it rests on (the lower end's support first; sloped: then the second support, possibly the terrain twice). */
   supports: Owner[];
   /** The placed shape's point nearest the player at the commanded pose: the work action turns and steps in toward it. */
   faceAt: V3;
@@ -106,6 +120,20 @@ const DOWN: Readonly<V3> = Object.freeze({ x: 0, y: -1, z: 0 });
 const IDENTITY: Readonly<Pose3> = Object.freeze({ p: { x: 0, y: 0, z: 0 }, q: { x: 0, y: 0, z: 0, w: 1 } });
 const v = (x: number, y: number, z: number): V3 => ({ x, y, z });
 const lift = (p: Pose3, dy: number): Pose3 => ({ p: { x: p.p.x, y: p.p.y + dy, z: p.p.z }, q: { ...p.q } });
+/**
+ * m: the gap the lift keeps under whatever is over the commanded pose, so a cast down from it doesn't start touching that.
+ * A numerical device of the casts (Rapier's single-precision times of impact), not a starting value: any few-ulp margin
+ * works, and a millimetre is below anything a player sees.
+ */
+const LIFT_GAP_M = 1e-3;
+/**
+ * The upward component a struck collider's normal needs, at a cast that starts in it, for it to count as under the shape
+ * (a support the commanded pose sinks into). A numerical device: Rapier's normals are single precision, so a sideways
+ * normal can carry ±1e-7 of y.
+ */
+const SUPPORT_NORMAL_MIN_Y = 1e-6;
+/** m: a cut piece thinner than this across the cut is no solid a cast can use (a vertex grazing the plane). Numerical. */
+const PIECE_MIN_M = 1e-3;
 
 /** The vertices bounding a shape in its local frame (a round shape: its extreme points along each axis). */
 function shapeVertices(s: Shape): V3[] {
@@ -312,17 +340,17 @@ function softSupport(w: World, o: Owner): boolean {
 }
 
 /**
- * The support under (x, z) below height `fromY` (§5.7 step 2): a downward ray from supportProbeUpM above it finds a
- * surface within placeSupportM below it; an entity the ray starts inside is an obstacle and is looked past. Null: none.
+ * The support under (x, z) below height `fromY` (§5.7 step 2): a downward ray from `up` (≤ supportProbeUpM) above it
+ * finds a surface within placeSupportM below it; an entity the ray starts inside is an obstacle and is looked past.
+ * Null: none.
  */
-function supportBelow(w: World, x: number, z: number, fromY: number, exclude: readonly number[]): { y: number; owner: Owner } | null {
-  const probe = PLACE_TUNING.supportProbeUpM;
-  const start = fromY + probe;
-  // A lower end more than the probe under the ground has no support it could be set on.
+function supportBelow(w: World, x: number, z: number, fromY: number, up: number, exclude: readonly number[]): { y: number; owner: Owner } | null {
+  const start = fromY + up;
+  // A lower end deeper than that under the ground has no support it could be set on.
   if (start < w.terrain.heightAt(x, z)) return null;
   const skip = [...exclude];
   for (;;) {
-    const hit = w.queries.castRay(v(x, start, z), DOWN, probe + VERB_TUNING.placeSupportM, { terrain: true, entities: 'all', exclude: { entities: skip } });
+    const hit = w.queries.castRay(v(x, start, z), DOWN, up + VERB_TUNING.placeSupportM, { terrain: true, entities: 'all', exclude: { entities: skip } });
     if (!hit) return null;
     if (hit.toi <= 0 && hit.owner.kind === 'entity') {
       skip.push(hit.owner.id);
@@ -332,18 +360,102 @@ function supportBelow(w: World, x: number, z: number, fromY: number, exclude: re
   }
 }
 
+/** A convex piece of the held object and its pose in the held entity's frame (a member, or the part of one past a cut). */
+interface Part {
+  shape: Shape;
+  rel: Pose3;
+}
+
+/** Every member, shrunk by `shrink`. */
+const wholeParts = (o: Held, shrink: number): Part[] => o.members.map((m) => ({ shape: shrink > 0 ? shrinkShape(m.e.shape, shrink) : m.e.shape, rel: m.rel }));
+
 /**
- * Casts every member (shrunk by `shrink`) straight down from `from` by up to `maxToi` m: the first thing met, or null.
- * `toi` 0: a member starts inside something.
+ * The held object (every member shrunk by `shrink`) cut by the plane through `origin` square to `n` (the held entity's
+ * frame), the side n points to: a member wholly on it is kept as it is; one the plane crosses becomes the hull of its
+ * vertices on that side and of the points where the segments between its vertices on either side cross the plane (a
+ * superset of the section's corners, so the hull is the cut piece). A round member is cut as the polytope of its extreme
+ * points (no M1 entity is round).
  */
-function castDown(w: World, o: Held, from: Pose3, maxToi: number, shrink: number, terrain: boolean, exclude: readonly number[]): { toi: number; point: V3; owner: Owner } | null {
-  let best: { toi: number; point: V3; owner: Owner } | null = null;
-  for (const m of memberPoses(o, from)) {
+function partsBeyond(o: Held, shrink: number, origin: V3, n: V3): Part[] {
+  const out: Part[] = [];
+  for (const m of o.members) {
     const shape = shrink > 0 ? shrinkShape(m.e.shape, shrink) : m.e.shape;
-    const hit = w.queries.castShape(shape, m.pose, DOWN, maxToi, { terrain, entities: 'all', exclude: { entities: [...exclude] } });
-    if (hit && (!best || hit.toi < best.toi)) best = { toi: hit.toi, point: hit.point, owner: hit.owner };
+    const pts = shapeVertices(shape).map((p) => pointToWorld(m.rel, p));
+    const s = pts.map((p) => dot(sub(p, origin), n));
+    const far = Math.max(...s);
+    if (!(far >= PIECE_MIN_M)) continue;
+    if (Math.min(...s) >= 0) {
+      out.push({ shape, rel: m.rel });
+      continue;
+    }
+    const cut: V3[] = [];
+    for (let i = 0; i < pts.length; i++) {
+      if (s[i] < 0) continue;
+      cut.push(pts[i]);
+      for (let j = 0; j < pts.length; j++) {
+        if (s[j] >= 0) continue;
+        cut.push(add(pts[i], scale(sub(pts[j], pts[i]), s[i] / (s[i] - s[j]))));
+      }
+    }
+    const c = scale(cut.reduce((a, p) => add(a, p), v(0, 0, 0)), 1 / cut.length);
+    const points: number[] = [];
+    for (const p of cut) points.push(p.x - c.x, p.y - c.y, p.z - c.z);
+    out.push({ shape: { kind: 'hull', points }, rel: { p: c, q: { x: 0, y: 0, z: 0, w: 1 } } });
+  }
+  return out;
+}
+
+/**
+ * Casts every part with the held entity at `from` along `dir` by up to `maxToi` m: the first thing met, or null. `toi`
+ * 0: a part starts inside something (`normal`: the struck collider's, Rapier's least-penetration direction there).
+ */
+function castParts(w: World, parts: readonly Part[], from: Pose3, dir: V3, maxToi: number, terrain: boolean, exclude: readonly number[]): { toi: number; point: V3; normal: V3; owner: Owner } | null {
+  let best: { toi: number; point: V3; normal: V3; owner: Owner } | null = null;
+  for (const part of parts) {
+    const hit = w.queries.castShape(part.shape, compose(from, part.rel), dir, maxToi, { terrain, entities: 'all', exclude: { entities: [...exclude] } });
+    if (hit && (!best || hit.toi < best.toi)) best = { toi: hit.toi, point: hit.point, normal: hit.normal, owner: hit.owner };
   }
   return best;
+}
+
+/**
+ * How high the casts start over the commanded pose `pose` (see the header): supportProbeUpM, or the room over it less
+ * LIFT_GAP_M. The room is a cast of the parts straight up, entities only; an entity they already overlap is looked past
+ * when its normal there points up (a support they sink into), and leaves no room otherwise.
+ */
+function liftOver(w: World, parts: readonly Part[], pose: Pose3, exclude: readonly number[]): number {
+  const probe = PLACE_TUNING.supportProbeUpM;
+  const skip = [...exclude];
+  for (;;) {
+    const hit = castParts(w, parts, pose, UP, probe, false, skip);
+    if (!hit) return probe;
+    if (hit.toi > 0) return Math.max(0, Math.min(probe, hit.toi - LIFT_GAP_M));
+    if (hit.owner.kind === 'entity' && hit.normal.y > SUPPORT_NORMAL_MIN_Y) {
+      skip.push(hit.owner.id);
+      continue;
+    }
+    return 0;
+  }
+}
+
+/**
+ * Casts the parts straight down from `start` by up to `maxToi` m, terrain included: the first thing they come down on,
+ * 'none', or 'blocked'. Something a part starts in is looked past when it is over or beside it (its normal there doesn't
+ * point up; the clearance test at the resting pose decides whether it is in the way), and blocks the place when it is
+ * under it (a support the commanded pose sinks into deeper than the lift, or the ground).
+ */
+function castDown(w: World, parts: readonly Part[], start: Pose3, maxToi: number, exclude: readonly number[]): { toi: number; point: V3; owner: Owner } | 'none' | 'blocked' {
+  const skip = [...exclude];
+  for (;;) {
+    const hit = castParts(w, parts, start, DOWN, maxToi, true, skip);
+    if (!hit) return 'none';
+    if (hit.toi > 0) return hit;
+    if (hit.owner.kind === 'entity' && !(hit.normal.y > SUPPORT_NORMAL_MIN_Y)) {
+      skip.push(hit.owner.id);
+      continue;
+    }
+    return 'blocked';
+  }
 }
 
 /** Clearance (§5.7 step 3): no member, shrunk by placeShrinkM, overlaps an entity or a fighter at `pose`. */
@@ -410,20 +522,25 @@ export function planPlace(w: World, f: Fighter, cmd: VerbCommand): PlaceVerdict 
 
   const drop = VERB_TUNING.placeDropM;
   const probe = PLACE_TUNING.supportProbeUpM;
-  const reachDown = probe + VERB_TUNING.placeSupportM;
+  const below = VERB_TUNING.placeSupportM;
   const depth = VERB_TUNING.stakeAnchorDepthM;
   const wantsDrive = mode !== 'lying' && (cmd.drive === 1 || (cmd.drive === undefined && o.pointUp)) && o.hs.lengthM > depth;
+  // The whole object, and how high its casts start over the commanded pose (never over an overhang).
+  const whole = wholeParts(o, 0);
+  const up = liftOver(w, whole, pose0, ids);
 
-  /** Set down where a downward cast of the whole shape stops, placeDropM above it. */
-  const restOn = (from: Pose3, lower: Owner | null): PlaceVerdict => {
-    const start = lift(from, probe);
-    const hit = castDown(w, o, start, reachDown, 0, true, ids);
-    if (!hit) return no('noSupport');
-    if (hit.toi <= 0) return no('blocked');
+  /** Set down where a downward cast of the whole shape from the lift stops, placeDropM above it. */
+  const restOn = (lower: Owner | null): PlaceVerdict => {
+    const start = lift(pose0, up);
+    const hit = castDown(w, whole, start, up + below, ids);
+    if (hit === 'none') return no('noSupport');
+    if (hit === 'blocked') return no('blocked');
     const pose = lift(start, drop - hit.toi);
     const supports = lower ? [lower] : [];
     if (!lower || hit.owner.kind !== lower.kind || (hit.owner.kind === 'entity' && lower.kind === 'entity' && hit.owner.id !== lower.id)) supports.push(hit.owner);
-    if (!clearAt(w, f, o, pose, [...ids, ...entityIds(supports)])) return no('blocked');
+    // Only what it comes down on is spared the clearance test: the lower end's ray, which may start inside the object's
+    // own length, can meet the top of something the object passes through.
+    if (!clearAt(w, f, o, pose, [...ids, ...entityIds([hit.owner])])) return no('blocked');
     return { ok: true, plan: { mode, pose, pitch: pitch0, driven: false, stake: null, supports, faceAt } };
   };
 
@@ -437,28 +554,31 @@ export function planPlace(w: World, f: Fighter, cmd: VerbCommand): PlaceVerdict 
     return { ok: true, plan: { mode, pose, pitch: pitch0, driven: true, stake: o.longest, supports: [support.owner], faceAt } };
   };
 
-  if (mode === 'lying') return restOn(pose0, null);
+  if (mode === 'lying') return restOn(null);
 
   if (mode === 'upright') {
-    const lower = supportBelow(w, lo0.x, lo0.z, lo0.y, ids);
+    // The ray runs down the object's own axis from at most its length plus the room over it.
+    const lower = supportBelow(w, lo0.x, lo0.z, lo0.y, Math.min(probe, o.hs.lengthM + up), ids);
     if (!lower) return no('noSupport');
     if (wantsDrive && softSupport(w, lower.owner)) return drive(lower);
-    return restOn(pose0, lower.owner);
+    return restOn(lower.owner);
   }
 
   // Sloped: the lower end's underside corner on its support.
   const k0 = pointToWorld(pose0, o.corner);
-  const lower = supportBelow(w, k0.x, k0.z, k0.y, ids);
+  const lower = supportBelow(w, k0.x, k0.z, k0.y, up, ids);
   if (!lower) return no('noSupport');
   if (wantsDrive && softSupport(w, lower.owner)) {
-    const ground = supportBelow(w, lo0.x, lo0.z, lo0.y, ids) ?? lower;
+    const ground = supportBelow(w, lo0.x, lo0.z, lo0.y, up, ids) ?? lower;
     return drive(ground);
   }
-  // A second support: the shrunk shape cast down, the lower end's support left out.
-  const skip = [...ids, ...entityIds([lower.owner])];
-  const hit = castDown(w, o, lift(pose0, probe), reachDown, VERB_TUNING.placeShrinkM, lower.owner.kind !== 'terrain', skip);
-  if (!hit) return no('noSupport');
-  if (hit.toi <= 0) return no('blocked');
+  // A second support: the part beyond the centre of mass along the axis (shrunk) cast down from its own lift, terrain
+  // included (only that part, so the ground at the lower end is never it).
+  const upper = partsBeyond(o, VERB_TUNING.placeShrinkM, o.hs.com, o.up);
+  const up2 = liftOver(w, upper, pose0, ids);
+  const hit = castDown(w, upper, lift(pose0, up2), up2 + below, ids);
+  if (hit === 'none') return no('noSupport');
+  if (hit === 'blocked') return no('blocked');
   const h = v(Math.sin(yaw), 0, Math.cos(yaw));
   const kT = v(k0.x, lower.y + drop, k0.z);
   const cT = v(hit.point.x, hit.point.y + drop, hit.point.z);
@@ -472,6 +592,9 @@ export function planPlace(w: World, f: Fighter, cmd: VerbCommand): PlaceVerdict 
   const d = rotate(q, o.up);
   const com = pointToWorld(pose, o.hs.com);
   if (dot(sub(cT, kT), d) < dot(sub(com, kT), d)) return no('noSupport');
+  // Resting on those two, none of it is in the ground between them (a bank that bulges over the line from one to the other).
+  const shrunk = wholeParts(o, VERB_TUNING.placeShrinkM);
+  for (const part of shrunk) if (w.queries.overlaps(part.shape, compose(pose, part.rel), { terrain: true, entities: 'none' }).length > 0) return no('blocked');
   const supports = [lower.owner, hit.owner];
   if (!clearAt(w, f, o, pose, [...ids, ...entityIds(supports)])) return no('blocked');
   return { ok: true, plan: { mode, pose, pitch, driven: false, stake: null, supports, faceAt } };

@@ -5,7 +5,7 @@
 // - a tool of ≤ projectileMaxKg (2 kg) as DungeonStyle's projectile (§5.11, SPEC:632): its members go to state
 //   'projectile' (no body) and CombatSim's release() launches f.weapon along the aim at launchSpeed(m, techSpeed) ×
 //   speedFrac with DS's scatter; `thrownEntityOf` and `landThrown` turn the projectile back into the same entity (P15's
-//   WorldPort.projectile and onProjectileLanded call them);
+//   WorldPort.onProjectileLanded calls landThrown once: CombatSim calls it after a world hit and after a landing);
 // - anything else as a Rapier body: re-enabled at the hand pose with linvel = aim·v + walkVel and an end-over-end spin of
 //   throwSpinRadS.
 // Either way every member is released by the thrower (releasedBy, §4.3: P09 advances apartTicks), credited, and marked
@@ -164,23 +164,22 @@ export function throwRelease(w: World, f: Fighter, _m: MoveDef): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Projectiles back to entities (P15's WorldPort.projectile and onProjectileLanded call these)
+// Projectiles back to entities (P15's WorldPort.onProjectileLanded calls landThrown)
 // ---------------------------------------------------------------------------
 
 /**
- * The entity a DS projectile carries (§5.11): in state 'projectile', thrown by the projectile's owner at its release
- * tick (the tick − its age + 1); the lowest id of a lashed object's members. Null for a projectile the throw verb didn't
- * make (none in world mode).
+ * The entity a DS projectile carries (§5.11): in state 'projectile', thrown by the projectile's owner at exactly its
+ * release tick (the tick − its age + 1: stepProjectiles ages it before it can land, and both are saved); the lowest id of
+ * a lashed object's members. Null for a projectile the throw verb didn't make (none in world mode), or one already
+ * landed: never another of the thrower's objects in flight, so a second landThrown for the same projectile is a no-op.
+ * P15's WorldPort.onProjectileLanded calls landThrown once (CombatSim calls it after a world hit and after a landing).
  */
 export function thrownEntityOf(w: World, p: Projectile): number | null {
   const released = w.tick - p.age + 1;
-  let best: { id: number; d: number } | null = null;
   for (const e of w.entities.all()) {
-    if (e.state !== 'projectile' || !e.thrown || e.thrown.by !== p.owner.id) continue;
-    const d = Math.abs(e.thrown.tick - released);
-    if (!best || d < best.d) best = { id: e.id, d };
+    if (e.state === 'projectile' && e.thrown && e.thrown.by === p.owner.id && e.thrown.tick === released) return e.id;
   }
-  return best?.id ?? null;
+  return null;
 }
 
 /** The rotation taking unit `a` onto unit `b` (the shortest arc; half a turn about a perpendicular when opposite). */
@@ -218,7 +217,8 @@ export function thrownPose(w: World, p: Projectile, entity: number): Pose3 | nul
  * The projectile becomes its entity again (§5.11: "its body is re-created at the projectile pose with its velocity, so
  * the contact pipeline scores what it hits"): every member back to 'free' at the projectile's pose, with its velocity
  * and spin; `thrown` stays (D-31: `held` until first contact). Returns the entity, or null when the projectile carries
- * none (then CombatSim's DS drop is the fallback). The caller (P15) decides when: a world hit or a landing.
+ * none (then CombatSim's DS drop is the fallback), as it does when called again for a projectile already landed. The
+ * caller is P15's onProjectileLanded, which CombatSim calls once, after a world hit or a landing.
  */
 export function landThrown(w: World, p: Projectile): number | null {
   const id = thrownEntityOf(w, p);
