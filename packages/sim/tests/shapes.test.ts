@@ -5,7 +5,7 @@ import { Rng } from '../src/sim/math';
 import { MATERIALS } from '../src/world/materials';
 import {
   colliderDesc,
-  containsPoint,
+  shapeContains,
   crossCut,
   cylinderPoints,
   fracture,
@@ -141,7 +141,7 @@ describe('colliderDesc', () => {
   });
 });
 
-describe('principalAxis and containsPoint', () => {
+describe('principalAxis and shapeContains', () => {
   it('find the long axis: +Y for prisms and capsules, the largest extent for boxes and hulls', () => {
     expect(principalAxis(STAKE)).toEqual({ axis: 'y', dir: { x: 0, y: 1, z: 0 }, min: -0.7, max: 0.7, crossHalf: 0.05 });
     expect(principalAxis({ kind: 'capsule', halfHeight: 0.5, r: 0.12 })).toMatchObject({ axis: 'y', min: -0.62, max: 0.62 });
@@ -153,17 +153,17 @@ describe('principalAxis and containsPoint', () => {
   it('tell inside from outside for every kind', () => {
     const out = { x: 0, y: 0.75, z: 0 };
     for (const s of KINDS) {
-      expect(containsPoint(s, { x: 0, y: 0, z: 0 }) || s === STONE, s.kind).toBe(true);
-      expect(containsPoint(s, { x: 0.7, y: 0.7, z: 0.7 }), s.kind).toBe(false);
+      expect(shapeContains(s, { x: 0, y: 0, z: 0 }) || s === STONE, s.kind).toBe(true);
+      expect(shapeContains(s, { x: 0.7, y: 0.7, z: 0.7 }), s.kind).toBe(false);
     }
-    expect(containsPoint(STONE, { x: 0.02, y: 0.05, z: 0 })).toBe(true);
-    expect(containsPoint(STAKE, out)).toBe(false);
-    expect(containsPoint(STAKE, out, 0.06)).toBe(true);
-    expect(containsPoint(STAKE, { x: 0.0461, y: 0, z: 0 })).toBe(true); // the 8-gon's inradius is 4.62 cm
-    expect(containsPoint(STAKE, { x: 0.047, y: 0, z: 0 })).toBe(false); // a flat face toward +X (C labs' prism)
+    expect(shapeContains(STONE, { x: 0.02, y: 0.05, z: 0 })).toBe(true);
+    expect(shapeContains(STAKE, out)).toBe(false);
+    expect(shapeContains(STAKE, out, 0.06)).toBe(true);
+    expect(shapeContains(STAKE, { x: 0.0461, y: 0, z: 0 })).toBe(true); // the 8-gon's inradius is 4.62 cm
+    expect(shapeContains(STAKE, { x: 0.047, y: 0, z: 0 })).toBe(false); // a flat face toward +X (C labs' prism)
     const toward = (deg: number, r: number) => ({ x: r * Math.cos((deg * Math.PI) / 180), y: 0, z: r * Math.sin((deg * Math.PI) / 180) });
-    expect(containsPoint(STAKE, toward(22.5, 0.049))).toBe(true); // a vertex at 22.5° (r 5 cm)
-    expect(containsPoint(STAKE, toward(45, 0.049))).toBe(false); // a face at 45°
+    expect(shapeContains(STAKE, toward(22.5, 0.049))).toBe(true); // a vertex at 22.5° (r 5 cm)
+    expect(shapeContains(STAKE, toward(45, 0.049))).toBe(false); // a face at 45°
   });
 });
 
@@ -215,7 +215,7 @@ describe('fracture', () => {
         for (const p of pieces) {
           expect(shapeVolume(p.shape), `${s.kind} ×${n}`).toBeGreaterThan(0);
           if (s.kind !== 'ball' && s.kind !== 'capsule') {
-            for (const q of piecePoints(p)) expect(containsPoint(s, q, 1e-9), `${s.kind} ×${n}`).toBe(true);
+            for (const q of piecePoints(p)) expect(shapeContains(s, q, 1e-9), `${s.kind} ×${n}`).toBe(true);
           }
         }
       }
@@ -289,8 +289,8 @@ describe('crossCut', () => {
     const [lo, hi] = crossCut(pointed, 0.3);
     expect(pieceVolume([lo, hi]) / shapeVolume(pointed)).toBeCloseTo(1, 9);
     const tip = { x: 0 - hi.offset.x, y: 0.7 - hi.offset.y, z: 0 - hi.offset.z };
-    expect(containsPoint(hi.shape, tip, 1e-9)).toBe(true);
-    expect(containsPoint(lo.shape, { x: 0 - lo.offset.x, y: 0.7 - lo.offset.y, z: 0 - lo.offset.z }, 1e-9)).toBe(false);
+    expect(shapeContains(hi.shape, tip, 1e-9)).toBe(true);
+    expect(shapeContains(lo.shape, { x: 0 - lo.offset.x, y: 0.7 - lo.offset.y, z: 0 - lo.offset.z }, 1e-9)).toBe(false);
   });
 });
 
@@ -317,15 +317,44 @@ describe('taperEnd', () => {
   it('tapers either end, keeps the frame, and sharpens the second end of a pointed stake', () => {
     const down = taperEnd(STAKE, -1, 0.25);
     expect(shapeVolume(down)).toBeCloseTo(shapeVolume(taperEnd(STAKE, 1, 0.25)), 12);
-    expect(containsPoint(down, { x: 0, y: -0.7, z: 0 }, 1e-9)).toBe(true);
-    expect(containsPoint(down, { x: 0.03, y: -0.69, z: 0 })).toBe(false);
+    expect(shapeContains(down, { x: 0, y: -0.7, z: 0 }, 1e-9)).toBe(true);
+    expect(shapeContains(down, { x: 0.03, y: -0.69, z: 0 })).toBe(false);
     const both = taperEnd(taperEnd(STAKE, 1, 0.25), -1, 0.25);
     expect(shapeVolume(STAKE) - shapeVolume(both)).toBeCloseTo(2 * (2 / 3) * 4 * 0.05 ** 2 * Math.SQRT1_2 * 0.25, 12);
-    expect(containsPoint(both, { x: 0, y: 0.7, z: 0 }, 1e-9)).toBe(true);
-    expect(containsPoint(both, { x: 0, y: -0.7, z: 0 }, 1e-9)).toBe(true);
+    expect(shapeContains(both, { x: 0, y: 0.7, z: 0 }, 1e-9)).toBe(true);
+    expect(shapeContains(both, { x: 0, y: -0.7, z: 0 }, 1e-9)).toBe(true);
     // A taper longer than the stake makes it one long pyramid; a zero taper changes nothing.
     expect(shapeVolume(taperEnd(STAKE, 1, 5))).toBeCloseTo(shapeVolume(STAKE) / 3, 12);
     expect(taperEnd(STAKE, 1, 0)).toBe(STAKE);
+  });
+});
+
+describe('convex hulls of arbitrary point clouds', () => {
+  it('enclose every point, match their own mesh, and split without losing volume', () => {
+    for (let seed = 1; seed <= 25; seed++) {
+      const rng = new Rng(seed);
+      const n = 5 + Math.floor(rng.next() * 40);
+      const pts: number[] = [];
+      for (let i = 0; i < n * 3; i++) pts.push(rng.range(-0.4, 0.4) * (i % 3 === 1 ? 2.5 : 1));
+      const s: Shape = { kind: 'hull', points: pts };
+      const v = shapeVolume(s);
+      expect(v, `seed ${seed}`).toBeGreaterThan(0);
+      for (let i = 0; i < n; i++) {
+        expect(shapeContains(s, { x: pts[i * 3], y: pts[i * 3 + 1], z: pts[i * 3 + 2] }, 1e-9), `seed ${seed} point ${i}`).toBe(true);
+      }
+      expect(meshVolume(triangulate(s, IDENTITY)) / v, `seed ${seed}`).toBeCloseTo(1, 6); // f32 positions
+      expect(pieceVolume(fracture(s, (2 + (seed % 3)) as 2 | 3 | 4, rng)) / v, `seed ${seed}`).toBeCloseTo(1, 9);
+      const ax = principalAxis(s);
+      expect(pieceVolume(crossCut(s, ax.min + 0.37 * (ax.max - ax.min))) / v, `seed ${seed}`).toBeCloseTo(1, 9);
+      for (const end of [1, -1] as const) {
+        // Sharpening only removes material: every corner of the tapered hull lies in the original.
+        const t = taperEnd(s, end, 0.2) as Extract<Shape, { kind: 'hull' }>;
+        expect(shapeVolume(t), `seed ${seed}`).toBeLessThan(v);
+        for (let i = 0; i < t.points.length; i += 3) {
+          expect(shapeContains(s, { x: t.points[i], y: t.points[i + 1], z: t.points[i + 2] }, 1e-9), `seed ${seed}`).toBe(true);
+        }
+      }
+    }
   });
 });
 

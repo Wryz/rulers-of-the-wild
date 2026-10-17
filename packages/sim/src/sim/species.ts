@@ -47,7 +47,7 @@ const fields: FieldsOf<Record<SpeciesId, SpeciesBody>> = {
     footRadiusM: FOOT,
     massShareMode: { ...BONE_MODE, source: 'orchestrator decision 2 (D-2)' },
     defense: DEFENSE,
-    parts: { unit: 'entities', source: 'NEW: a player drops nothing (D-30)' },
+    parts: { unit: 'entities', source: '§2.7 (a player drops no parts)' },
   },
   ape: {
     scale: { unit: '×', source: 'SPEC:873' },

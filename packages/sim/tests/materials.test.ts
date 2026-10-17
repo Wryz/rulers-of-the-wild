@@ -2,8 +2,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import * as sim from '../src/index';
 import { resetTuning, setTuningValue, TUNING, tuningLeaves } from '../src/tuning/registry';
 import {
-  atLeast,
-  atMost,
+  propertyAtLeast,
+  propertyAtMost,
   breakEnergyJ,
   isRopeLike,
   isSoftGround,
@@ -11,7 +11,7 @@ import {
   isSpringy,
   lashBreakEnergyJ,
   loadCapacityN,
-  marginAtLeast,
+  propertyMarginAtLeast,
   MATERIAL_IDS,
   MATERIALS,
   PROPERTY_EPS,
@@ -166,14 +166,14 @@ describe('material predicates', () => {
   it('compare property values with the 1e-9 epsilon: 0.7 − 0.5 ≥ 0.2 passes', () => {
     expect(PROPERTY_EPS).toBe(1e-9);
     expect(0.7 - 0.5 >= 0.2).toBe(false); // the floating-point trap the epsilon exists for
-    expect(marginAtLeast(0.7, 0.5, 0.2)).toBe(true);
-    expect(marginAtLeast(MATERIALS.bone.hardness, MATERIALS.dryWood.hardness, 0.2)).toBe(true);
-    expect(marginAtLeast(MATERIALS.flint.hardness, MATERIALS.stone.hardness, 0.2)).toBe(false); // flint doesn't cut stone
-    expect(marginAtLeast(0.69, 0.5, 0.2)).toBe(false);
-    expect(atLeast(0.3 - 1e-12, 0.3)).toBe(true);
-    expect(atLeast(0.3 - 1e-6, 0.3)).toBe(false);
-    expect(atMost(0.5 + 1e-12, 0.5)).toBe(true);
-    expect(atMost(0.5 + 1e-6, 0.5)).toBe(false);
+    expect(propertyMarginAtLeast(0.7, 0.5, 0.2)).toBe(true);
+    expect(propertyMarginAtLeast(MATERIALS.bone.hardness, MATERIALS.dryWood.hardness, 0.2)).toBe(true);
+    expect(propertyMarginAtLeast(MATERIALS.flint.hardness, MATERIALS.stone.hardness, 0.2)).toBe(false); // flint doesn't cut stone
+    expect(propertyMarginAtLeast(0.69, 0.5, 0.2)).toBe(false);
+    expect(propertyAtLeast(0.3 - 1e-12, 0.3)).toBe(true);
+    expect(propertyAtLeast(0.3 - 1e-6, 0.3)).toBe(false);
+    expect(propertyAtMost(0.5 + 1e-12, 0.5)).toBe(true);
+    expect(propertyAtMost(0.5 + 1e-6, 0.5)).toBe(false);
     expect(isSoftGround({ ...MATERIALS.dirt, hardness: 0.1 + 0.2 + 0.2 }, 0.5)).toBe(true); // 0.5000000000000001
   });
 });

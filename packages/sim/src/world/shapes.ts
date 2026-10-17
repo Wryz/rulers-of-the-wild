@@ -157,7 +157,7 @@ export function principalAxis(s: Shape): ShapeAxis {
 }
 
 /** Whether a local point is inside the shape, or within `tol` m of it (sharp points: which piece keeps one). */
-export function containsPoint(s: Shape, p: V3, tol = 0): boolean {
+export function shapeContains(s: Shape, p: V3, tol = 0): boolean {
   switch (s.kind) {
     case 'ball':
       return Math.hypot(p.x, p.y, p.z) <= s.r + tol;
@@ -338,11 +338,15 @@ export function taperEnd(s: Shape, end: 1 | -1, taperM: number): Shape {
   // Keep the side away from the tapered end: end·(dir·p) ≤ end·cutAt.
   const keepN = scale(dir, -end);
   const { kept, section } = clipPoints(h, keepN, -end * cutAt);
-  const c = sectionCentroid(section, dir);
-  // On the axis: a prism's (or box's, capsule's) axis runs through its origin; a hull's through its section's centre,
-  // where a coordinate within floating-point noise of 0 is 0 (a prism-derived hull is symmetric about the origin).
-  const across = s.kind === 'hull' ? c.map((x) => (Math.abs(x) <= GEOM_EPS * len ? 0 : x)) : [0, 0, 0];
-  const tip = add(sub(across as P3, scale(dir, dot(across as P3, dir))), scale(dir, tipAt));
+  // On the axis. A prism's (box's, capsule's, ball's) axis runs through its origin, so the tip is the centre of its end.
+  // A hull's runs through its section's centre (a coordinate within floating-point noise of 0 is 0: a prism-derived hull
+  // is symmetric about its origin), and the tip is where that line leaves the hull, so sharpening never adds wood.
+  let tip: P3 = scale(dir, tipAt);
+  if (s.kind === 'hull') {
+    const c = sectionCentroid(section, dir).map((x) => (Math.abs(x) <= GEOM_EPS * len ? 0 : x)) as P3;
+    const toward = scale(dir, end);
+    tip = add(c, scale(toward, rayExit(h, c, toward)));
+  }
   const out = convexHull([...kept, tip]);
   return out ? { kind: 'hull', points: out.pts.flat() } : s;
 }
@@ -622,6 +626,17 @@ function cutPiece(h: Hull | null, n: P3, d: number, at: V3): ShapePiece {
   if (piece) return centredPiece(piece);
   const o = toP3(at);
   return { shape: { kind: 'hull', points: kept.flatMap((p) => sub(p, o)) }, offset: at };
+}
+
+/** How far a ray from a point inside a hull runs along `dir` before it leaves the hull. */
+function rayExit(h: Hull, from: P3, dir: P3): number {
+  let t = Infinity;
+  for (const [a, b, c] of h.faces) {
+    const pl = planeOf(h.pts[a], h.pts[b], h.pts[c]);
+    const along = dot(pl.n, dir);
+    if (along > GEOM_EPS) t = Math.min(t, (pl.d - dot(pl.n, from)) / along);
+  }
+  return Number.isFinite(t) ? Math.max(0, t) : 0;
 }
 
 /** The area centroid of a planar convex section (points in the plane ⟂ `axis`); the vertex mean if it has no area. */

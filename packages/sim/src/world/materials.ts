@@ -167,12 +167,12 @@ export const MATERIALS: Record<MaterialId, Material> = defineTuning<Record<Mater
 // ---------------------------------------------------------------------------
 
 /** value ≥ threshold, allowing PROPERTY_EPS. */
-export function atLeast(value: number, threshold: number): boolean {
+export function propertyAtLeast(value: number, threshold: number): boolean {
   return value >= threshold - PROPERTY_EPS;
 }
 
 /** value ≤ threshold, allowing PROPERTY_EPS. */
-export function atMost(value: number, threshold: number): boolean {
+export function propertyAtMost(value: number, threshold: number): boolean {
   return value <= threshold + PROPERTY_EPS;
 }
 
@@ -180,8 +180,8 @@ export function atMost(value: number, threshold: number): boolean {
  * `harder − softer ≥ margin`, allowing PROPERTY_EPS: the shape of every hardness-margin rule (a tool's edge cuts what
  * is at least VERB_TUNING.cutHardnessMargin softer; bone 0.7 cuts dry wood 0.5 at a 0.2 margin).
  */
-export function marginAtLeast(harder: number, softer: number, margin: number): boolean {
-  return atLeast(harder - softer, margin);
+export function propertyMarginAtLeast(harder: number, softer: number, margin: number): boolean {
+  return propertyAtLeast(harder - softer, margin);
 }
 
 // ---------------------------------------------------------------------------
@@ -203,12 +203,12 @@ export function isSolid(m: Material): m is Material & { strength: SolidStrength 
 
 /** Soft ground (stakes drive into it, D-19): hardness ≤ `maxHardness` (TERRAIN_TUNING.softGroundMaxHardness). */
 export function isSoftGround(m: Material, maxHardness: number): boolean {
-  return atMost(m.hardness, maxHardness);
+  return propertyAtMost(m.hardness, maxHardness);
 }
 
 /** Springy (the Bend verb): springiness ≥ `minSpringiness` (JOINT_TUNING.bendMinSpringiness). */
 export function isSpringy(m: Material, minSpringiness: number): boolean {
-  return atLeast(m.springiness, minSpringiness);
+  return propertyAtLeast(m.springiness, minSpringiness);
 }
 
 /**
