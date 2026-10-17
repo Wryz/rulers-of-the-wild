@@ -127,8 +127,7 @@ export interface MetaCommand {
    * reproduces it). 'pause' and 'timeAway' belong to the client and to M3.
    */
   meta: 'pause' | 'save' | 'timeAway' | 'dev';
-  // TODO open question SPEC:982 (world alive while closed?): default no — the hidden tab pauses, time away only
-  // reaches traplines (M3).
+  // TODO open question SPEC:982 (world alive while closed?): default no — the hidden tab pauses, time away only reaches traplines (M3)
   /** 'timeAway': whole seconds the game was closed (wall-clock time enters the sim only this way). */
   seconds?: number;
   dev?: { op: DevOp; args: number[]; tuning?: TuningEdit };
