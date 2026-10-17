@@ -13,7 +13,7 @@ import { DT, Rng } from '../src/sim/math';
 import { reducedMass } from '../src/sim/rules';
 import { resetTuning, setTuningValue } from '../src/tuning/registry';
 import { ENTITY_TUNING } from '../src/world/entities';
-import { collisionGroups, solverGroups } from '../src/world/groups';
+import { collisionGroups, pieceGraceCollisionGroups, solverGroups } from '../src/world/groups';
 import { MATERIALS } from '../src/world/materials';
 import { PHYSICS_TUNING, physicsReady } from '../src/world/physics';
 import { shapeVolume } from '../src/world/shapes';
@@ -21,6 +21,13 @@ import type { Anchor, Entity, EntitySpec, JointKind, JointRecord, MaterialId, Po
 import { VERB_TUNING } from '../src/world/verbs/tuning';
 import { createWorld, type World, type WorldOptions } from '../src/world/world';
 import { WORLD_TUNING } from '../src/world/worldTuning';
+
+/**
+ * This file's time limit (Vitest's default is 5 s). The longest test steps two worlds 1,200 ticks (about 1 s alone);
+ * on a loaded machine running every package's tests at once it took 7 s. §11's convention for long tests is an explicit
+ * timeout.
+ */
+vi.setConfig({ testTimeout: 60_000 });
 
 const live: World[] = [];
 async function make(o: Partial<WorldOptions> = {}): Promise<World> {
@@ -342,8 +349,10 @@ describe('anchoring', () => {
     expect(stake.pose).toEqual(pose);
     expect(stake.vel).toEqual({ lin: { x: 0, y: 0, z: 0 }, ang: { x: 0, y: 0, z: 0 } });
 
-    // Pulled loose: dynamic, awake, no anchor; an impulse moves it now.
+    // Pulled loose: dynamic, awake, no anchor, not resting ground any more; an impulse moves it now.
+    expect(stake.restTicks).toBeGreaterThanOrEqual(120);
     w.entities.unanchor(stake);
+    expect(stake.restTicks).toBe(0);
     expect(stake.state).toBe('free');
     expect(stake.anchor).toBeNull();
     expect(stake.body!.isDynamic()).toBe(true);
@@ -516,12 +525,29 @@ describe('impulses', () => {
     const held = w.entities.create(box('dryWood', [0.2, 0.2, 0.2], { x: 0, y: 2, z: 0 }));
     const fixed = w.entities.create(box('dryWood', [0.2, 0.2, 0.2], { x: 2, y: 2, z: 0 }, { state: 'fixed' }));
     const gone = w.entities.create(box('dryWood', [0.2, 0.2, 0.2], { x: 4, y: 2, z: 0 }));
+    const free = w.entities.create(box('dryWood', [0.2, 0.2, 0.2], { x: 6, y: 2, z: 0 }));
+    const idOf = new Map([held, fixed, gone, free].map((e) => [e.body!.handle, e.id]));
+    // Every Rapier impulse call, by entity id.
+    const calls: number[] = [];
+    const real = RAPIER.RigidBody.prototype.applyImpulse;
+    const realAt = RAPIER.RigidBody.prototype.applyImpulseAtPoint;
+    vi.spyOn(RAPIER.RigidBody.prototype, 'applyImpulse').mockImplementation(function (this: RAPIER.RigidBody, j, wake) {
+      calls.push(idOf.get(this.handle) ?? -1);
+      real.call(this, j, wake);
+    });
+    vi.spyOn(RAPIER.RigidBody.prototype, 'applyImpulseAtPoint').mockImplementation(function (this: RAPIER.RigidBody, j, p, wake) {
+      calls.push(idOf.get(this.handle) ?? -1);
+      realAt.call(this, j, p, wake);
+    });
     w.entities.setState(held, 'held');
-    for (const e of [held, fixed, gone]) w.entities.queueImpulse(e.id, { x: 5, y: 0, z: 0 }, null);
+    for (const e of [held, fixed, gone, free]) w.entities.queueImpulse(e.id, { x: 5, y: 0, z: 0 }, null);
+    w.entities.queueImpulse(fixed.id, { x: 5, y: 0, z: 0 }, { x: 2.1, y: 2, z: 0 });
     w.entities.remove(gone.id);
     w.step();
-    w.entities.setState(held, 'free');
-    expect(held.body!.linvel()).toEqual({ x: 0, y: 0, z: 0 });
+    // Only the free body got one: nothing reached the held, fixed or removed entity's body.
+    expect(calls).toEqual([free.id]);
+    expect(w.entities.pendingImpulses()).toEqual([]);
+    expect(free.vel.lin.x).toBeGreaterThan(0);
     expect(fixed.pose.p).toEqual(f32({ x: 2, y: 2, z: 0 }));
     expect(() => w.entities.queueImpulse(gone.id, { x: 1, y: 0, z: 0 }, null)).toThrow(/no entity/);
     expect(() => w.entities.queueImpulse(held.id, { x: NaN, y: 0, z: 0 }, null)).toThrow(/non-finite/);
@@ -794,6 +820,92 @@ describe('state changes', () => {
     expect(e.pose.p.y).toBeCloseTo(3, 6);
     expect(e.touched).toBe(true);
     expect(() => w.entities.reshape(e, { kind: 'box', hx: 0, hy: 1, hz: 1 })).toThrow(/no volume/);
+
+    // The rest radius is measured from the new centre of mass: a hull box whose centre sits 0.5 m off its origin.
+    const offCentre: Shape = { kind: 'hull', points: [0, 0.1, 0.1, 0, -0.1, 0.1, 0, 0.1, -0.1, 0, -0.1, -0.1, 1, 0.1, 0.1, 1, -0.1, 0.1, 1, 0.1, -0.1, 1, -0.1, -0.1] };
+    w.entities.reshape(e, offCentre);
+    const com = e.body!.localCom();
+    expect(com.x).toBeCloseTo(0.5, 5);
+    const reach = (w.entities as unknown as { rt: Map<number, { reach: number }> }).rt.get(e.id)!.reach;
+    expect(reach).toBeCloseTo(Math.hypot(1, 0.1, 0.1) + 0.5, 5);
+  });
+
+  it('setGrace sets the piece filter, and every collider the store builds later keeps it', async () => {
+    const w = await make();
+    const e = w.entities.create(box('dryWood', [0.2, 0.05, 0.05], { x: 0, y: 0.05, z: 0 }));
+    expect(e.collider!.collisionGroups()).toBe(collisionGroups('ENTITY'));
+    const grace = { from: { kind: 'fighter', id: 1, part: 'ruler', bone: 'shinL' } as const, minUntil: w.tick + 10, maxUntil: w.tick + 600 };
+    w.entities.setGrace(e, grace);
+    expect(e.grace).toEqual(grace);
+    expect(e.touched).toBe(true);
+    expect(e.collider!.collisionGroups()).toBe(pieceGraceCollisionGroups());
+    // A new body (stowed → free), a new collider (reshape), a type switch (anchor): the filter stays.
+    w.entities.setState(e, 'stowed');
+    w.entities.setState(e, 'free');
+    expect(e.collider!.collisionGroups()).toBe(pieceGraceCollisionGroups());
+    w.entities.reshape(e, { kind: 'box', hx: 0.15, hy: 0.05, hz: 0.05 });
+    expect(e.collider!.collisionGroups()).toBe(pieceGraceCollisionGroups());
+    w.entities.anchor(e, 0.1);
+    expect(e.collider!.collisionGroups()).toBe(pieceGraceCollisionGroups());
+    w.entities.setState(e, 'free');
+    w.entities.setGrace(e, null);
+    expect(e.grace).toBeNull();
+    expect(e.collider!.collisionGroups()).toBe(collisionGroups('ENTITY'));
+    w.entities.setState(e, 'stowed');
+    w.entities.setState(e, 'held');
+    expect(e.collider!.collisionGroups()).toBe(collisionGroups('ENTITY'));
+  });
+
+  it('setPose moves an enabled body (velocities kept, awake, history reset) and only the record of a held one', async () => {
+    WORLD_TUNING.gravityY = 0;
+    const w = await make();
+    const e = w.entities.create({ ...box('dryWood', [0.2, 0.2, 0.2], { x: 0, y: 2, z: 0 }), lin: { x: 1, y: 0, z: 0 } });
+    const reset = vi.spyOn(w.physics, 'resetHistory');
+    const to: Pose3 = { p: { x: 3, y: 2.5, z: -1 }, q: axisAngle({ x: 0, y: 1, z: 0 }, 0.4) };
+    w.entities.setPose(e, to);
+    expect(bodyPose(e).p).toEqual(f32(to.p));
+    expect(turnDeg(bodyPose(e).q, to.q)).toBeLessThan(0.1);
+    expect(e.pose).toEqual(bodyPose(e));
+    expect(e.body!.linvel().x).toBeCloseTo(1, 6);
+    expect(e.touched).toBe(true);
+    expect(reset).toHaveBeenCalledWith(`entity:${e.id}`);
+    w.step();
+    expect(e.pose.p.x).toBeCloseTo(3 + DT, 5);
+
+    // A fixed body moves too (it moves only when code moves it).
+    const f = w.entities.create(box('stone', [0.2, 0.2, 0.2], { x: 6, y: 0.2, z: 0 }, { state: 'fixed', generated: true }));
+    w.entities.setPose(f, { p: { x: 6, y: 0.2, z: 1 }, q: { x: 0, y: 0, z: 0, w: 1 } });
+    expect(bodyPose(f).p).toEqual(f32({ x: 6, y: 0.2, z: 1 }));
+    expect(f.touched).toBe(true);
+
+    // Held: the record moves; the disabled body takes that pose when it is enabled again.
+    w.entities.setState(e, 'held');
+    const stale = bodyPose(e);
+    w.entities.setPose(e, { p: { x: -2, y: 1, z: 0 }, q: { x: 0, y: 0, z: 0, w: 2 } });
+    expect(bodyPose(e)).toEqual(stale);
+    expect(e.pose).toEqual({ p: { x: -2, y: 1, z: 0 }, q: { x: 0, y: 0, z: 0, w: 1 } });
+    w.entities.setState(e, 'free');
+    expect(bodyPose(e).p).toEqual(f32({ x: -2, y: 1, z: 0 }));
+    expect(() => w.entities.setPose(e, { p: { x: NaN, y: 0, z: 0 }, q: { x: 0, y: 0, z: 0, w: 1 } })).toThrow(/non-finite/);
+  });
+
+  it('a create whose body fails leaves no entity, no body, no event and no spent id', async () => {
+    const w = await make();
+    w.entities.create(box('stone', [0.1, 0.1, 0.1], { x: 0, y: 0.1, z: 0 }));
+    w.events.length = 0;
+    const next = w.ids.entity.next;
+    const bodies = w.physics.rapier.bodies.len();
+    vi.spyOn(w.physics.rapier, 'createCollider').mockImplementationOnce(() => {
+      throw new Error('a hull Rapier cannot build');
+    });
+    expect(() => w.entities.create({ ...box('stone', [0.1, 0.1, 0.1], { x: 2, y: 0.1, z: 0 }), generated: true })).toThrow(/cannot build/);
+    expect(w.ids.entity.next).toBe(next);
+    expect(w.entities.all()).toHaveLength(1);
+    expect(w.entities.get(next)).toBeUndefined();
+    expect(w.physics.rapier.bodies.len()).toBe(bodies);
+    expect(w.entities.removedGenerated()).toEqual([]);
+    expect(w.events).toEqual([]);
+    expect(w.entities.create(box('stone', [0.1, 0.1, 0.1], { x: 2, y: 0.1, z: 0 })).id).toBe(next);
   });
 });
 
@@ -922,7 +1034,7 @@ describe('save records', () => {
     w.entities.remove(mat.id);
     w.entities.release(thrown, 1);
     thrown.thrown = { by: 1, tick: w.tick };
-    thrown.grace = { from: { kind: 'fighter', id: 1, part: 'zone', bone: 'shinL' }, minUntil: w.tick + 10, maxUntil: w.tick + 600 };
+    w.entities.setGrace(thrown, { from: { kind: 'fighter', id: 1, part: 'zone', bone: 'shinL' }, minUntil: w.tick + 10, maxUntil: w.tick + 600 });
     thrown.crossCut = { axisT: 0.2, remaining: 0.5, fromDir: { x: 0, y: 0, z: 1 } };
     thrown.loadHist[3] = 120.5;
     thrown.credit = ['p1'];
@@ -988,6 +1100,11 @@ describe('save records', () => {
     expect(b.entities.get(6)!.body!.isEnabled()).toBe(false);
     expect(b.entities.get(7)!.body).toBeNull();
     expect(b.entities.get(8)!.body!.isCcdEnabled()).toBe(true);
+    // A piece restored in its grace keeps the grace filter (§2.11, §4.10); the others are plain ENTITY colliders.
+    expect(a.entities.get(8)!.collider!.collisionGroups()).toBe(pieceGraceCollisionGroups());
+    expect(b.entities.get(8)!.grace).not.toBeNull();
+    expect(b.entities.get(8)!.collider!.collisionGroups()).toBe(pieceGraceCollisionGroups());
+    for (const id of [2, 3, 5, 6]) expect(b.entities.get(id)!.collider!.collisionGroups()).toBe(collisionGroups('ENTITY'));
     expect(b.entities.isAnchored(b.entities.get(5)!)).toBe(true);
     expect(b.physics.ownerOf(b.entities.get(2)!.collider!.handle)).toEqual({ kind: 'entity', id: 2 });
 
@@ -1007,6 +1124,7 @@ describe('save records', () => {
     const b = await make({ seed: 3 });
     b.entities.restoreRecord(structuredClone(rec), a.entities.removedGenerated());
     expect(b.entities.all().map((e) => e.id)).toEqual(rec.map((r) => r.id));
+    expect(b.entities.get(8)!.collider!.collisionGroups()).toBe(pieceGraceCollisionGroups());
     expect(b.ids.entity.next).toBe(9);
     expect(b.entities.removedGenerated()).toEqual([4]);
     expect(b.entities.create(box('stone', [0.1, 0.1, 0.1], { x: 0, y: 3, z: 9 })).id).toBe(9);

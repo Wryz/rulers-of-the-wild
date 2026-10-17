@@ -10,8 +10,13 @@
 // - `held` → the same dynamic body, disabled (hidden from the solver and from queries, MAP gap-5 §6.2); the record pose
 //   follows the hand (verbs, phase 4b) and the body is put back at the record pose when it is enabled again;
 // - `stowed`, `tied`, `projectile`, `frozen` → no body.
-// Every entity collider is in the ENTITY collision and solver groups (§2.11) with COLLISION_EVENTS; a dynamic one also
-// raises CONTACT_FORCE_EVENTS above forceEventThresholdN (a dev cross-check only, never an outcome).
+// Every entity collider is in the ENTITY collision and solver groups (§2.11), or the piece grace filter while
+// `e.grace` is set (setGrace), with COLLISION_EVENTS; a dynamic one also raises CONTACT_FORCE_EVENTS above
+// forceEventThresholdN (a dev cross-check only, never an outcome).
+//
+// The record pose of an entity with an enabled body is the body's (read back at every mirror): code moves such an
+// entity with setPose. Writing `e.pose` directly moves only a held or bodiless entity (the hands' pose, which the body
+// takes when it is enabled again).
 //
 // Order (§8.1): bodies are created and removed in id order (create() takes the next id, so a caller that creates
 // several bodies in a phase creates them in id order by construction; restoreRecord rebuilds in id order); every loop
@@ -25,7 +30,7 @@ import RAPIER from '@dimforge/rapier3d-compat';
 import type { EntityRecV1 } from '../save/schema';
 import { DT } from '../sim/math';
 import { defineTuning } from '../tuning/registry';
-import { collisionGroups, solverGroups } from './groups';
+import { collisionGroups, pieceGraceCollisionGroups, solverGroups } from './groups';
 import { LOAD_TUNING } from './loads';
 import { MATERIALS } from './materials';
 import { ownerKey, PHYSICS_TUNING } from './physics';
@@ -188,7 +193,16 @@ export class EntityStore {
     };
     const rt = runtimeFor(e, null);
     this.insert(e, rt);
-    this.makeBody(e, rt, false);
+    try {
+      this.makeBody(e, rt, false);
+    } catch (err) {
+      // No bodiless entity and no spent id are left behind (a hull Rapier can't build, a WASM error).
+      this.forget(e);
+      this.removedGen.delete(id);
+      const ids = this.world.ids.entity;
+      if (ids.next === id + 1) ids.next = id;
+      throw err;
+    }
     this.readBack(e);
     rt.last = copyPose(e.pose);
     e.prevPose = copyPose(e.pose);
@@ -306,10 +320,43 @@ export class EntityStore {
       }
       e.collider = this.makeCollider(e, b);
       b.recomputeMassPropertiesFromColliders();
+      this.refreshReach(e, b);
       if (offset) {
         b.setTranslation(e.pose.p, true);
         this.world.physics.resetHistory(ownerKey(ownerOf(e)));
       }
+      this.readBack(e);
+    }
+    e.touched = true;
+  }
+
+  /**
+   * Sets (or, with null, ends) a fresh piece's grace (§4.10, RF-7) and its collider's collision filter with it: while
+   * grace lasts the piece is an ENTITY whose filter drops CHAR, ZONE, RULER_ZONE, RULER_SOLID and DOWNED (§2.11). Every
+   * collider the store builds later (a state change, a reshape, a load) takes the filter from `e.grace`. Marks touched.
+   */
+  setGrace(e: Entity, g: { from: Owner; minUntil: number; maxUntil: number } | null): void {
+    this.own(e, 'setGrace');
+    e.grace = g ? { from: copyOwner(g.from), minUntil: g.minUntil, maxUntil: g.maxUntil } : null;
+    e.collider?.setCollisionGroups(entityCollisionGroups(e));
+    e.touched = true;
+  }
+
+  /**
+   * Moves the entity to `pose` by code (a snap-assist lash, a dev move): an enabled body is put there (awake, its
+   * velocities kept) and its pose history reset, so the jump is never read as a speed; the record reads the f32 pose
+   * back. Marks touched. Writing `e.pose` directly moves only a held or bodiless entity's record (the hands' pose, which
+   * the body takes when it is enabled again); an entity with an enabled body takes its pose from the body at every mirror.
+   */
+  setPose(e: Entity, pose: Pose3): void {
+    this.own(e, 'setPose');
+    if (!finiteV3(pose.p)) throw new Error(`EntityStore.setPose: a non-finite position for entity ${e.id}`);
+    e.pose = { p: copyV3(pose.p), q: unitQuat(pose.q) };
+    const b = e.body;
+    if (b && b.isEnabled()) {
+      b.setTranslation(e.pose.p, true);
+      b.setRotation(e.pose.q, true);
+      this.world.physics.resetHistory(ownerKey(ownerOf(e)));
       this.readBack(e);
     }
     e.touched = true;
@@ -466,6 +513,10 @@ export class EntityStore {
       this.insert(e, rt);
       restored.push(e);
     }
+    // Rapier body order after a load: the restored bodies are created after the untouched generated ones kept from
+    // generation (and may take slots their dropped generated bodies freed), so Rapier's arena order differs from that of
+    // the world that saved. Two loads of one save build the same order and stay bit-identical to each other; a loaded
+    // world matches the saved one within SPEC:730's 1 cm and 1° at rest, not bit for bit.
     for (const e of restored) this.makeBody(e, this.rt.get(e.id)!, true);
     const ids = this.world.ids.entity;
     for (const e of restored) if (e.id >= ids.next) ids.next = e.id + 1;
@@ -516,6 +567,8 @@ export class EntityStore {
     const rt = this.rt.get(e.id)!;
     if (!force && e.state === s && e.shape === rt.shape) return;
     if (s !== 'anchored') e.anchor = null;
+    // A new kind of body has not rested yet (an unanchored stake is no longer ground for World.supportAt).
+    if (bodyKindOf(s) !== bodyKindOf(e.state)) e.restTicks = 0;
     e.state = s;
     if (bodyKindOf(s) === 'fixed') e.vel = { lin: zero(), ang: zero() };
     if (e.shape !== rt.shape) this.rebuildShape(e, rt);
@@ -537,6 +590,7 @@ export class EntityStore {
       this.world.physics.rapier.removeCollider(e.collider, true);
       e.collider = this.makeCollider(e, e.body);
       e.body.recomputeMassPropertiesFromColliders();
+      this.refreshReach(e, e.body);
     }
   }
 
@@ -603,12 +657,17 @@ export class EntityStore {
     const body = this.world.physics.rapier.createRigidBody(desc);
     e.body = body;
     e.collider = this.makeCollider(e, body);
+    this.refreshReach(e, body);
     if (reset) this.world.physics.resetHistory(ownerKey(ownerOf(e)));
   }
 
+  /**
+   * The entity's collider on `body`: its material's density and friction, the ENTITY groups (a fresh piece's grace
+   * filter while `e.grace` is set, §2.11, §4.10), its events; registered under the entity's owner.
+   */
   private makeCollider(e: Entity, body: RAPIER.RigidBody): RAPIER.Collider {
     const d = colliderDesc(e.shape, MATERIALS[e.material])
-      .setCollisionGroups(collisionGroups('ENTITY'))
+      .setCollisionGroups(entityCollisionGroups(e))
       .setSolverGroups(solverGroups('ENTITY'));
     if (body.isDynamic()) {
       d.setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS | RAPIER.ActiveEvents.CONTACT_FORCE_EVENTS);
@@ -616,9 +675,13 @@ export class EntityStore {
     } else d.setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS);
     const c = this.world.physics.rapier.createCollider(d, body);
     this.world.physics.register(c, ownerOf(e));
+    return c;
+  }
+
+  /** The rest test's radius from the body's current centre of mass (call after the mass properties are up to date). */
+  private refreshReach(e: Entity, body: RAPIER.RigidBody): void {
     const rt = this.rt.get(e.id);
     if (rt) rt.reach = shapeRadius(e.shape) + norm(body.localCom());
-    return c;
   }
 
   /** A body that just switched type gets that type's settings (dynamic: iterations, damping, CCD, force events). */
@@ -692,6 +755,9 @@ const norm = (v: { x: number; y: number; z: number }): number => Math.hypot(v.x,
 const finiteV3 = (v: V3): boolean => Number.isFinite(v.x) && Number.isFinite(v.y) && Number.isFinite(v.z);
 const byId = (a: Entity, b: Entity): number => a.id - b.id;
 const ownerOf = (e: Entity): Owner => ({ kind: 'entity', id: e.id });
+
+/** An entity collider's collision groups: ENTITY, or a fresh piece's grace filter while `e.grace` is set (§2.11). */
+const entityCollisionGroups = (e: Entity): number => (e.grace ? pieceGraceCollisionGroups() : collisionGroups('ENTITY'));
 
 function readPose(b: RAPIER.RigidBody): Pose3 {
   const t = b.translation();
