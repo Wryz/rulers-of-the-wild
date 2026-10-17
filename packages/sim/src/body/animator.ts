@@ -1,5 +1,6 @@
 import { type Ease, ease, smoothstep } from '../sim/math';
-import { blendPose, copyPose, makePose, type Pose } from './skeleton';
+import type { Quat, V3 } from '../world/types';
+import { BONES, blendPose, copyPose, makePose, type Pose } from './skeleton';
 
 export interface TrackKey {
   f: number;
@@ -67,4 +68,116 @@ export class Animator {
     }
     return copyPose(prevPose, this.out);
   }
+
+  // ---------------------------------------------------------------------------
+  // Save record (docs/M1-DESIGN.md §8.3, P04; MAP gap-7 §3.5)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * The animator's state: the snapshot a track blends from, the keys **by value** (they may point at the fighter's
+   * impact, retract and react poses, which are rewritten before each reuse, so their aliasing need not survive), the
+   * mode, the cross-fade length and its clock. `source` is the fighter's pose (re-linked at construction) and `out` is
+   * rewritten by every update before it is read, so neither is saved.
+   */
+  toRecord(): AnimatorRecord {
+    return {
+      snapshot: poseToRecord(this.snapshot),
+      keys: this.keys.map(trackKeyToRecord),
+      mode: this.mode,
+      fadeLen: this.fadeLen,
+      procT: this.procT,
+    };
+  }
+
+  /** Puts back a toRecord() state (keys become fresh poses). */
+  restoreRecord(r: AnimatorRecord) {
+    poseFromRecord(r.snapshot, this.snapshot);
+    this.keys = r.keys.map(trackKeyFromRecord);
+    this.mode = r.mode;
+    this.fadeLen = numFromRecord(r.fadeLen, 'anim.fadeLen');
+    this.procT = numFromRecord(r.procT, 'anim.procT');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Records of the body (docs/M1-DESIGN.md §8.3, P04). Records are plain data written with a fixed key order: numbers as
+// they are (−0 kept), vectors as V3, quaternions as Quat, poses by value. P13's canonical writer turns a non-finite
+// number into '$inf', '$-inf' or '$nan'; numFromRecord is its reader, shared by every record reader of the body and the
+// fighter (footwork.ts, idle.ts, sim/fighter.ts, sim/ai.ts).
+// ---------------------------------------------------------------------------
+
+/** A pose by value (55 numbers): the pelvis root, each bone's local rotation in BONES order, the blade direction, the grip slide. */
+export type PoseRecord = { root: V3; rot: Quat[]; blade: V3; slide: number };
+
+/** A track key by value; `ease` null when the key has none (the animator's default, 'inOut'). */
+export type TrackKeyRecord = { f: number; pose: PoseRecord; ease: Ease | null };
+
+/** Animator's saved state (Animator.toRecord). */
+export type AnimatorRecord = {
+  snapshot: PoseRecord;
+  keys: TrackKeyRecord[];
+  mode: 'track' | 'procedural';
+  fadeLen: number;
+  procT: number;
+};
+
+/**
+ * One number read back from a record: a number as it is (−0 included), or the string the canonical writer gives a
+ * non-finite number ('$inf', '$-inf', '$nan'; docs/M1-DESIGN.md §8.3). Anything else is a broken record and throws, so
+ * a JSON null (what JSON.stringify makes of Infinity) is never read as a number (MAP gap-7 §6: `null >= x` is false
+ * where `Infinity >= x` is true).
+ */
+export function numFromRecord(v: unknown, field: string): number {
+  if (typeof v === 'number') return v;
+  if (v === '$inf') return Infinity;
+  if (v === '$-inf') return -Infinity;
+  if (v === '$nan') return NaN;
+  throw new Error(`save record: ${field} is ${JSON.stringify(v)}, not a number`);
+}
+
+/** A vector as a record (any { x, y, z }: Three's Vector3 or a V3). */
+export function v3Record(v: Readonly<V3>): V3 {
+  return { x: v.x, y: v.y, z: v.z };
+}
+
+/** Reads a V3 record into `out` (a Vector3 the owner keeps, so its identity survives). */
+export function readV3<T extends { set(x: number, y: number, z: number): unknown }>(r: V3, out: T, field: string): T {
+  out.set(numFromRecord(r.x, `${field}.x`), numFromRecord(r.y, `${field}.y`), numFromRecord(r.z, `${field}.z`));
+  return out;
+}
+
+export function poseToRecord(p: Pose): PoseRecord {
+  return {
+    root: v3Record(p.root),
+    rot: BONES.map((b) => {
+      const q = p.rot[b];
+      return { x: q.x, y: q.y, z: q.z, w: q.w };
+    }),
+    blade: v3Record(p.blade),
+    slide: p.slide,
+  };
+}
+
+/** Reads a pose record into `out` (default a new pose). */
+export function poseFromRecord(r: PoseRecord, out: Pose = makePose()): Pose {
+  if (r.rot.length !== BONES.length) throw new Error(`save record: a pose has ${r.rot.length} bone rotations, not ${BONES.length}`);
+  readV3(r.root, out.root, 'pose.root');
+  BONES.forEach((b, i) => {
+    const q = r.rot[i];
+    out.rot[b].set(numFromRecord(q.x, `pose.${b}.x`), numFromRecord(q.y, `pose.${b}.y`), numFromRecord(q.z, `pose.${b}.z`), numFromRecord(q.w, `pose.${b}.w`));
+  });
+  readV3(r.blade, out.blade, 'pose.blade');
+  out.slide = numFromRecord(r.slide, 'pose.slide');
+  return out;
+}
+
+export function trackKeyToRecord(k: TrackKey): TrackKeyRecord {
+  return { f: k.f, pose: poseToRecord(k.pose), ease: k.ease ?? null };
+}
+
+/** A track key with a fresh pose; a null `ease` stays absent, as the key it was made from. */
+export function trackKeyFromRecord(r: TrackKeyRecord): TrackKey {
+  const k: TrackKey = { f: numFromRecord(r.f, 'key.f'), pose: poseFromRecord(r.pose) };
+  if (r.ease !== null) k.ease = r.ease;
+  return k;
 }
