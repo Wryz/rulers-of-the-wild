@@ -9,6 +9,7 @@ import { canonicalJson, parseCanonicalJson } from '../src/save/canonical';
 import { loadWorld } from '../src/save/load';
 import type { SaveV1 } from '../src/save/schema';
 import { serializeWorld } from '../src/save/serialize';
+import { BODY_RADIUS } from '../src/sim/combat';
 import type { Fighter } from '../src/sim/fighter';
 import { DT } from '../src/sim/math';
 import { newRulerState, RULER_TUNING, rulerDamage, rulerDown, rulerHeld, rulerHp } from '../src/sim/ruler';
@@ -395,6 +396,35 @@ describe('deflection (§4.7 step 6)', () => {
     expect(Math.hypot(vx, vz)).toBeCloseTo(6 * Math.cos((20 * Math.PI) / 180), 1);
     expect(Math.abs((Math.atan2(vz, vx) * 180) / Math.PI)).toBeLessThan(0.2);
     expect(g.ruler!.deflectedHeading).toBeCloseTo(EAST, 6);
+  });
+
+  it.each([10, 15, 20, 25, 28])('met %i° off (under deflectMaxDeg), it slides the whole wall and leaves past its end, never into it (AC-6 part 3)', async (deg) => {
+    const { w, g } = await atWall(deg);
+    const r = BODY_RADIUS * SPECIES_BODY.giantApe.scale;
+    let tripped = false;
+    let deflected = -1;
+    let closest = Infinity;
+    const slide: number[] = [];
+    run(w, 600, (ev) => {
+      for (const e of ev) {
+        if (e.type === 'trip') tripped = true;
+        if (e.type === 'deflect' && deflected < 0) deflected = w.tick;
+      }
+      // The capsule's face toward the wall (its near face at z = −0.22).
+      if (g.pos.x > 0 && g.pos.x < 16) {
+        closest = Math.min(closest, -0.22 - (g.pos.z + r));
+        if (deflected > 0) slide.push(g.pos.x);
+      }
+      return g.pos.x > 16 + r;
+    });
+    expect(tripped).toBe(false);
+    expect(deflected).toBeGreaterThan(0);
+    expect(g.pos.x).toBeGreaterThan(16 + r);
+    expect(closest).toBeGreaterThanOrEqual(-RULER_BODY_TUNING.sweepSkinM);
+    // Along the wall at 6 cos θ (the rest of each step projected on it), give or take a tick of the run-up.
+    const mean = ((slide[slide.length - 1] - slide[0]) / (slide.length - 1)) / DT;
+    expect(mean).toBeGreaterThan(6 * Math.cos((deg * Math.PI) / 180) - 0.1);
+    expect(mean).toBeLessThan(6 + 1e-6);
   });
 
   it('trips on the same wall met 45° off', async () => {

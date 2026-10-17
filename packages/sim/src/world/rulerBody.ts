@@ -98,6 +98,7 @@ export const RULER_BODY_TUNING = defineTuning(
     deflectAxisMinXZ: 0.5,
     getupShoveMps: 2,
     riseBlendFrames: 40,
+    slideGrazeDeg: 2,
   },
   {
     tripSpeed: { unit: 'm/s (root horizontal)', source: 'SPEC:782, 879; D-10' },
@@ -135,6 +136,12 @@ export const RULER_BODY_TUNING = defineTuning(
     getupShoveMps: {
       unit: 'm/s',
       source: "NEW: §4.7 get-up: light bodies resting on the ruler are shoved off at this speed before its colliders turn to sensors (MAP gap-3 §3.5)",
+    },
+    slideGrazeDeg: {
+      unit: '°',
+      source:
+        "NEW: §4.7 step 6.1's slide: a blocker whose surface the slide moves into by no more than this is grazed, not met (the capsule ends a deflection touching the face; Rapier's grazing hits on it came 0.6° off the face and stalled a 25° slide mid-wall)",
+      min: 0,
     },
     riseBlendFrames: {
       unit: 'frames',
@@ -731,7 +738,7 @@ export class RulerBodies {
     const T = RULER_BODY_TUNING;
     const l = Math.hypot(dx, dz);
     if (!(l > TINY)) return { x: from.x, z: from.z };
-    const hit = this.castBlocker(f, rb, from, dx, dz, radius);
+    const hit = first ? this.castBlocker(f, rb, from, dx, dz, radius) : this.slideBlocker(f, rb, from, dx, dz, radius);
     if (!hit) return { x: from.x + dx, z: from.z + dz };
     const adv = Math.max(0, hit.toi * l - T.sweepSkinM);
     const px = from.x + (dx / l) * adv;
@@ -793,12 +800,42 @@ export class RulerBodies {
   }
 
   /**
-   * The first blocking-class entity (fixed, anchored, or ≥ shoveLimitKg; not a fresh piece in its grace) whose top
-   * rises above the ankle over `from.y`, met by the capsule (radius `radius`, its straight part from the ankle to the
-   * hip above `from.y`) moving along (dx, dz) within the tick. A capsule that starts inside an obstacle is not stopped by
-   * it while it moves out (stopAtPenetration false). toi is the fraction of (dx, dz).
+   * The blocker that stops a deflection's slide along (dx, dz) (step 6.1's "move the rest of d projected on t̂"): the
+   * first one castBlocker meets whose surface the slide moves into by more than slideGrazeDeg. A surface the slide runs
+   * along is grazed, not met: it is left out and the cast made again. The capsule ends a deflection in touch with the
+   * obstacle's face (its skin is taken along the motion, toward the face), and a slide parallel to that face reported a
+   * grazing hit (toi 0.32 of the step, its normal 0.6° off the face's) that stopped it for good: a 25° approach stalled
+   * mid-wall, at 9.2 m along a 16 m wall.
    */
-  private castBlocker(f: Fighter, rb: RulerBody, from: V3, dx: number, dz: number, radius: number): { e: Entity; toi: number; point: V3; normal: V3 } | null {
+  private slideBlocker(f: Fighter, rb: RulerBody, from: V3, dx: number, dz: number, radius: number): { e: Entity; toi: number; point: V3; normal: V3 } | null {
+    const l = Math.hypot(dx, dz);
+    const minInto = Math.sin(RULER_BODY_TUNING.slideGrazeDeg * DEG);
+    const grazed = new Set<number>();
+    for (;;) {
+      const hit = this.castBlocker(f, rb, from, dx, dz, radius, grazed);
+      if (!hit) return null;
+      const nl = Math.hypot(hit.normal.x, hit.normal.z);
+      // A face the slide moves into (against its outward normal): a block. A flat one (a top) blocks too.
+      if (!(nl > TINY) || -(hit.normal.x * dx + hit.normal.z * dz) / (nl * l) > minInto) return hit;
+      grazed.add(hit.e.id);
+    }
+  }
+
+  /**
+   * The first blocking-class entity (fixed, anchored, or ≥ shoveLimitKg; not a fresh piece in its grace; not one of
+   * `skip`) whose top rises above the ankle over `from.y`, met by the capsule (radius `radius`, its straight part from
+   * the ankle to the hip above `from.y`) moving along (dx, dz) within the tick. A capsule that starts inside an obstacle
+   * is not stopped by it while it moves out (stopAtPenetration false). toi is the fraction of (dx, dz).
+   */
+  private castBlocker(
+    f: Fighter,
+    rb: RulerBody,
+    from: V3,
+    dx: number,
+    dz: number,
+    radius: number,
+    skip: ReadonlySet<number> | null = null,
+  ): { e: Entity; toi: number; point: V3; normal: V3 } | null {
     const w = this.world;
     const ankle = rulerAnkleM(f);
     const hip = rulerHipM(f);
@@ -819,7 +856,7 @@ export class RulerBodies {
       rb.body,
       (c) => {
         const e = this.entityOf(c);
-        return !!e && !e.grace && this.blocks(e) && entityTop(e) > floor;
+        return !!e && !e.grace && !skip?.has(e.id) && this.blocks(e) && entityTop(e) > floor;
       },
     );
     if (!hit) return null;
