@@ -284,6 +284,7 @@ describe('the tool WeaponIds (§1.2 weapons.ts, §5.2, §5.11)', () => {
       expect(TOOL_TUNING[id], id).toBeDefined();
     }
     // A tool exists only as an entity: its template is not enumerated with the weapons that exist on their own.
+    // TODO(P32-fix): this pins weapons.ts's non-enumerable loop; delete both once buildWeapon models the tool ids.
     for (const id of TOOL_WEAPON_IDS) expect(Object.keys(WEAPONS)).not.toContain(id);
     const ts = WEAPON_MOVES.throwSpear;
     expect(ts.throw).toEqual({ release: WEAPON_MOVES.throwOne.throw!.release, speed: 20, spin: 0 });

@@ -113,7 +113,10 @@ export const TOOL_WEAPON_IDS = ['stick', 'sharpStick', 'spear', 'stoneAxe', 'lon
 // own-property lookups, GORE) but is not enumerated with the weapons.
 // DEVIATION (P14): §1.2 appends the templates to WEAPONS, and apps/client/tests/weaponModels.test.ts asks buildWeapon
 // (render/weaponView.ts, P32) for a model of every enumerated WEAPONS entry, which a tool can only get from its entity.
-// TODO(P32-fix): once buildWeapon models the tool ids, drop this loop.
+// So Object.keys/values/entries(WEAPONS) list only DungeonStyle's weapons, though its type is Record<WeaponId, …>.
+// TODO(P32-fix): give buildWeapon a model for each TOOL_WEAPON_IDS entry (or draw the held entity), then delete this
+// loop together with the assertion that pins it, tests/verbs.tools.test.ts ("A tool exists only as an entity: its
+// template is not enumerated", the `not.toContain(id)` line), which fails as soon as the loop goes.
 for (const id of TOOL_WEAPON_IDS) Object.defineProperty(WEAPONS, id, { enumerable: false });
 
 /**
