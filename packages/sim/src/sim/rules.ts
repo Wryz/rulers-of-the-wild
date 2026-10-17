@@ -35,7 +35,8 @@ export const DAMAGE_TUNING = defineTuning(
     throwCapJ: { unit: 'J', source: 'SPEC:285, 886', min: 0 },
     leadingCos: { unit: 'cos', source: 'DS (projectileStrike leading test)', min: -1, max: 1 },
     // The thrown rule's s for a DungeonStyle blade (WeaponDef.sharpness absent, edge 'blade'); a blunt one is 0.
-    bladeSharpness: { unit: 'sharpness', source: '§4.4, D-12', min: 0, max: 1 },
+    // TODO(orchestrator): add its §9.1 row (DAMAGE_TUNING bladeSharpness 0.8, sharpness, NEW) and a §9.2 entry.
+    bladeSharpness: { unit: 'sharpness', source: 'NEW: a DS blade without its own sharpness (§4.4, D-12)', min: 0, max: 1 },
     tipRadiusM: { unit: 'm', source: 'NEW: a sharp point counts only near its tip', min: 0 },
     impactCooldownTicks: { unit: 'ticks', source: 'NEW: bounce suppression per pair', min: 0, step: 1 },
     minImpactJ: { unit: 'J', source: 'NEW: ignore brushes (with |Δv| < flinchDv)', min: 0 },
