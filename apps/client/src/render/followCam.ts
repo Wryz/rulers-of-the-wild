@@ -150,7 +150,8 @@ export class FollowCam {
         this.seen.delete(f);
         continue;
       }
-      if (!this.seen.has(f) && this.onScreen(f)) this.seen.add(f);
+      // (Judged by the view as last drawn: not before the camera has been placed, nor across a snap.)
+      if (!this.seen.has(f) && !this.snapNext && this.onScreen(f)) this.seen.add(f);
       if (!this.seen.has(f)) continue;
       const near = T.rulerRangeM > 0 ? 1 - d / T.rulerRangeM : 0;
       pull = Math.max(pull, T.rulerPullbackPerScale * f.scale * near);
