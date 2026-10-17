@@ -30,6 +30,7 @@ import {
   hurtSpheres,
   type StepResult,
   strikePoint,
+  type V3,
   type WeaponId,
   type World,
 } from '@wild/sim';
@@ -80,7 +81,6 @@ export const GAME_TUNING = defineTuning(
 );
 
 const NO_LOOK = Object.freeze({ dx: 0, dy: 0 });
-const _toward = new Vector3();
 
 /**
  * Rule 12: the one place M1 reads the gore level. P35's prefs carry `gore` (default 'full'); until then DS's
@@ -88,6 +88,155 @@ const _toward = new Vector3();
  */
 function goreOf(prefs: MenusPort['prefs']): GoreLevel {
   return (prefs as Partial<{ gore: GoreLevel }>).gore ?? (prefs.blood ? 'full' : 'off');
+}
+
+/** What slow motion is for (LOOP_TUNING's durations). */
+export type SlowKind = Parameters<LoopPort['slowMotion']>[0];
+
+/** What the presenter knows when an event arrives. */
+export interface BeatContext {
+  /** The local player. */
+  player: Fighter;
+  /** DS's game-style cues (prefs.cues): real blows freeze time only briefly without them. */
+  cues: boolean;
+  /** The loop's hit-pause now (steps). */
+  hitstop: number;
+  /** Trees seen falling and not landed yet. */
+  falling: ReadonlySet<number>;
+  /** Where the camera is (how far away a tree landed). */
+  camera: V3;
+}
+
+/** What one event asks of the loop, the camera and the HUD (beatOf; Game.present applies it). */
+export interface Beat {
+  /** The loop's hit-pause after this event (steps). */
+  hitstop: number;
+  /** Slow motion to raise (LoopPort.slowMotion), or null. */
+  slow: SlowKind | null;
+  /** Camera trauma to add (0: none). */
+  shake: number;
+  /** The zoom punch (the biggest asked for; 0: none). */
+  punch: number;
+  /** The body that shivers through the hit-pause (null: unchanged). */
+  victim: Fighter | null;
+  /** The screen mood (null: unchanged). */
+  mood: '' | 'death' | null;
+  /** A tree started falling: its landing will be a beat. */
+  treeFalling: number | null;
+  /** A falling tree landed this far from the camera: LoopPort.treeLanded. */
+  treeLanded: { tree: number; distanceM: number } | null;
+  /** The dead player's respawn tick (a number), cleared (null), or unchanged (undefined). */
+  respawnTick: number | null | undefined;
+  /** A respawn: the camera behind, the body snapped back, the death banner gone. */
+  snap: Fighter | null;
+  /** A callout over the player's head. */
+  popup: string | null;
+}
+
+/**
+ * The beat of one event (pure: it reads the event, the context and GAME_TUNING, and changes nothing). DS's hit-pause,
+ * slow-motion and camera values (game.ts handleEvent, onKO): a blow's hit-pause from the move (capped short without
+ * cues), a block's 3 or 8 steps, a perfect parry or dodge and a severed limb or split skull in slow motion, the player's
+ * KO in slow motion with the colour draining out; and M1's: the sim's hit-pause hint on a world impact, a felled tree's
+ * landing (the loop decides how close is close), the death banner's respawn tick and the respawn snap (§10.2, §10.8).
+ */
+export function beatOf(e: SimEvent, c: BeatContext): Beat {
+  const b: Beat = {
+    hitstop: c.hitstop,
+    slow: null,
+    shake: 0,
+    punch: 0,
+    victim: null,
+    mood: null,
+    treeFalling: null,
+    treeLanded: null,
+    respawnTick: undefined,
+    snap: null,
+    popup: null,
+  };
+  const me = c.player;
+  switch (e.type) {
+    case 'hit': {
+      const m = e.move;
+      const big = e.attacker.scale > 1.3;
+      // A heavy weapon lands like one: a longer catch on impact, a bigger jolt.
+      const weight = e.weapon ? Math.min(1.4, 0.8 + 0.1 * e.weapon.mass) : 1;
+      let hs = Math.max(
+        c.hitstop,
+        Math.round(m.hitstop * GAME_TUNING.hitstopMul * (e.counter ? 1.35 : 1) * (e.ko ? 1.8 : 1) * (e.armored ? 0.5 : 1) * (big ? 1.25 : 1) * weight),
+      );
+      // Real blows don't freeze time: only a short catch (unless cues are on).
+      if (!c.cues) hs = Math.min(hs, Math.max(2, Math.round(m.hitstop * 0.45 * weight)));
+      b.hitstop = hs;
+      b.victim = e.defender;
+      b.shake = m.shake * (e.counter ? 1.3 : 1) * (e.ko ? 1.6 : 1) * (big ? 1.6 : 1) * weight * (c.cues ? 1 : 0.6);
+      if (m.weight === 'heavy' || e.counter || big) b.punch = 1;
+      if (e.sever || e.fatal) {
+        // A limb comes off, a skull splits: close to frozen for a moment.
+        b.slow = 'dismember';
+        b.shake += e.sever ? 0.45 : 0.5;
+        b.punch = Math.max(b.punch, 1.2);
+      }
+      return b;
+    }
+    case 'block':
+      b.hitstop = Math.max(c.hitstop, Math.round((e.guardBreak ? 8 : 3) * GAME_TUNING.hitstopMul));
+      b.victim = e.defender;
+      b.shake = e.guardBreak ? 0.35 : 0.1;
+      if (e.parry && e.perfect) {
+        // Timed to the last instant: a beat of slow motion, and you're straight in.
+        b.slow = 'parry';
+        b.punch = 0.6;
+      }
+      return b;
+    case 'dodge':
+      if (e.defender === me && e.perfect) {
+        b.slow = 'parry';
+        b.punch = 0.6;
+      }
+      return b;
+    case 'clang':
+      if (e.f === me) b.shake = 0.12;
+      return b;
+    case 'ko':
+      b.shake = 0.5 * e.victim.scale;
+      if (e.victim === me) {
+        // Your fall: slow, the colour drains out; the death cam is the playerDeath moment's.
+        b.slow = 'playerKo';
+        b.mood = 'death';
+      }
+      return b;
+    case 'impact':
+      // The sim's presentation hints for a world hit (MAP gap-2 §8b).
+      if (e.hitstop > 0) b.hitstop = Math.max(c.hitstop, Math.round(e.hitstop * GAME_TUNING.hitstopMul));
+      b.victim = e.defender;
+      if (e.defender === me && e.shake > 0) b.shake = e.shake;
+      return b;
+    case 'fell':
+      b.treeFalling = e.tree;
+      return b;
+    case 'land':
+      if (e.entity !== null && c.falling.has(e.entity)) {
+        b.treeLanded = { tree: e.entity, distanceM: Math.hypot(e.point.x - c.camera.x, e.point.y - c.camera.y, e.point.z - c.camera.z) };
+      }
+      return b;
+    case 'death':
+      if (e.f === me) b.respawnTick = e.respawnTick;
+      return b;
+    case 'respawn':
+      if (e.f === me) {
+        b.respawnTick = null;
+        b.mood = '';
+        b.snap = e.f;
+      }
+      return b;
+    case 'verb':
+      // A refused verb says why (§10.7).
+      if (!e.ok && e.f === me) b.popup = e.reason ? `${e.verb}: ${e.reason}` : `can't ${e.verb}`;
+      return b;
+    default:
+      return b;
+  }
 }
 
 export class Game {
@@ -251,14 +400,8 @@ export class Game {
   present(r: StepResult, loop: LoopPort): void {
     this.loop = loop;
     for (const f of this.world.combat.fighters) this.views.fighterView(f)?.setShiver(0);
-    for (const e of r.combat) {
-      this.combatBeat(e, loop);
-      this.dispatch(e);
-    }
-    for (const e of r.world) {
-      this.worldBeat(e, loop);
-      this.dispatch(e);
-    }
+    for (const e of r.combat) this.react(e, loop);
+    for (const e of r.world) this.react(e, loop);
     // Every kill cam goes through KillCam.onMoment (SPEC:583-588, RR-14).
     for (const m of this.moments.fromStep(r)) this.killCam.onMoment(m);
   }
@@ -280,12 +423,13 @@ export class Game {
       this.fx.setGore(gore);
     }
     this.views.sync(w, alpha, this.cams.camera.position, { realDt, gameDt, poseOf: this.poseOf, gore, cues: prefs.cues });
-    this.fx.update(gameDt, realDt);
+    this.fx.update(gameDt, realDt, w);
     // Camera: framing you and whoever you're fighting (the director decides when that's a fight).
+    this.cams.setSlowMotion((this.loop?.slowmo ?? 0) > 0);
     this.cams.update(realDt, w, p, p.target && p.target.alive ? p.target : null, this.look);
     this.cams.cutoutFocus(p.pos);
     this.sfx.setListener(this.cams.camera.position);
-    this.sfx.ambience(w);
+    this.sfx.ambience(w, realDt, gameDt);
     this.hud.update(w, p, realDt);
     this.hud.deathBanner(this.respawnTick === null ? null : Math.max(0, (this.respawnTick - w.tick) * DT));
     if (this.panel.visible) this.panel.refresh(w);
@@ -312,115 +456,39 @@ export class Game {
   }
 
   // ---------------------------------------------------------------------------
-  // Beats: the time effects and camera jolts a tick's events raise (DS handleEvent / onKO values)
+  // Beats: the time effects and camera jolts a tick's events raise (beatOf), applied
   // ---------------------------------------------------------------------------
 
-  private combatBeat(e: SimEvent, loop: LoopPort): void {
-    const cues = this.menus.prefs.cues;
-    switch (e.type) {
-      case 'hit': {
-        const m = e.move;
-        const big = e.attacker.scale > 1.3;
-        // A heavy weapon lands like one: a longer catch on impact, a bigger jolt.
-        const weight = e.weapon ? Math.min(1.4, 0.8 + 0.1 * e.weapon.mass) : 1;
-        let hs = Math.max(
-          loop.hitstop,
-          Math.round(m.hitstop * GAME_TUNING.hitstopMul * (e.counter ? 1.35 : 1) * (e.ko ? 1.8 : 1) * (e.armored ? 0.5 : 1) * (big ? 1.25 : 1) * weight),
-        );
-        // Real blows don't freeze time: only a short catch (unless cues are on).
-        if (!cues) hs = Math.min(hs, Math.max(2, Math.round(m.hitstop * 0.45 * weight)));
-        loop.hitstop = hs;
-        this.hitstopVictim = e.defender;
-        this.cams.shake(m.shake * (e.counter ? 1.3 : 1) * (e.ko ? 1.6 : 1) * (big ? 1.6 : 1) * weight * (cues ? 1 : 0.6));
-        if (m.weight === 'heavy' || e.counter || big) this.cams.punch(1);
-        if (e.sever) {
-          // A limb comes off: close to frozen for a moment.
-          loop.slowMotion('dismember');
-          this.cams.shake(0.45);
-          this.cams.punch(1.2);
-        } else if (e.fatal) {
-          loop.slowMotion('dismember');
-          this.cams.shake(0.5);
-          this.cams.punch(1.2);
-        }
-        return;
-      }
-      case 'block':
-        loop.hitstop = Math.max(loop.hitstop, Math.round((e.guardBreak ? 8 : 3) * GAME_TUNING.hitstopMul));
-        this.hitstopVictim = e.defender;
-        this.cams.shake(e.guardBreak ? 0.35 : 0.1);
-        if (e.parry && e.perfect) {
-          // Timed to the last instant: a beat of slow motion, and you're straight in.
-          loop.slowMotion('parry');
-          this.cams.punch(0.6);
-        }
-        return;
-      case 'dodge':
-        if (e.defender === this.player && e.perfect) {
-          loop.slowMotion('parry');
-          this.cams.punch(0.6);
-        }
-        return;
-      case 'clang':
-        if (e.f === this.player) this.cams.shake(0.12);
-        return;
-      case 'ko':
-        this.cams.shake(0.5 * e.victim.scale);
-        if (e.victim === this.player) {
-          // Your fall: slow, the colour drains out; the death cam is the playerDeath moment's.
-          loop.slowMotion('playerKo');
-          this.hud.mood('death');
-        }
-        return;
-      default:
-        return;
+  /** One event: its beat (beatOf) applied, the sim's launch handed to the bodies, then every owner's reaction. */
+  private react(e: SimEvent, loop: LoopPort): void {
+    const b = beatOf(e, { player: this.player, cues: this.menus.prefs.cues, hitstop: loop.hitstop, falling: this.fallingTrees, camera: this.cams.camera.position });
+    loop.hitstop = b.hitstop;
+    if (b.victim) this.hitstopVictim = b.victim;
+    if (b.slow) loop.slowMotion(b.slow);
+    if (b.shake > 0) this.cams.shake(b.shake);
+    if (b.punch > 0) this.cams.punch(b.punch);
+    if (b.mood !== null) this.hud.mood(b.mood);
+    if (b.treeFalling !== null) this.fallingTrees.add(b.treeFalling);
+    if (b.treeLanded) {
+      this.fallingTrees.delete(b.treeLanded.tree);
+      loop.treeLanded(b.treeLanded.distanceM);
     }
-  }
-
-  private worldBeat(e: SimEvent, loop: LoopPort): void {
-    switch (e.type) {
-      case 'impact':
-        // The sim's presentation hints for a world hit (MAP gap-2 §8b).
-        if (e.hitstop > 0) loop.hitstop = Math.max(loop.hitstop, Math.round(e.hitstop * GAME_TUNING.hitstopMul));
-        this.hitstopVictim = e.defender;
-        if (e.defender === this.player && e.shake > 0) this.cams.shake(e.shake);
-        return;
-      case 'fell':
-        this.fallingTrees.add(e.tree);
-        return;
-      case 'land':
-        if (e.entity !== null && this.fallingTrees.delete(e.entity)) {
-          loop.treeLanded(this.cams.camera.position.distanceTo(_toward.set(e.point.x, e.point.y, e.point.z)));
-        }
-        return;
-      case 'launch':
-        this.presentation.onLaunch(e.f, e.vel, e.angVel);
-        return;
-      case 'death':
-        if (e.f === this.player) this.respawnTick = e.respawnTick;
-        return;
-      case 'respawn':
-        if (e.f === this.player) {
-          this.respawnTick = null;
-          this.hud.deathBanner(null);
-          this.hud.mood('');
-          this.cams.snapBehind(e.f);
-          this.presentation.snapTo(e.f);
-        }
-        return;
-      case 'verb':
-        // A refused verb says why (§10.7).
-        if (!e.ok && e.f === this.player) this.hud.popup(e.reason ? `${e.verb}: ${e.reason}` : `can't ${e.verb}`);
-        return;
-      default:
-        return;
+    if (b.respawnTick !== undefined) this.respawnTick = b.respawnTick;
+    if (b.snap) {
+      this.hud.deathBanner(null);
+      this.cams.snapBehind(b.snap);
+      this.presentation.snapTo(b.snap);
     }
+    if (b.popup !== null) this.hud.popup(b.popup);
+    if (e.type === 'launch') this.presentation.onLaunch(e.f, e.vel, e.angVel);
+    this.dispatch(e);
   }
 
   /** Each owner's own reaction to the event (DS handleEvent's cases, split by owner). */
   private dispatch(e: SimEvent): void {
     const w = this.world;
     this.presentation.handle(e, w);
+    this.cams.handle(e, w);
     this.views.handle(e, w);
     this.fx.handle(e, w);
     this.sfx.handle(e, w);

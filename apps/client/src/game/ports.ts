@@ -18,7 +18,7 @@
 // "P31"): the `handle(e, world)` methods, through which each owner reacts to the sim's events itself (DS's handleEvent
 // cases, split by owner), and what game.ts needs to draw a ragdoll, freeze a hit-pause and run the menus.
 import type { PerspectiveCamera, Quaternion, Scene, Vector3 } from 'three';
-import type { BoneName, Command, CombatEvent, DevOp, Fighter, StepResult, TuningEdit, V3, World, WorldEvent } from '@wild/sim';
+import type { BoneName, Command, CombatEvent, DevOp, Fighter, StepResult, TuningEdit, V3, World, WorldEvent, Wound } from '@wild/sim';
 import type { InputFrame } from '../input/input';
 import type { UiMode } from '../input/verbInput';
 import type { Shot } from '../render/cinematics';
@@ -72,6 +72,25 @@ export interface FighterViewPort {
   setGore(level: GoreLevel): void;
   /** DS: the hit-pause jitter of the struck body (0 stills it). */
   setShiver(amount: number): void;
+  // DS points and looks the effects need (FxPort: face blood, wound and weapon drips, stump spurts, sweat), P31:
+  /** A point on the face (world), where blood comes from. */
+  facePoint(where: 'mouth' | 'nose' | 'brow', out?: Vector3): Vector3;
+  /** Where a wound bleeds from (world). */
+  woundPoint(w: Wound, out?: Vector3): Vector3;
+  /** The tip of the weapon in `f`'s hand as drawn (world), or null. */
+  weaponTip(f: Fighter, out?: Vector3): Vector3 | null;
+  /** How much blood is on the weapon in hand (0..1): a blow puts it there, drips use it up. */
+  weaponBlood: number;
+  /** The chest as drawn (world): a stump's spurt points away from it. */
+  chest(out?: Vector3): Vector3;
+  /** The skin's colour (a torn piece's gib). */
+  readonly skin: string;
+  /** Skin from dry to glistening (0..1). */
+  setSweat(s: number): void;
+  /** Facial bruising (0..1) and an open cut over the brow. */
+  setTrauma(bruise: number, cut: boolean): void;
+  /** Healed and clean (a respawn): wounds, blood, bruises and sweat gone; the sim's wounds are drawn again. */
+  reset(): void;
 }
 
 /** P33: game/presentationWorld.ts + body/ragdoll.ts (changed DS). Never read by the sim (rule 6). */
@@ -94,7 +113,8 @@ export interface PresentationPort {
 export interface FxPort {
   /** Particles, blood and gibs an event throws (DS: sparks, dust, a blade's spray). */
   handle(e: SimEvent, world: World): void;
-  update(gameDt: number, realDt: number): void;
+  /** Per rendered frame: particles fly, blood drips from faces, wounds and weapons, sweat builds (through the views). */
+  update(gameDt: number, realDt: number, world: World): void;
   setGore(level: GoreLevel): void;
   clear(): void;
 }
@@ -111,6 +131,10 @@ export interface CameraPort {
   readonly camera: PerspectiveCamera;
   /** DS: a brief zoom on a heavy blow (CameraRig.zoomPunch). */
   punch(amount: number): void;
+  /** DS: the view tightens a little while slow motion runs (the loop's slowmo > 0). */
+  setSlowMotion(on: boolean): void;
+  /** P31: the camera's own reactions to an event (landings and footfalls felt ∝ mass and distance, SPEC:581, 849). */
+  handle(e: SimEvent, world: World): void;
   /** DS: the canvas changed size (px). */
   resize(width: number, height: number): void;
 }
@@ -158,7 +182,8 @@ export interface HudPort {
 export interface SfxPort {
   handle(e: SimEvent, world: World): void;
   setListener(p: Vector3): void;
-  ambience(world: World): void;
+  /** Per rendered frame: the ambience, and DS's panting when the player is gassed (it stops when the game does). */
+  ambience(world: World, realDt: number, gameDt: number): void;
   /** DS: the mute key toggles between 0 and GAME_TUNING.volume. */
   readonly volume: number;
   setVolume(v: number): void;

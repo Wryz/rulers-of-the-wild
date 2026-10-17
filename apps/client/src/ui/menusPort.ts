@@ -6,6 +6,9 @@
 // STUB (P31; P35 fills it): DungeonStyle's settings, battle log and marks (game.ts logHit). A recording is filed when
 // the player dies and the next starts at the respawn, so a session isn't one ever-growing video.
 // TODO(M5): the rolling 30 s buffer and the clip button replace this.
+// TODO(P35): Settings (ui/settings.ts) still offers DS's rows: "Fight tips" does nothing now (the tips HUD is not shown,
+// see ui/hudPort.ts), nor does the telegraph-ring part of "Combat cues"; "Blood effects" stands in for the gore level
+// (game.ts goreOf) until prefs.gore; its controls text ("Gamepad: X/Y punch, A/B kick", "G grab") predates §5.14.
 import type { Fighter, World } from '@wild/sim';
 import type { MenusPort, SimEvent } from '../game/ports';
 import type { Prefs } from '../game/prefs';

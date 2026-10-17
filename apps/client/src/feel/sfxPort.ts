@@ -32,8 +32,26 @@ export class SfxAdapter implements SfxPort {
   /** TODO(P37): positional sound around the camera. */
   setListener(_p: Vector3): void {}
 
-  /** TODO(P37): the 'jungle' ambience, thinning out when the giant is near. */
-  ambience(_world: World): void {}
+  /** TODO(P37): the 'jungle' ambience, thinning out when the giant is near. Plus DS's panting, now. */
+  ambience(_world: World, realDt: number, gameDt: number): void {
+    if (gameDt > 0) this.panting(realDt);
+  }
+
+  private breathT = 0;
+  private breathOut = false;
+
+  /** DS: you can hear yourself sucking air when you're gassed. */
+  private panting(dt: number): void {
+    const p = this.player();
+    if (!p) return;
+    const tired = Math.max(0, Math.min(1, (0.4 - p.stamina) / 0.35));
+    if (!p.alive || tired <= 0) return;
+    this.breathT -= dt;
+    if (this.breathT > 0) return;
+    this.breathOut = !this.breathOut;
+    this.sfx.pant(this.breathOut, 0.5 + tired);
+    this.breathT = this.breathOut ? 0.42 - tired * 0.12 : 0.3 - tired * 0.08;
+  }
 
   handle(e: SimEvent, _world: World): void {
     const s = this.sfx;
@@ -93,6 +111,12 @@ export class SfxAdapter implements SfxPort {
       }
       case 'ko':
         s.ko();
+        return;
+      case 'land':
+        // TODO(P37): the thud of something landing, heard when it lands (SPEC:581): a body → bodyFall(mass, hard) (DS
+        // bodyLanding: mass = scale³, hard = min(1, fall speed / 5)); a log or a stone → landing(mass, …); a felled tree
+        // → treeFall(mass). DS's jump landings (both feet at once, footstep(surface, 1 and 0.9, 1.15·scale)) need a
+        // per-step source too (DS detected them from f.isAirborne()).
         return;
       default:
         return;

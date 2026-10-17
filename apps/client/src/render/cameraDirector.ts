@@ -8,7 +8,7 @@
 // and line of sight of cuts, far planes.
 import type { PerspectiveCamera, Vector3 } from 'three';
 import type { Fighter, World } from '@wild/sim';
-import type { CameraPort, CinematicsPort } from '../game/ports';
+import type { CameraPort, CinematicsPort, SimEvent } from '../game/ports';
 import type { CameraRig } from './cameraRig';
 import type { Cinematics, Shot } from './cinematics';
 import { updateCutout } from './cutout';
@@ -88,6 +88,19 @@ export class CameraDirector implements CameraPort {
   punch(amount: number): void {
     this.rig.zoomPunch(amount);
   }
+
+  /** DS: the fight camera tightens (×1.12) while slow motion runs. */
+  setSlowMotion(on: boolean): void {
+    this.rig.zoom = on ? 1.12 : 1;
+  }
+
+  /**
+   * TODO(P34): landings felt ∝ mass and distance (SPEC:581; DS bodyLanding: trauma min(0.6, 0.08·mass·hard) for a body
+   * over 1.5 "mass"; DS jump landings 0.08·scale for a fighter over 1.3 scale), and the giant's footfalls
+   * (FEEL_TUNING.giantShake*, 0.05·(scale − 1)·near within 6·scale m, SPEC:849). The `land` event carries the point,
+   * mass and energy; footfalls need a per-step source (DS read f.footwork.landed, see feel/sfxPort.ts).
+   */
+  handle(_e: SimEvent, _world: World): void {}
 
   snapBehind(f: Fighter): void {
     this.rig.snap(f);

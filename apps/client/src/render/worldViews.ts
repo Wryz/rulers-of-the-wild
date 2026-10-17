@@ -5,7 +5,7 @@
 // STUB (P31; P32 fills it): DungeonStyle's fighter views (drawn from the ragdoll, else from the rig; the weapon in hand,
 // new wounds, blinks, hit flashes, torn ears, split skulls), the terrain tiles and the sky. P32: species palettes and
 // scale, held entities, scars, trees, entities, ropes, grass.
-import type { Scene, Vector3 } from 'three';
+import { type Scene, Vector3 } from 'three';
 import { BONES, type BoneName, type Fighter, type V3, type World, type Wound } from '@wild/sim';
 import type { BodyPose, FighterViewPort, GoreLevel, SimEvent, ViewFrame, WorldViewsPort } from '../game/ports';
 import { EntityViews } from './entityViews';
@@ -76,6 +76,12 @@ export class WorldViews implements WorldViewsPort {
 
   /** DS's view reactions (game.ts handleEvent): blood on what hit, a hit flash, a torn piece, a skull blow. */
   handle(e: SimEvent, _world: World): void {
+    if (e.type === 'respawn') {
+      // DS resetPlayer: patched up, clean. TODO(P32): whatever M1's respawn keeps of the body (rule 9) is drawn from the
+      // sim's state after this reset (the sim's remaining wounds are drawn again on the next frame).
+      this.fighters.get(e.f)?.reset();
+      return;
+    }
     if (e.type !== 'hit') return;
     const m = e.move;
     const av = this.fighters.get(e.attacker)?.view;
@@ -105,9 +111,54 @@ export class WorldViews implements WorldViewsPort {
 
 /** The DS FighterView behind FighterViewPort. */
 export class FighterViewAdapter implements FighterViewPort {
-  private readonly shown = new WeakSet<Wound>();
+  private shown = new WeakSet<Wound>();
 
   constructor(readonly view: FighterView) {}
+
+  get weaponBlood(): number {
+    return this.view.weaponBlood;
+  }
+
+  set weaponBlood(v: number) {
+    this.view.weaponBlood = v;
+  }
+
+  get skin(): string {
+    return this.view.palette.skin;
+  }
+
+  facePoint(where: 'mouth' | 'nose' | 'brow', out = new Vector3()): Vector3 {
+    return this.view.facePoint(where, out);
+  }
+
+  woundPoint(w: Wound, out = new Vector3()): Vector3 {
+    return this.view.woundPoint(w, out);
+  }
+
+  weaponTip(f: Fighter, out = new Vector3()): Vector3 | null {
+    return f.weapon ? this.view.weaponTip(f.weapon.length, f.scale, out) : null;
+  }
+
+  chest(out = new Vector3()): Vector3 {
+    return this.view.bones.chest.getWorldPosition(out);
+  }
+
+  setSweat(s: number): void {
+    this.view.setSweat(s);
+  }
+
+  setTrauma(bruise: number, cut: boolean): void {
+    this.view.setTrauma(bruise, cut);
+  }
+
+  reset(): void {
+    const v = this.view;
+    v.clearWounds();
+    v.clean();
+    v.setTrauma(0, false);
+    v.weaponBlood = 0;
+    this.shown = new WeakSet<Wound>();
+  }
 
   syncFromRig(f: Fighter): void {
     this.view.syncFromRig(f);

@@ -92,12 +92,13 @@ function assemble(world: World, canvas: HTMLCanvasElement, hudRoot: HTMLElement)
   const rig = new CameraRig();
   const cams = new CameraDirector(rig, cuts, new FollowCam());
   const presentation = new PresentationWorld(RAPIER, world);
+  const views = new WorldViews(scene, world);
 
   const ports: GamePorts = {
     scene,
-    views: new WorldViews(scene, world),
+    views,
     presentation,
-    fx: new Fx(scene, () => menus.prefs.cues),
+    fx: new Fx(scene, views, presentation, () => menus.prefs.cues, player),
     cams,
     cine: cuts,
     verbInput: new VerbInput(() => cams.moveBasis()),
@@ -107,7 +108,7 @@ function assemble(world: World, canvas: HTMLCanvasElement, hudRoot: HTMLElement)
       across: (a, b, toward) => sideAcross(rig.camera.position, a, b, toward),
     }),
     moments: new MomentBuilder(() => world.tick),
-    hud: new HudAdapter(hud, hudRoot, () => cams.camera, () => cuts.active),
+    hud: new HudAdapter(hud, hudRoot, () => cams.camera, () => cuts.active, () => menus.prefs, () => input.bindings),
     sfx: new SfxAdapter(sfx, player),
     panel: NO_PANEL,
     menus,

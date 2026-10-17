@@ -2,19 +2,21 @@
 // the terrain and the fixed and anchored entities mirrored in, and the ragdolls that draw the player and the apes. Plus
 // `Fx`, the blood, gibs and particles an event throws (render/blood.ts, gibs.ts, particles.ts).
 //
-// STUB (P31; P33 fills it): the final exported names, PRESENTATION_TUNING with its §9 values, and DungeonStyle's ragdolls
-// (driven toward the rig, a blow's impulse, a block, a limb cut loose, the knockdown throw) on mirrored terrain tiles.
+// STUB (P31; P33 fills it): the final exported names, PRESENTATION_TUNING with its §9 values, DungeonStyle's ragdolls
+// (driven toward the rig, a blow's impulse, a block, a limb cut loose, the knockdown throw) on mirrored terrain tiles,
+// and DungeonStyle's blood, gibs and particles (sprays, face blood, drips, stump spurts, sweat, sparks, dust, rings).
 // Nothing here writes fighter state: the DS ragdoll → sim copy is gone (§10.11). P33 adds the down-follow toward the
 // sim's slab, the launch from the sim's `launch` event, slots owned by this world (D-42), ragdoll LOD and the entity
 // mirrors.
 import type RAPIER_NS from '@dimforge/rapier3d-compat';
 import { type Scene, Vector3 } from 'three';
-import { defineTuning, DT, type Fighter, limbBones, type V3, type World, WORLD_TUNING } from '@wild/sim';
+import { defineTuning, DT, type Fighter, limbBones, Rng, type V3, type World, WORLD_TUNING } from '@wild/sim';
 import { GROUP_ENV, groups, Ragdoll } from '../body/ragdoll';
 import { Blood } from '../render/blood';
 import { Gibs } from '../render/gibs';
 import { Effects } from '../render/particles';
-import type { BodyPose, FxPort, GoreLevel, PresentationPort, SimEvent } from './ports';
+import type { BodyPose, FighterViewPort, FxPort, GoreLevel, PresentationPort, SimEvent, WorldViewsPort } from './ports';
+import { Trauma } from './trauma';
 
 export const PRESENTATION_TUNING = defineTuning(
   'PRESENTATION_TUNING',
@@ -115,8 +117,18 @@ export class PresentationWorld implements PresentationPort {
     };
   }
 
+  /** Puts the body back on the rig at once (a respawn). DS resetPlayer: a body with limbs cut loose is rebuilt whole. */
   snapTo(f: Fighter): void {
-    this.ragdolls.get(f)?.snapTo(f);
+    const rd = this.ragdolls.get(f);
+    if (!rd) return;
+    if (rd.loose.size > 0) {
+      // TODO(P33): rebuild from what the sim's respawn keeps of the body (f.severed), in this world's slots (D-42).
+      rd.dispose();
+      this.ragdolls.delete(f);
+      this.attachRagdoll(f);
+      return;
+    }
+    rd.snapTo(f);
   }
 
   bodyPose(f: Fighter): BodyPose | null {
@@ -145,6 +157,10 @@ export class PresentationWorld implements PresentationPort {
       }
       case 'block':
         this.ragdolls.get(e.defender)?.applyBlock(e.dir, e.move);
+        return;
+      case 'respawn':
+        // TODO(P33): the respawned body's ragdoll from the sim's state (the slab handed back, §4.5).
+        this.snapTo(e.f);
         return;
       default:
         return;
@@ -185,16 +201,31 @@ export class PresentationWorld implements PresentationPort {
   }
 }
 
-/** Blood, gibs and particles (render/blood.ts, gibs.ts, particles.ts): DS's per-event effects. */
+/**
+ * Blood, gibs and particles (render/blood.ts, gibs.ts, particles.ts) and DS's face blood (game/trauma.ts): the effects an
+ * event throws, and each frame the drips from faces, wounds and weapons, a fresh stump's spurts and the sweat sheen. It
+ * finds the bodies as drawn through the views (FighterViewPort's points). Presentation only: Math.random and the
+ * client's own Rng never touch the sim (rule 7).
+ */
 export class Fx implements FxPort {
   readonly blood: Blood;
   readonly gibs: Gibs;
   readonly effects: Effects;
+  /** Accumulated facial damage per fighter (DS game/trauma.ts). */
+  private readonly trauma = new Map<Fighter, Trauma>();
+  /** How sweaty each fighter has got (0..1, DS). */
+  private readonly sweat = new Map<Fighter, number>();
+  /** The client's own stream for face drips (DS fxRng): never the sim's. */
+  private readonly fxRng = new Rng(99);
 
   constructor(
     scene: Scene,
+    private readonly views: WorldViewsPort,
+    /** The bodies as drawn (TODO(P33): body-fall dust at the ragdoll's pelvis on the sim's `land` events). */
+    readonly presentation: PresentationPort,
     /** DS's game-style cues (prefs.cues). */
     private readonly cues: () => boolean,
+    private readonly player: () => Fighter | null,
   ) {
     this.blood = new Blood(scene);
     this.gibs = new Gibs(scene);
@@ -202,26 +233,33 @@ export class Fx implements FxPort {
   }
 
   handle(e: SimEvent, _world: World): void {
+    const me = this.player();
     switch (e.type) {
       case 'hit': {
         const heavy = e.move.weight === 'heavy';
+        const view = this.views.fighterView(e.defender);
         if (this.cues()) {
           const col = e.armored ? '#ff9a3c' : e.counter ? '#ffd36b' : '#fff0c8';
           this.effects.flash(e.point, heavy ? 0.42 : 0.26, e.counter ? '#ffd36b' : '#fff3d6');
           this.effects.sparks(e.point, e.dir, heavy ? 22 : 12, col, heavy ? 6.5 : 4.5);
         } else if (!e.weapon || e.weapon.edge === 'blunt') {
-          // Real impacts don't spark: sweat flies off a face or body that gets hit. TODO(P33): the sweat level.
+          // Real impacts don't spark: sweat flies off a face or body that gets hit.
           const head = e.zone === 'head';
-          this.effects.sparks(e.point, e.dir.clone().setY(head ? 0.35 : 0.1), Math.round((head ? 10 : 5) * (heavy ? 1.6 : 1) * 0.4), '#dbe6ee', head ? 2.6 : 1.6, 0.016);
+          const wet = 0.4 + (this.sweat.get(e.defender) ?? 0) * 1.2;
+          this.effects.sparks(e.point, e.dir.clone().setY(head ? 0.35 : 0.1), Math.round((head ? 10 : 5) * (heavy ? 1.6 : 1) * wet), '#dbe6ee', head ? 2.6 : 1.6, 0.016);
         }
+        this.bleed(e.defender, view, e);
         if (e.weapon?.edge === 'blade') this.blood.spray(e.point, e.dir.clone().setY(0.25), 0.5 + (e.wound?.bleed ?? 0.3) * 1.2, 3);
-        if (e.sever) for (let i = 0; i < 4; i++) this.blood.spray(e.point, e.dir.clone().setY(0.6 + i * 0.2), 1, 3.4);
-        else if (e.fatal) for (let i = 0; i < 5; i++) this.blood.spray(e.point, e.dir.clone().setY(1 + i * 0.25), 1, e.fatal === 'split' ? 2.6 : 3.2);
+        if (e.sever) {
+          for (let i = 0; i < 4; i++) this.blood.spray(e.point, e.dir.clone().setY(0.6 + i * 0.2), 1, 3.4);
+        } else if (e.fatal) {
+          const top = view ? view.facePoint('brow') : e.point.clone();
+          for (let i = 0; i < 5; i++) this.blood.spray(top, e.dir.clone().setY(1 + i * 0.25), 1, e.fatal === 'split' ? 2.6 : 3.2);
+        }
         if (e.tear && this.blood.enabled) {
-          this.gibs.spawn(e.tear.point, e.tear.vel, e.tear.size, '#d9a07a', e.tear.piece);
+          this.gibs.spawn(e.tear.point, e.tear.vel, e.tear.size, view?.skin ?? '#d9a07a', e.tear.piece);
           this.blood.spray(e.tear.point, e.tear.vel.clone(), 0.8, 2.2);
         }
-        // TODO(P33): face bleeding (game/trauma.ts: mouth, nose, brow) needs the fighter view's face points.
         return;
       }
       case 'block':
@@ -229,6 +267,12 @@ export class Fx implements FxPort {
           this.effects.sparks(e.point, e.dir, e.guardBreak ? 18 : 8, '#8fd0ff', 3.5, 0.03);
           this.effects.flash(e.point, 0.2, '#9fd8ff');
         } else this.effects.sparks(e.point, e.dir, e.guardBreak ? 8 : 4, '#dbe6ee', 1.5, 0.014);
+        // Timed to the last instant: a gold ring round whoever parried (DS).
+        if (e.parry && e.perfect) this.effects.ring(e.defender.pos, 1.1, '#ffd36b', 0.5, () => e.defender.pos);
+        return;
+      case 'dodge':
+        if (e.defender === me && e.perfect) this.effects.ring(e.defender.pos, 1.1, '#ffd36b', 0.5, () => e.defender.pos);
+        if (e.defender === me && e.kind !== 'airborne' && this.cues()) this.effects.ring(e.defender.pos, 0.9, '#ffd36b', 0.45, () => e.defender.pos);
         return;
       case 'defend':
         if (e.kind === 'slide') this.effects.dust(e.f.pos, 10, 0.4);
@@ -249,16 +293,58 @@ export class Fx implements FxPort {
         this.effects.sparks(e.point, away, e.metal ? 10 : 6, e.metal ? '#ffd27a' : '#8a6a48', e.metal ? 3.2 : 1.4, e.metal ? 0.012 : 0.02);
         return;
       }
+      case 'land':
+        // TODO(P33): dust where a body or a log landed, ∝ its mass (SPEC:581; DS bodyLanding: 6 + 10·hard·min(3, mass)
+        // puffs over 0.25·scale m at the ragdoll's pelvis), and DS's jump landings (both feet, 6 puffs over 0.3·scale m;
+        // DS detected them per step from f.isAirborne()).
+        return;
+      case 'respawn':
+        // Patched up (DS resetPlayer): the face and the sweat start again (the views reset their own looks).
+        this.trauma.delete(e.f);
+        this.sweat.delete(e.f);
+        return;
       default:
         return;
     }
   }
 
-  update(gameDt: number, realDt: number): void {
+  update(gameDt: number, realDt: number, world: World): void {
     this.effects.update(gameDt, realDt);
     // (In a freeze-frame the blood still creeps outward — barely — so a spray is a fan of drops, not one clump.)
     this.blood.update(Math.max(gameDt, realDt * 0.1));
     this.gibs.update(gameDt, (at, speed) => this.blood.spray(at, new Vector3(0, 1, 0), Math.min(0.4, speed * 0.08), 0.6));
+    // Drips, spurts and sweat move with game time: none in a pause or a hit-pause (DS).
+    if (gameDt <= 0) return;
+    for (const f of world.combat.fighters) {
+      const view = this.views.fighterView(f);
+      if (!view) continue;
+      // Sweat builds with time and exertion.
+      const s = Math.min(1, (this.sweat.get(f) ?? 0) + gameDt * (0.006 + 0.035 * (1 - f.stamina)));
+      this.sweat.set(f, s);
+      view.setSweat(s);
+      if (!this.blood.enabled) continue;
+      const t = this.trauma.get(f);
+      if (t?.drip(gameDt, this.fxRng)) this.blood.drip(view.facePoint(t.cut && Math.random() < 0.4 ? 'brow' : 'mouth'));
+      // A bloodied blade drips for a while.
+      if (f.weapon && view.weaponBlood > 0.08) {
+        view.weaponBlood *= 0.999;
+        if (Math.random() < view.weaponBlood * gameDt * 5) {
+          const tip = view.weaponTip(f);
+          if (tip) this.blood.drip(tip);
+        }
+      }
+      for (const w of f.wounds) {
+        if (w.bleed <= 0.02) continue;
+        if (w.stump && w.bleed > 0.45 && Math.random() < 0.6) {
+          // Arterial spurts from a fresh stump.
+          const at = view.woundPoint(w);
+          const out = at.clone().sub(view.chest()).setY(0).normalize().setY(w.stump === 'head' ? 1.4 : 0.5);
+          this.blood.spray(at, out, 0.18 * w.bleed, 1.6 + Math.random());
+        } else if (Math.random() < w.bleed * gameDt * 6) {
+          this.blood.drip(view.woundPoint(w));
+        }
+      }
+    }
   }
 
   /** TODO(M5, rule 12): 'stylised'. M1 draws blood unless gore is off. */
@@ -271,5 +357,18 @@ export class Fx implements FxPort {
   clear(): void {
     this.blood.clear();
     this.gibs.clear();
+  }
+
+  /** DS bleed(): accumulated facial damage spills blood from the mouth, nose or a cut brow. */
+  private bleed(f: Fighter, view: FighterViewPort | null, e: Extract<SimEvent, { type: 'hit' }>): void {
+    let t = this.trauma.get(f);
+    if (!t) this.trauma.set(f, (t = new Trauma()));
+    for (const b of t.onHit(e.zone, e.move, e.damage, e.counter)) {
+      if (!view) break;
+      // Along the blow and up; a cough spills forward (toward the attacker) and down.
+      const d = b.style === 'hit' ? e.dir.clone().setY(0.35) : e.dir.clone().negate().setY(-0.4);
+      this.blood.spray(view.facePoint(b.source), d, b.amount * f.scale, b.style === 'hit' ? 2.8 : 1.4);
+    }
+    view?.setTrauma(t.bruise, t.cut);
   }
 }
