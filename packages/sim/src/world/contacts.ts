@@ -43,7 +43,7 @@ import { boneMass, DAMAGE_TUNING, impactEnergy, zoneToughness } from '../sim/rul
 import { safeLandingSpeed } from './characters';
 import { contactEnergy, contactMeff, dot, impactDv, len, leadingSharpness, type MeffSide, rotate, selfMotion, sideMass } from './damage';
 import { FELL_TUNING } from './felling';
-import { type ContactPair, ownerKey, PHYSICS_TUNING } from './physics';
+import { compareOwners, type ContactPair, ownerKey, PHYSICS_TUNING } from './physics';
 import { RULER_BODY_TUNING } from './rulerBody';
 import type { CauseFeature, Entity, Impact, ImpactCause, Owner, Pose3, Quat, RulerZoneId, V3 } from './types';
 import type { World } from './world';
@@ -666,8 +666,6 @@ export class ContactSystem {
 // Owners and groups
 // ---------------------------------------------------------------------------
 
-const KIND_RANK: Readonly<Record<Merged['kind'], number>> = { terrain: 0, entity: 1, fighter: 2, rope: 3 };
-
 /** The merged owner of a collider's owner; null for a KCC capsule (no damage collider, §4.3). */
 function merged(o: Owner): Merged | null {
   switch (o.kind) {
@@ -686,8 +684,14 @@ function mergedId(m: Merged): number {
   return m.kind === 'terrain' ? 0 : m.kind === 'rope' ? m.joint : m.id;
 }
 
+/** Owner order (§4.3: terrain < entity < fighter < rope, then by id), as physics.ts sorts the drained pairs. */
 function compareMerged(a: Merged, b: Merged): number {
-  return KIND_RANK[a.kind] - KIND_RANK[b.kind] || mergedId(a) - mergedId(b);
+  return compareOwners(asOwner(a), asOwner(b));
+}
+
+/** A merged owner as an Owner (a fighter as its whole self: one part stands for all, so two equal fighters compare 0). */
+function asOwner(m: Merged): Owner {
+  return m.kind === 'fighter' ? { kind: 'fighter', id: m.id, part: 'kcc' } : m;
 }
 
 function sameMerged(a: Merged | null, b: Merged | null): boolean {

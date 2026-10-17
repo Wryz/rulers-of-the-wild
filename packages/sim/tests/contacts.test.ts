@@ -628,6 +628,78 @@ describe('a creature’s own motion (RF-3)', () => {
   });
 });
 
+describe('stakes hurt and kill through the rule (§13.1 P09 Done)', () => {
+  it('an ape knocked off a 2 m scaffold onto a bed of pointed stakes is wounded by their points and killed environmentally', async () => {
+    const w = await make({ seed: 17 });
+    w.addEntity({ material: 'stone', shape: { kind: 'box', hx: 1, hy: 1, hz: 1 }, p: { x: 0, y: 1, z: 0 }, state: 'fixed', look: 'scaffold' });
+    for (let x = 1.1; x < 2.7; x += 0.15) {
+      for (let z = -0.45; z < 0.46; z += 0.15) {
+        w.addEntity({
+          material: 'dryWood',
+          shape: { kind: 'cylinder', halfHeight: 0.4, r: 0.03, sides: 8 },
+          p: { x, y: 0.4, z },
+          state: 'anchored',
+          sharpPoints: [{ local: { x: 0, y: 0.4, z: 0 }, dir: { x: 0, y: 1, z: 0 }, sharpness: 0.6 }],
+          look: 'stake',
+        });
+      }
+    }
+    run(w, 2); // the scaffold is visible to the teleport's support probe after a step
+    const a = addApe(w, 0.75, 0, Math.PI / 2);
+    run(w, 10);
+    expect(a.pos.y).toBeCloseTo(2, 1);
+    a.hp = 30;
+    a.vel.set(3, 0, 0);
+    a.enterKnockdown();
+    const ev: WorldEvent[] = [];
+    let ko: unknown;
+    for (let t = 0; t < 120 && !ko; t++) {
+      w.step();
+      ev.push(...w.events);
+      ko = w.combat.events.find((e) => e.type === 'ko' && e.victim === a);
+    }
+    const stakeHits = impactsOn(ev, a).filter((e) => e.cause.kind === 'entity' && e.cause.feature === 'sharpPoint');
+    expect(stakeHits.length).toBeGreaterThan(0);
+    expect(stakeHits.reduce((sum, e) => sum + e.damage, 0)).toBeGreaterThanOrEqual(30);
+    expect(ko).toMatchObject({ by: 'impact', environmental: true });
+    expect(a.hp).toBe(0);
+  });
+});
+
+describe('the impact trip (§4.7 step 9, SPEC:305)', () => {
+  it('a blocking-class body (≥ impactTripMinKg) at > tripSpeed on a standing ruler’s shin requests a trip; lighter or slower ones don’t', async () => {
+    for (const [mass, v, trips] of [
+      [600, 6, true],
+      [300, 6, false],
+      [600, 3, false],
+    ] as const) {
+      const w = await make({ seed: 18, player: false });
+      WORLD_TUNING.gravityY = 0;
+      const g = addFakeRuler(w);
+      const knee = g.rig.shinL.pos.y;
+      const body = w.physics.rapier.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(0, knee - 0.8, 0));
+      rulerCollider(w, g, 'shinL', body, sensorDesc(RAPIER.ColliderDesc.capsule(0.6, 0.25)));
+      // A stone block 0.5 × 0.5 m in section, as long as its mass needs (2,600 kg/m³).
+      const hx = mass / 2600 / 0.25 / 2;
+      const id = w.addEntity({ material: 'stone', shape: { kind: 'box', hx, hy: 0.25, hz: 0.25 }, p: { x: -1.5, y: knee - 0.8, z: 0 }, lin: { x: v, y: 0, z: 0 }, look: 'block' });
+      const e = w.entities.get(id)!;
+      expect(e.mass).toBeCloseTo(mass, 6);
+      const trip = vi.spyOn(w.rulers, 'requestTrip');
+      const ev = run(w, 40, () => {
+        e.body!.setLinvel({ x: v, y: 0, z: 0 }, true);
+      });
+      // The block met the shin (an impact on the ruler, or at least an episode).
+      expect(impactsOn(ev, g).length + w.contacts.touching(ent(id), { kind: 'fighter', id: g.id, part: 'ruler' }), `${mass} kg at ${v} m/s`).toBeGreaterThan(0);
+      if (trips) {
+        expect(trip).toHaveBeenCalledTimes(1);
+        expect(trip.mock.calls[0][0]).toBe(g);
+        expect(trip.mock.calls[0][1]).toBe('impact');
+        expect(trip.mock.calls[0][2]).toMatchObject({ kind: 'entity', entityId: id });
+      } else expect(trip, `${mass} kg at ${v} m/s`).not.toHaveBeenCalled();
+    }
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Momentum through the solver (RF-4)
 // ---------------------------------------------------------------------------
