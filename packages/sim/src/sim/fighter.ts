@@ -27,6 +27,7 @@ import type {
   GroundQuery,
   Inventory,
   KnockRecord,
+  MaterialId,
   Posture,
   RulerState,
   SpeciesId,
@@ -131,6 +132,33 @@ export interface Counter {
 
 export const GETUP_FRAMES = 40;
 export const KNOCKDOWN_FRAMES = 70;
+
+/**
+ * A worn item as the armour rule reads it (docs/M1-DESIGN.md §4.4, SPEC:417, 885): what it is made of and the zones
+ * it covers. Wearing is not an M1 verb; this is the data path the verb that adds it will fill.
+ */
+export interface WornItem {
+  material: MaterialId;
+  zones: readonly HurtZone[];
+}
+
+/**
+ * `Fighter.armour` from what is worn (§4.4, RR-3): per zone, the sum of the covering items' materials' `armourJ`. It
+ * reads a property, never a material's id (SPEC:192), so a new armour material is a new row of the table, not new code.
+ * `materials` is MATERIALS (world/materials.ts), passed in so the fighter doesn't import a world module; derive again
+ * whenever the worn items or the table change.
+ */
+export function armourFrom(
+  worn: readonly WornItem[],
+  materials: Readonly<Record<MaterialId, { readonly armourJ: number }>>,
+): Partial<Record<HurtZone, number>> {
+  const out: Partial<Record<HurtZone, number>> = {};
+  for (const item of worn) {
+    const j = materials[item.material].armourJ;
+    for (const z of item.zones) out[z] = (out[z] ?? 0) + j;
+  }
+  return out;
+}
 
 /**
  * Where fighter ids come from (docs/M1-DESIGN.md §1.5.3, §8.1). A world owns one and passes it to every fighter it
@@ -290,7 +318,7 @@ export class Fighter {
   playerId: string | null = null;
   /** The last time something knocked this fighter about, and by whom (environmental kills, §4.4). */
   lastKnock: KnockRecord | null = null;
-  /** J added per zone by worn items (Σ of their materials' armourJ), derived when the worn items change (RR-3). */
+  /** J added per zone by worn items (Σ of their materials' armourJ), derived when the worn items change (armourFrom, RR-3). */
   armour: Partial<Record<HurtZone, number>> = {};
   ruler: RulerState | null = null;
   /** The ground under this fighter (footwork plants the feet on it); set by CombatSim when not flat. */
@@ -648,6 +676,8 @@ export class Fighter {
   private weaponFit(move: MoveDef, aim: Aim | null, lungeLeft = 1): WeaponFit | null {
     const t = this.target;
     const w = this.weapon;
+    const focus = this.focusPoint();
+    if (focus && w && move.weapon) return this.pointFit(focus, move, w, lungeLeft);
     if (!t || !t.alive || !w || !move.weapon) return null;
     const lunge = (move.lunge?.distance ?? 0) * this.scale * lungeLeft;
     const stop = (0.74 * (this.scale + t.scale)) / 2;
@@ -662,7 +692,38 @@ export class Fighter {
     const h = targetHeight(t, aim?.height ?? move.height) + (aim?.edgeDy ?? 0) * t.scale - this.pos.y;
     return {
       target: [side * ahead * 0.5 / this.scale, h / this.scale, ahead / this.scale],
-      strikeAt: Math.max(w.strikeFrom + 0.06, w.length - (w.edge === 'blade' && w.style === 'twoHand' ? 0.14 : 0.08)),
+      strikeAt: strikeAtOf(w),
+    };
+  }
+
+  /**
+   * The focused world point a strike aims at (docs/M1-DESIGN.md §5.2, P02b): `verbAim` while it is set and this
+   * fighter isn't locked on to a creature (a committed swing at a focused tree goes at the trunk, not at an ape 20 m
+   * away). null: strikes aim at the target, as in DungeonStyle.
+   */
+  private focusPoint(): Vector3 | null {
+    return this.verbAim && !this.lockedOn ? this.verbAim : null;
+  }
+
+  /**
+   * weaponFit for a focused point (§5.2): the weapon's striking part goes to the point itself, measured from our own
+   * feet (§4.1). A point is not a body: the lunge stops short of it only by our own half of DungeonStyle's stop
+   * distance (0.74 × the two sizes / 2, with a size of 0 for the point), and there is no front of a body to pull back
+   * to (DS's 0.1 × target scale).
+   */
+  private pointFit(at: Vector3, move: MoveDef, w: WeaponDef, lungeLeft: number): WeaponFit {
+    const lunge = (move.lunge?.distance ?? 0) * this.scale * lungeLeft;
+    const ox = at.x - this.pos.x;
+    const oz = at.z - this.pos.z;
+    const dist = Math.hypot(ox, oz);
+    const ahead = Math.max((0.74 * this.scale) / 2, dist - lunge);
+    const fx = Math.sin(this.yaw);
+    const fz = Math.cos(this.yaw);
+    const side = (ox * fz - oz * fx) / Math.max(0.01, dist);
+    const h = at.y - this.pos.y;
+    return {
+      target: [side * ahead * 0.5 / this.scale, h / this.scale, ahead / this.scale],
+      strikeAt: strikeAtOf(w),
     };
   }
 
@@ -686,6 +747,7 @@ export class Fighter {
    * kick can always find a shin.
    */
   canReach(move: MoveDef): boolean {
+    // (A focused point counts as what it goes for: heightGap measures to it, §5.2.)
     if (move.weapon) return true;
     const aims: (Aim | null)[] = move.aims?.length ? move.aims : [null];
     return aims.some((a) => {
@@ -700,11 +762,18 @@ export class Fighter {
    * to hit, in our own (unscaled) metres. Small differences are left to the pose.
    */
   private heightGap(move: MoveDef, aim: Aim | null): number {
-    const t = this.target;
-    if (!t || !t.alive) return 0;
     const h = aim?.height ?? move.height;
+    // A focused point (§5.2) is what the strike goes for, when there is one; else the target's part.
+    const focus = this.focusPoint();
+    let y: number;
+    if (focus) y = focus.y;
+    else {
+      const t = this.target;
+      if (!t || !t.alive) return 0;
+      y = targetHeight(t, h);
+    }
     // Measured from our own feet (§4.1), so strikes fit the same on raised ground.
-    const gap = (targetHeight(t, h) - this.pos.y) / this.scale - AUTHORED_HEIGHT[h];
+    const gap = (y - this.pos.y) / this.scale - AUTHORED_HEIGHT[h];
     return Math.abs(gap) < 0.1 ? 0 : gap - Math.sign(gap) * 0.1;
   }
 
@@ -1371,6 +1440,11 @@ function buildKeys(m: MoveDef, aim: Aim | null, jitter: V3, dy: number, reachZ: 
     }
     return { f: Math.round(markerFrame(m, k.at)), pose, ease: k.ease as Ease | undefined };
   });
+}
+
+/** The distance along a weapon of the part a fitted swing lands with (just short of the tip; a two-handed blade's further in). */
+function strikeAtOf(w: WeaponDef): number {
+  return Math.max(w.strikeFrom + 0.06, w.length - (w.edge === 'blade' && w.style === 'twoHand' ? 0.14 : 0.08));
 }
 
 /** Where a strike of each height lands on an opponent the move was authored for (local m). */
