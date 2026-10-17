@@ -93,7 +93,7 @@ export class Animator {
   restoreRecord(r: AnimatorRecord) {
     poseFromRecord(r.snapshot, this.snapshot);
     this.keys = r.keys.map(trackKeyFromRecord);
-    this.mode = r.mode;
+    this.mode = enumFromRecord(r.mode, ANIM_MODES, 'anim.mode');
     this.fadeLen = numFromRecord(r.fadeLen, 'anim.fadeLen');
     this.procT = numFromRecord(r.procT, 'anim.procT');
   }
@@ -102,8 +102,10 @@ export class Animator {
 // ---------------------------------------------------------------------------
 // Records of the body (docs/M1-DESIGN.md §8.3, P04). Records are plain data written with a fixed key order: numbers as
 // they are (−0 kept), vectors as V3, quaternions as Quat, poses by value. P13's canonical writer turns a non-finite
-// number into '$inf', '$-inf' or '$nan'; numFromRecord is its reader, shared by every record reader of the body and the
-// fighter (footwork.ts, idle.ts, sim/fighter.ts, sim/ai.ts).
+// number into '$inf', '$-inf' or '$nan'; numFromRecord is its reader. Every field is read back through a checking
+// reader (numFromRecord, boolFromRecord, strFromRecord, enumFromRecord, signFromRecord), shared by every record reader
+// of the body and the fighter (footwork.ts, idle.ts, sim/fighter.ts, sim/ai.ts), so a broken or hand-edited save
+// fails at the field it breaks instead of loading a wrong value.
 // ---------------------------------------------------------------------------
 
 /** A pose by value (55 numbers): the pelvis root, each bone's local rotation in BONES order, the blade direction, the grip slide. */
@@ -132,8 +134,42 @@ export function numFromRecord(v: unknown, field: string): number {
   if (v === '$inf') return Infinity;
   if (v === '$-inf') return -Infinity;
   if (v === '$nan') return NaN;
-  throw new Error(`save record: ${field} is ${JSON.stringify(v)}, not a number`);
+  throw notA(field, v, 'a number');
 }
+
+/** A boolean read back from a record; anything else throws. */
+export function boolFromRecord(v: unknown, field: string): boolean {
+  if (typeof v === 'boolean') return v;
+  throw notA(field, v, 'a boolean');
+}
+
+/** A string read back from a record; anything else throws. */
+export function strFromRecord(v: unknown, field: string): string {
+  if (typeof v === 'string') return v;
+  throw notA(field, v, 'a string');
+}
+
+/**
+ * One member of a closed set of strings read back from a record. `domain` is keyed by every member (typed
+ * `Record<Union, …>`, so the compiler keeps it complete when the union grows); anything else throws.
+ */
+export function enumFromRecord<K extends string>(v: unknown, domain: Readonly<Record<K, unknown>>, field: string): K {
+  if (typeof v === 'string' && Object.prototype.hasOwnProperty.call(domain, v)) return v as K;
+  throw notA(field, v, `one of ${Object.keys(domain).join(', ')}`);
+}
+
+/** A side as ±1 (weave, detour, circling) read back from a record; anything else throws. */
+export function signFromRecord(v: unknown, field: string): 1 | -1 {
+  if (v === 1 || v === -1) return v;
+  throw notA(field, v, '1 or -1');
+}
+
+function notA(field: string, v: unknown, what: string): Error {
+  return new Error(`save record: ${field} is ${v === undefined ? 'missing' : JSON.stringify(v)}, not ${what}`);
+}
+
+const ANIM_MODES: Record<AnimatorRecord['mode'], true> = { track: true, procedural: true };
+const EASES: Record<Ease, true> = { linear: true, in: true, out: true, inOut: true, snap: true };
 
 /** A vector as a record (any { x, y, z }: Three's Vector3 or a V3). */
 export function v3Record(v: Readonly<V3>): V3 {
@@ -178,6 +214,6 @@ export function trackKeyToRecord(k: TrackKey): TrackKeyRecord {
 /** A track key with a fresh pose; a null `ease` stays absent, as the key it was made from. */
 export function trackKeyFromRecord(r: TrackKeyRecord): TrackKey {
   const k: TrackKey = { f: numFromRecord(r.f, 'key.f'), pose: poseFromRecord(r.pose) };
-  if (r.ease !== null) k.ease = r.ease;
+  if (r.ease !== null) k.ease = enumFromRecord(r.ease, EASES, 'key.ease');
   return k;
 }

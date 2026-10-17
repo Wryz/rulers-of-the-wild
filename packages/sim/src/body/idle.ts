@@ -1,5 +1,5 @@
 import type { Rng } from '../sim/math';
-import { numFromRecord } from './animator';
+import { enumFromRecord, numFromRecord } from './animator';
 import type { LimbTarget, PoseSpec } from './skeleton';
 
 export type FeintKind = 'jab' | 'shoulder' | 'level' | 'step';
@@ -236,7 +236,7 @@ export class IdleBehavior {
    */
   restoreRecord(r: IdleRecord) {
     const n = numFromRecord;
-    this.feint = r.feint ? { kind: r.feint.kind, t: n(r.feint.t, 'idle.feint.t'), dur: n(r.feint.dur, 'idle.feint.dur') } : null;
+    this.feint = r.feint ? { kind: enumFromRecord(r.feint.kind, FEINT_FRAMES, 'idle.feint.kind'), t: n(r.feint.t, 'idle.feint.t'), dur: n(r.feint.dur, 'idle.feint.dur') } : null;
     this.paw = r.paw ? { t: n(r.paw.t, 'idle.paw.t'), dur: n(r.paw.dur, 'idle.paw.dur') } : null;
     this.t = n(r.t, 'idle.t');
     this.bouncePhase = n(r.bouncePhase, 'idle.bouncePhase');

@@ -1,7 +1,7 @@
 import { Vector3 } from 'three';
 import { MOVE_TUNING } from '../sim/rules';
 import type { GroundQuery, V3 } from '../world/types';
-import { numFromRecord, readV3, v3Record } from './animator';
+import { boolFromRecord, enumFromRecord, numFromRecord, readV3, v3Record } from './animator';
 import { ANKLE_HEIGHT, bonePoint, type Rig, SKELETON, type Side } from './skeleton';
 
 export interface FootworkStyle {
@@ -498,20 +498,20 @@ export class Footwork {
     footFromRecord(r.L, this.L, 'footwork.L');
     footFromRecord(r.R, this.R, 'footwork.R');
     this.steps = numFromRecord(r.steps, 'footwork.steps');
-    this.firstStepper = r.firstStepper;
-    this.lastStepper = r.lastStepper;
+    this.firstStepper = r.firstStepper === null ? null : enumFromRecord(r.firstStepper, SIDES, 'footwork.firstStepper');
+    this.lastStepper = r.lastStepper === null ? null : enumFromRecord(r.lastStepper, SIDES, 'footwork.lastStepper');
     this.shift.x = numFromRecord(r.shift.x, 'footwork.shift.x');
     this.shift.z = numFromRecord(r.shift.z, 'footwork.shift.z');
-    this.shift.primed = r.shift.primed;
+    this.shift.primed = boolFromRecord(r.shift.primed, 'footwork.shift.primed');
     this.shiftTarget.x = numFromRecord(r.shiftTarget.x, 'footwork.shiftTarget.x');
     this.shiftTarget.z = numFromRecord(r.shiftTarget.z, 'footwork.shiftTarget.z');
     this.run = numFromRecord(r.run, 'footwork.run');
     this.phase = numFromRecord(r.phase, 'footwork.phase');
-    this.wasGait = r.wasGait;
-    this.initialized = r.initialized;
+    this.wasGait = boolFromRecord(r.wasGait, 'footwork.wasGait');
+    this.initialized = boolFromRecord(r.initialized, 'footwork.initialized');
     this.gaitDur = numFromRecord(r.gaitDur, 'footwork.gaitDur');
     this.gaitLead = numFromRecord(r.gaitLead, 'footwork.gaitLead');
-    if (r.limp) this.style.limp = { side: r.limp.side, amount: numFromRecord(r.limp.amount, 'footwork.limp.amount') };
+    if (r.limp) this.style.limp = { side: enumFromRecord(r.limp.side, SIDES, 'footwork.limp.side'), amount: numFromRecord(r.limp.amount, 'footwork.limp.amount') };
     else delete this.style.limp;
   }
 }
@@ -555,10 +555,12 @@ function footFromRecord(r: FootRecord, f: Foot, field: string) {
   readV3(r.pos, f.pos, `${field}.pos`);
   readV3(r.from, f.from, `${field}.from`);
   readV3(r.to, f.to, `${field}.to`);
-  f.stepping = r.stepping;
+  f.stepping = boolFromRecord(r.stepping, `${field}.stepping`);
   f.t = numFromRecord(r.t, `${field}.t`);
   f.dur = numFromRecord(r.dur, `${field}.dur`);
   f.height = numFromRecord(r.height, `${field}.height`);
   f.lead = numFromRecord(r.lead, `${field}.lead`);
-  f.gait = r.gait;
+  f.gait = boolFromRecord(r.gait, `${field}.gait`);
 }
+
+const SIDES: Record<Side, true> = { L: true, R: true };
