@@ -3,10 +3,11 @@
 // Rule 1: every scene here is built from entities and verbs only. Entities come from the harness's factory calls (the
 // factory world generation uses, §6.7); every relation and pose comes from a verb the scripted player sends as a
 // command (take, place, lash, tie, shape, cut, dig, pull, drop, stow, draw), after walking there. The fixture ops a
-// scene may use are the harness's logged ones: `standAt` (where a walk can't go: into and out of a 2.5 m pit) and, for
-// the ruler-scale logs no M1 verb can lift (D-25), `stage`/`unstage` while the player builds around them. Nothing
-// here writes an entity, a joint or a fighter; the harness test reads this file to check it (no `entities.*` or
-// `joints.*` mutator, no `teleport`, no `spawnCreature`).
+// scene may use are the harness's logged ones: `standAt` (where a walk can't go: up a wall over 45° or down a drop,
+// into and out of a pit and over its spoil's berm; the tests bound the others at 0) and, for the ruler-scale logs no
+// M1 verb can lift (D-25), `stage`/`unstage` while the player builds around them, before any creature exists. Nothing
+// here writes a property of anything, or calls an entity, joint, terrain or body mutator, a teleport, a mind or a
+// creature; the harness test reads this file to check it (sceneViolations).
 //
 // Units: m, kg, rad; yaw in the fighter convention (direction (sin yaw, 0, cos yaw): 0 faces +z, π/2 faces +x).
 // Every number below is a recipe constant of §11 (or of the lab it cites), never tuning.
@@ -489,26 +490,33 @@ const PIT = {
    * to r 0.001 m, and Rapier can't build that 8 m needle's hull: the query throws ("expected instance of p"; P23
    * measured r ≤ 0.002 m failing at 4 m half-length). Reported for P17 (shrinkShape). 5.7 kg, holding 283 N (≥ 200 N).
    */
-  bearer: { lengthM: 8, r: 0.025, count: 20, spacingM: 0.4 },
+  /** 8 m across the 6 m width (overM beyond each long rim), spacingM apart along the length (20 on an 8 m pit). */
+  bearer: { overM: 1, r: 0.025, spacingM: 0.4 },
   /**
-   * Up to 30 bundles (at least minCount) in rows along the long rims (|z| 2.5 and 3.0 m from the middle), each across
-   * the two neighbouring
-   * bearers nearest a spot of the row (spots 0.4 m apart, bundles at least 0.8 m apart): the player lays them from
-   * grassLaneM beyond the bearers' ends, so the place's step-in (≈ 0.7 m) never puts him on one (a man's weight on a
-   * rotten bearer is a load break, §4.11). His 2.5 m reach ends at the nearer row.
+   * Up to `count` bundles (at least PIT_GRASS_MIN laid) in rows along the long rims (rowsInsetM inside each: |z| 2.5
+   * and 3.0 m on the 6 m pit), each across the two neighbouring bearers nearest a spot of the row (spots every 0.2 m,
+   * bundles at least 0.77 m apart along a row): the player lays them from grassLaneM beyond the bearers' ends, so the
+   * place's step-in (≈ 0.7 m) never puts him on one (a man's weight on a rotten bearer is a load break, §4.11). His
+   * 2.5 m reach ends at the nearer row.
    */
-  grass: { masses: [3], rowsZ: [2.5, 3.0], count: 30, minCount: 24 },
+  grass: { masses: [3], rowsInsetM: [0.5, 0], count: 30 },
   grassLaneM: 1.2,
   /** Where the player stands to lay a bearer: this far beyond its end. */
   rimM: 0.6,
 } as const;
 
 /**
+ * The fewest grass bundles the 8 × 6 m pit's cover may have laid on two bearers each. DEVIATION (§11.2(b) "30 grass
+ * bundles"): as many of 30 as find two bearers, at least this many (P23 measured 26 of 30 on a pit's real bearers).
+ */
+export const PIT_GRASS_MIN = 24;
+
+/**
  * §11.2(b) step 1-3 (verb-only): the player digs an 8 (x) × 6 (z) × 2.5 m pit centred at `centre` with the digging stick
  * (the dig planner; its piles dragged out of the long sides, so the ends stay clear for a charge along x), shapes 108
  * factory-spawned dry sticks (1.4 m, r 0.05) to 0.6 with it, and places each upright point-up on the floor on a
- * `stakeSpacing` grid (12 × 9), driven 0.3 m; then lays 20 rotten-wood bearers (8 m, r 0.02) across the width 0.4 m
- * apart from the rim, and 30 grass bundles (1-3 kg) lying on them. Into and out of the pit the player goes by logged
+ * `stakeSpacing` grid (12 × 9), driven 0.3 m; then lays 20 rotten-wood bearers (8 m, r 0.025: see PIT.bearer) across
+ * the width 0.4 m apart from the rim, and up to 30 grass bundles (3 kg) lying on them (at least PIT_GRASS_MIN). Into and out of the pit the player goes by logged
  * standAt (its walls are steeper than he climbs).
  */
 export function buildPit(h: Harness, o: { centre: XZ; lengthX: 8; widthZ: 6; depth: 2.5; stakeSpacing: 0.6 }): { cover: number[]; stakes: number[]; strikes: number } {
@@ -517,27 +525,35 @@ export function buildPit(h: Harness, o: { centre: XZ; lengthX: 8; widthZ: 6; dep
   goTo(h, { x: x0 - 2, z: c.z });
   const stick = h.give('diggingStick');
   const dug = h.digPit({ centre: c, lengthX: o.lengthX, widthZ: o.widthZ, depth: o.depth, maxTicks: PIT.maxTicks, maxStrikes: PIT.maxStrikes, pileSides: 'z' });
+  console.info(`buildPit: dig ${JSON.stringify(dug)}`);
   h.ticks(60);
   // Out of the pit at its −x end: round its −z side (between it and the piles) to the staging off its +x end.
   route(h, [
     { x: x0 - 1.5, z: c.z - o.widthZ / 2 - 2.2 },
     { x: c.x + o.lengthX / 2 + 1.5, z: c.z - o.widthZ / 2 - 2.2 },
   ]);
-  return { ...furnishPit(h, o, stick), strikes: dug.strikes };
+  const furnished = furnishPit(h, { ...o, grass: { count: PIT.grass.count, minCount: PIT_GRASS_MIN } }, stick);
+  console.info(`buildPit: ${furnished.stakes.length} stakes, ${furnished.cover.length} cover; standAts ${JSON.stringify(h.standAts())}, tick ${h.w.tick}`);
+  return { ...furnished, strikes: dug.strikes };
 }
 
 /**
- * buildPit after the dig (exported for the harness test, which digs its pit faster): the stakes shaped with the digging
- * stick the player wields and placed, then the cover. The pit is the dug footprint at `centre`.
+ * buildPit after the dig (exported for the harness test, which furnishes its smaller 3 × 2 m pit): the stakes shaped
+ * with the digging stick the player wields and placed, then the cover. The pit is the dug footprint at `centre`; the
+ * grid, the bearers (widthZ + 2 overM long, lengthX / spacingM of them) and the grass rows scale with it.
  */
-export function furnishPit(h: Harness, o: { centre: XZ; lengthX: number; widthZ: number; stakeSpacing: number }, stick: number): { cover: number[]; stakes: number[] } {
+export function furnishPit(
+  h: Harness,
+  o: { centre: XZ; lengthX: number; widthZ: number; stakeSpacing: number; grass: { count: number; minCount: number } },
+  stick: number,
+): { cover: number[]; stakes: number[] } {
   const c = o.centre;
   const x0 = c.x - o.lengthX / 2;
   const z0 = c.z - o.widthZ / 2;
   const z1 = c.z + o.widthZ / 2;
 
-  // The stakes: 12 × 9 on the grid, spawned beside the +x end, each shaped to its material's 0.6 with the digging stick.
-  // 12 × 9 on an 8 × 6 m floor: 0.7 m clear of the long ends' walls, 0.6 m of the sides'.
+  // The stakes on the grid (12 × 9 on an 8 × 6 m floor: 0.7 m clear of the ends' walls, 0.6 m of the sides'), spawned
+  // beside the +x end, each shaped to 0.6 with the digging stick.
   const nx = Math.round((o.lengthX - 2 * 0.7) / o.stakeSpacing) + 1;
   const nz = Math.round((o.widthZ - 2 * 0.6) / o.stakeSpacing) + 1;
   const grid: XZ[][] = [];
@@ -592,7 +608,7 @@ export function furnishPit(h: Harness, o: { centre: XZ; lengthX: number; widthZ:
 
   // The cover: bearers across the width, laid from the −z rim; grass bundles on them from the nearer long rim.
   const bearers: number[] = [];
-  const B = PIT.bearer;
+  const B = { ...PIT.bearer, lengthM: o.widthZ + 2 * PIT.bearer.overM, count: Math.round(o.lengthX / PIT.bearer.spacingM) };
   for (let i = 0; i < B.count; i++) {
     // Staged south-east of the pit (the player fetches them from the −z rim lane without crossing the pit).
     const q = { x: c.x + o.lengthX / 2 + 2, z: c.z - 9 - 0.4 * i };
@@ -601,8 +617,11 @@ export function furnishPit(h: Harness, o: { centre: XZ; lengthX: number; widthZ:
   const grassIds: number[] = [];
   const G = PIT.grass;
   const spots: { q: XZ; side: number }[] = [];
-  for (const side of [-1, 1]) for (const rz of G.rowsZ) for (let cx = -3.7; cx <= 3.7 + 1e-9; cx += 0.2) spots.push({ q: offVertex(h, { x: c.x + cx, z: c.z + side * rz }), side });
-  Array.from({ length: G.count }).forEach((_, gi) => {
+  const half = o.lengthX / 2 - 0.3;
+  for (const side of [-1, 1]) {
+    for (const inset of G.rowsInsetM) for (let cx = -half; cx <= half + 1e-9; cx += 0.2) spots.push({ q: offVertex(h, { x: c.x + cx, z: c.z + side * (o.widthZ / 2 - inset) }), side });
+  }
+  Array.from({ length: o.grass.count }).forEach((_, gi) => {
     const q = { x: c.x + o.lengthX / 2 + 4 + 1.2 * (gi % 5), z: c.z - 19 - 1.0 * Math.floor(gi / 5) };
     grassIds.push(h.grass({ p: { x: q.x, y: ground(h, q) + 0.06, z: q.z }, mass: G.masses[gi % G.masses.length] }));
   });
@@ -624,8 +643,8 @@ export function furnishPit(h: Harness, o: { centre: XZ; lengthX: number; widthZ:
   h.ticks(60);
   // Each bundle across two neighbouring bearers as they lie now (a light 8-gon pole settles and rolls a little on a
   // sloped rim): row by row, at the pair nearest each planned spot that no bundle covers yet, at their top there; a spot
-  // with no free pair is passed over. DEVIATION (§11.2(b) "30 grass bundles"): as many as find two bearers, at least
-  // minCount (P23 measured 26 of 30 on a pit's real bearers); the ones left over stay where they were spawned.
+  // with no free pair is passed over: as many as find two bearers, at least o.grass.minCount (PIT_GRASS_MIN on the
+  // 8 × 6 m pit); the ones left over stay where they were spawned.
   const laid: XZ[] = [];
   const laidIds: number[] = [];
   const pairAt = (q: XZ): { x: number; y: number } | null => {
@@ -675,7 +694,7 @@ export function furnishPit(h: Harness, o: { centre: XZ; lengthX: number; widthZ:
     laidIds.push(id);
   }
   if (h.p.pos.z > c.z + o.widthZ / 2) route(h, [{ x: c.x + o.lengthX / 2 + 1.5, z: c.z + B.lengthM / 2 + PIT.grassLaneM }, { x: c.x + o.lengthX / 2 + 1.5, z: c.z - B.lengthM / 2 - PIT.grassLaneM }]);
-  if (laidIds.length < PIT.grass.minCount) throw new Error(`buildPit: only ${laidIds.length} of ${grassIds.length} grass bundles laid on two bearers`);
+  if (laidIds.length < o.grass.minCount) throw new Error(`buildPit: only ${laidIds.length} of ${grassIds.length} grass bundles laid on two bearers`);
   h.ticks(120);
   return { cover: [...bearers, ...laidIds], stakes };
 }

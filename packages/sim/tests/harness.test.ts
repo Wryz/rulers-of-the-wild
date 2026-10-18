@@ -1,23 +1,25 @@
 // The acceptance-test harness (docs/M1-DESIGN.md §11.0; package P23): every call the AC files use produces the commands
 // and effects it promises; the scenes assemble from entities and verbs only (a read of scenes.ts) and come out as §11
-// describes them; staging is refused once a creature script runs; the dig planner digs a 3 × 2 × 1.5 m pit (and a
-// 2 × 1 × 1 m scaling check) within its tick and strike caps; the scene cache reuses a file for an unchanged hash and
-// rebuilds it for a changed one.
+// describes them; staging is refused once any creature exists; the dig planner digs a 3 × 2 × 1.5 m pit within its
+// tick and strike caps and furnishPit furnishes it; the scene cache reuses a file for an unchanged hash and rebuilds it
+// for a changed one.
 //
 // Scene numbers are test constants (§9), never tuning. Every world is disposed (RF-24).
-import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { toCm } from '../src/sim/commands';
 import { WEAPONS } from '../src/sim/weapons';
+import { rulerDamage } from '../src/sim/ruler';
+import { CHARACTER_TUNING } from '../src/world/characters';
 import { Terrain } from '../src/world/terrain';
-import type { WorldEvent } from '../src/world/types';
+import type { ImpactCause, WorldEvent } from '../src/world/types';
 import { isDirtPile } from '../src/world/verbs/dig';
-import { ensureScene, readScene, sceneHash, SCENE_DIR, wantedScenes } from './support/globalSetup';
-import { buildHauledLog, buildLeaningLog, buildNotchedTree, buildStakedLog, buildStakedWall, lyingAlong, PROBE_SCENE } from './support/scenes';
-import { BACK_SLOT, cachedScene, DIG_PLAN, type Harness, loadHarness, makeHarness } from './support/worldHarness';
+import { currentSceneHash, dependencyFingerprint, ensureScene, readScene, SCENE_DIR, sceneHash, sceneOnce, scenePath } from './support/globalSetup';
+import { buildHauledLog, buildLeaningLog, buildNotchedTree, buildStakedLog, buildStakedWall, furnishPit, lyingAlong, PIT_GRASS_MIN, PROBE_SCENE } from './support/scenes';
+import { BACK_SLOT, cachedScene, DIG_PLAN, SCENE_BUILD_TIMEOUT_MS, type Harness, loadHarness, makeHarness, type StandAtWhy, steepestClimbDeg, wallOnPath } from './support/worldHarness';
 
 vi.setConfig({ testTimeout: 600_000 });
 
@@ -85,7 +87,7 @@ describe('the world and its clock', () => {
     expect(h.fixtures.map((f) => f.op)).toEqual(['keepAwake']);
   });
 
-  it('stage holds an entity fixed at a pose, unstage frees it (it falls); both logged; refused once a creature script starts', async () => {
+  it('stage holds an entity fixed at a pose, unstage frees it (it falls); both logged', async () => {
     const h = await make();
     const log = h.log({ length: 4, r: 0.23, mass: 300, p: { x: 4, y: 0.25, z: 0 } });
     h.stage(log, { p: { x: 0, y: 1.0, z: 3 }, q: lyingAlong(0) });
@@ -98,18 +100,34 @@ describe('the world and its clock', () => {
     expect(h.ent(log).pose.p.y).toBeLessThan(0.3);
     expect(h.fixtures.map((f) => f.op)).toEqual(['stage', 'unstage']);
     expect(() => h.unstage(log)).toThrow(/not a staged entity/);
-    // A creature script starts: staging is refused from then on (§11.0).
-    const ape = h.creature('ape', { x: -6, z: 0 }, 0, { brain: 'off' });
-    h.stage(log); // brain off is a hold, not a test script: still allowed
-    h.unstage(log);
-    h.script(ape, { kind: 'hold' });
-    expect(() => h.stage(log)).toThrow(/refused, a creature script has started/);
+  });
+
+  it('the staging fence: once any creature exists (even brain off, unscripted) stage and unstage refuse, and every spawn is logged', async () => {
+    const h = await make();
+    const held = h.log({ length: 2, r: 0.1, mass: 20, p: { x: 4, y: 0.1, z: 0 } });
+    h.stage(held, { p: { x: 4, y: 1.5, z: 0 }, q: lyingAlong(0) });
+    const before = h.log({ length: 2, r: 0.1, mass: 20, p: { x: -4, y: 0.1, z: 0 } });
+    expect(h.fixtures.map((f) => f.op)).toEqual(['stage']);
+    const ape = h.creature('ape', { x: -8, z: 0 }, 0, { brain: 'off' });
+    expect(h.mind(ape).script).toEqual({ kind: 'hold' });
+    // The held log can't be let go onto it, and nothing can be pinned up now.
+    expect(() => h.unstage(held)).toThrow(/refused, a creature is in the world/);
+    expect(() => h.stage(before)).toThrow(/refused, a creature is in the world/);
+    expect(h.ent(held).state).toBe('fixed');
+    expect(h.ent(before).state).toBe('free');
+    // Every factory spawn after the creature is a logged fixture.
+    const late = h.log({ length: 2, r: 0.1, mass: 20, p: { x: 0, y: 0.1, z: 4 } });
+    const s = h.stick({ length: 1.4, r: 0.05, p: { x: 0, y: 0.06, z: -4 } });
+    const c = h.coil({ material: 'vine', lengthM: 4, at: { x: 2, y: 0, z: 4 } });
+    const g = h.grass({ p: { x: -2, y: 0.05, z: 4 }, mass: 2 });
+    const t = h.tree({ at: { x: 8, z: 8 }, diameter: 0.3, height: 10 });
+    const b = h.box({ p: { x: -8, y: 0.5, z: -8 }, size: [1, 1, 1], material: 'stone', state: 'fixed', look: 'block' });
+    expect(h.fixtures.filter((f) => f.op === 'spawn').map((f) => f.what)).toEqual([
+      `log ${late}`, `stick ${s}`, `coil ${c}`, `grass ${g}`, `tree ${t.tree}`, `box ${b}`,
+    ]);
+    expect(h.fixtures.map((f) => f.op)).toEqual(['stage', 'creature', 'spawn', 'spawn', 'spawn', 'spawn', 'spawn', 'spawn']);
   });
 });
-
-// ---------------------------------------------------------------------------
-// The scripted player
-// ---------------------------------------------------------------------------
 
 describe('the scripted player (commands only)', () => {
   it('give: the dev giveTool command puts the tool in the hands (or on the back); axe2h writes WEAPONS.axe (logged)', async () => {
@@ -138,6 +156,18 @@ describe('the scripted player (commands only)', () => {
     expect(flat(h.p.pos, { x: 5, z: -3 })).toBeLessThan(1e-6);
     expect(h.p.yaw).toBeCloseTo(Math.PI / 2, 9);
     expect(h.fixtures.map((f) => f.op)).toEqual(['standAt']);
+    // On flat ground a walk could have done it: 'other'. wallOnPath on a dug hole (a bare Terrain, the kernel's): out
+    // of it is a wall over 45°, into it is not (a drop), along flat ground neither.
+    expect(h.fixtures[0].why).toBe('other');
+    expect(h.standAts()).toEqual({ wall: 0, drop: 0, other: 1 });
+    const t = new Terrain(null, 30);
+    for (let i = 0; i < 40; i++) for (const [x, z] of [[0, 0], [0.3, 0], [-0.3, 0], [0, 0.3], [0, -0.3]]) t.lower(x, z, 1);
+    expect(t.heightAt(0, 0)).toBeLessThan(-1);
+    expect(wallOnPath(t, { x: 0, z: 0 }, { x: 3, z: 0 })).toBe(true);
+    expect(steepestClimbDeg(t, { x: 0, z: 0 }, { x: 3, z: 0 })).toBeGreaterThan(45);
+    expect(wallOnPath(t, { x: 3, z: 0 }, { x: 0, z: 0 })).toBe(false);
+    expect(wallOnPath(t, { x: 5, z: -5 }, { x: 5, z: 5 })).toBe(false);
+    expect(steepestClimbDeg(t, { x: 5, z: -5 }, { x: 5, z: 5 })).toBe(0);
     const pushed = vi.spyOn(h.w.commands, 'push');
     expect(h.walk({ x: 1, z: 2 })).toBe(true);
     expect(flat(h.p.pos, { x: 1, z: 2 })).toBeLessThanOrEqual(0.12 + 0.05);
@@ -323,6 +353,28 @@ describe('creatures and observation', () => {
     expect(h.tripwires()[0].by).toMatchObject({ kind: 'fighter', id: h.p.id });
   });
 
+  it('wounds: a ruler\'s wound records as they stand (a copy), kept through a save; none for a creature without a ruler body', async () => {
+    const h = await make(13, 60);
+    const giant = h.creature('giantApe', { x: -10, z: 0 }, 0, { brain: 'off' });
+    const ape = h.creature('ape', { x: 10, z: 0 }, 0, { brain: 'off' });
+    h.ticks(2);
+    expect(h.wounds(giant)).toEqual([]);
+    // Damage as an impact that beat a zone's threshold hands it to the ruler (the combat rule's own entry point).
+    const cause: ImpactCause = { kind: 'entity', entityId: null, fighterId: null, credit: ['p1'], held: false, feature: 'falling' };
+    const leg = rulerDamage(h.w, giant, 400, 'leg', 'shinL', cause, giant.rig.shinL.pos.clone())!;
+    const back = rulerDamage(h.w, giant, 2000, 'back', 'chest', cause, giant.rig.chest.pos.clone())!;
+    const ws = h.wounds(giant);
+    expect(ws).toEqual([leg, back]);
+    expect(ws.map((x) => [x.zone, x.hp])).toEqual([['leg', 400], ['back', 2000]]);
+    ws.pop();
+    expect(h.wounds(giant)).toHaveLength(2);
+    expect(h.wounds(ape)).toEqual([]);
+    const l = await loadHarness(h.saveBytes());
+    live.push(l);
+    const g2 = l.w.combat.fighters.find((f) => f.id === giant.id)!;
+    expect(l.wounds(g2)).toEqual(h.wounds(giant));
+  });
+
   it('saveBytes and loadHarness: the same world back; bodyStateBytes are the same for two runs of the same commands', async () => {
     const run = async (): Promise<Harness> => {
       const h = await make(21, 30);
@@ -375,12 +427,59 @@ function kernelStrikes(o: { lengthX: number; widthZ: number; depth: number }): n
   return strikes;
 }
 
+/** Code only: comments removed. */
+function stripComments(src: string): string {
+  return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+}
+
+/**
+ * What scenes.ts may not do (rule 1, orchestrator decision 8: a scene is the factory, verbs and the harness's logged
+ * fixtures, never a write that arranges the harm): every property write (`a.b =`, `a[k] =`, `a.b += …`, `a.b++`,
+ * Object.assign), a body's setters and impulses, a mind or a creature, an entity, joint or terrain mutator, a teleport,
+ * a raw command, the factory imported directly. Returns the offending snippets.
+ */
+function sceneViolations(src: string): string[] {
+  const code = stripComments(src);
+  const out: string[] = [];
+  const reads = new Set(['get', 'all', 'view', 'endPoints', 'anchorPoint', 'isAnchored', 'heightAt', 'originalHeightAt', 'vertexIndex', 'vertexHeightAt']);
+  for (const m of code.matchAll(/\.(entities|joints|terrain)\.(\w+)\(/g)) if (!reads.has(m[2])) out.push(m[0]);
+  const bans = [
+    /[\w$\])!?]\s*(?:\.|\?\.)\s*[\w$]+\s*(?:[-+*/%|&^]|\*\*|<<|>>>?|\?\?|&&|\|\|)?=(?!=)/g,
+    /[\w$\])]\[[^\]]+\]\s*(?:[-+*/%|&^]|\*\*|<<|>>>?|\?\?|&&|\|\|)?=(?!=)/g,
+    /(?:\.[\w$]+|\])\s*(?:\+\+|--)|(?:\+\+|--)\s*[\w$]+\s*(?:\.|\[)/g,
+    /Object\.(?:assign|defineProperty|defineProperties|setPrototypeOf)\(/g,
+    /\.body\b[^;\n]*?\.(?:set\w*|apply\w*|add\w*|reset\w*|wakeUp|sleep|lock\w*|enable\w*)\(/g,
+    /\bh\.(?:mind|script|patrol|pause|creature)\(/g,
+    /\.minds\b/g,
+    /\.teleport\(/g,
+    /spawnCreature\(/g,
+    /queueImpulse\(/g,
+    /\.commands\.push\(/g,
+    /from '\.\.\/\.\.\/src\/world\/factory'/g,
+  ];
+  for (const re of bans) for (const m of code.matchAll(re)) out.push(m[0]);
+  return out;
+}
+
+/**
+ * A macrotask turn for the worker's event loop. The planner and furnish tests each run about 30 s of synchronous sim;
+ * back to back (Vitest moves between tests by microtasks) they starve Vitest's RPC past its 60 s timeout ("Timeout
+ * calling onTaskUpdate"), so each starts by letting the loop turn.
+ */
+const yieldToVitest = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
+
+/** The small pit the planner test digs (its save bytes, for the furnishPit test after it). */
+const SMALL_PIT = { lengthX: 3, widthZ: 2, depth: 1.5 } as const;
+let smallPitDug: Uint8Array | null = null;
+
 describe('the dig planner (§11.0)', () => {
-  // (A 2 × 1 m pit is no planner test: no spot inside a 1 m wide hole is 1 m from its middle, so its floor can't be
-  // struck from the floor; P15's verbs.dig.test checks the dirt policy on small pits at the kernel level.)
-  for (const pit of [{ lengthX: 3, widthZ: 2, depth: 1.5 }]) {
+  // DEVIATION (§11.0 "a 2 × 1 m dig scaling check"): dropped. No spot inside a 1 m wide hole is 1 m from its middle,
+  // so its floor can't be struck from the floor (docs/work/ledger.md, P23); P15's verbs.dig.test checks the dirt
+  // policy on small pits at the kernel level.
+  for (const pit of [SMALL_PIT]) {
     it(`digs a ${pit.lengthX} × ${pit.widthZ} × ${pit.depth} m pit with the digging stick within its tick and strike caps`, async () => {
-      const h = await make(31, 40);
+      await yieldToVitest();
+      const h = await make(31, 60);
       h.standAt({ x: -pit.lengthX / 2 - 2, z: 0 });
       h.give('diggingStick');
       const kernel = kernelStrikes(pit);
@@ -388,7 +487,7 @@ describe('the dig planner (§11.0)', () => {
       // kernel's strikes, and 88 ticks a strike plus 24,000.
       const maxStrikes = Math.ceil(PLANNER_CAP.strikesPerKernel * kernel);
       const maxTicks = Math.ceil(PLANNER_CAP.ticksPerStrike * maxStrikes + PLANNER_CAP.walkTicks);
-      const r = h.digPit({ centre: { x: 0, z: 0 }, ...pit, maxTicks, maxStrikes });
+      const r = h.digPit({ centre: { x: 0, z: 0 }, ...pit, maxTicks, maxStrikes, pileSides: 'z' });
       console.info(`dig ${pit.lengthX}×${pit.widthZ}×${pit.depth}: ${JSON.stringify(r)}; kernel ${kernel}, caps ${maxStrikes} strikes / ${maxTicks} ticks`);
       expect(r.strikes).toBeLessThanOrEqual(maxStrikes);
       expect(r.ticks).toBeLessThanOrEqual(maxTicks);
@@ -411,35 +510,170 @@ describe('the dig planner (§11.0)', () => {
       expect(h.p.weapon?.id).toBe('sharpStick');
       const onPit = h.w.entities.all().filter((e) => isDirtPile(e) && Math.abs(e.pose.p.x) < pit.lengthX / 2 && Math.abs(e.pose.p.z) < pit.widthZ / 2);
       expect(onPit).toEqual([]);
+      // standAts by reason (wall: §11.0's "a wall steeper than the KCC's 45°"; stuck: a walk that failed anyway).
+      expect(r.standAts).toBe(r.standAtWhy.wall + r.standAtWhy.stuck + r.standAtWhy.piles + r.standAtWhy.exit);
+      expect(r.standAtWhy.exit).toBe(1);
+      expect(r.standAtWhy.stuck).toBeLessThanOrEqual(PLANNER_CAP.stuckStandAts);
+      expect(h.fixtures.filter((f) => f.op === 'standAt')).toHaveLength(r.standAts + 1);
+      smallPitDug = h.saveBytes();
     });
   }
 });
 
+/** Does any collider of entity `a` touch one of `b` (a contact manifold with a point)? */
+function touching(h: Harness, a: number, b: number): boolean {
+  const ba = h.ent(a).body;
+  const bb = h.ent(b).body;
+  if (!ba || !bb) return false;
+  for (let i = 0; i < ba.numColliders(); i++) {
+    for (let j = 0; j < bb.numColliders(); j++) {
+      let n = 0;
+      h.w.physics.rapier.contactPair(ba.collider(i), bb.collider(j), (m) => {
+        n += m.numContacts();
+      });
+      if (n > 0) return true;
+    }
+  }
+  return false;
+}
+
+/** The pit floor's height under each stake (terrain at its base), and its spread, printed. */
+function floorUnder(h: Harness, stakes: number[], label: string): number[] {
+  const ys = stakes.map((id) => h.w.terrain.heightAt(h.ent(id).pose.p.x, h.ent(id).pose.p.z)).sort((a, b) => a - b);
+  const bins = new Map<string, number>();
+  for (const y of ys) {
+    const k = (Math.floor(y * 10) / 10).toFixed(1);
+    bins.set(k, (bins.get(k) ?? 0) + 1);
+  }
+  console.info(`${label}: floor under the ${ys.length} stakes ${ys[0].toFixed(2)} … ${ys[ys.length - 1].toFixed(2)} m; by 0.1 m: ${[...bins].map(([k, n]) => `${k}: ${n}`).join(', ')}`);
+  return ys;
+}
+
+/** The end of a stick's axis (local y = ±length/2), world frame. */
+function pointOnAxis(h: Harness, id: number, end: 1 | -1): { x: number; y: number; z: number } {
+  const e = h.ent(id);
+  const half = e.shape.kind === 'cylinder' ? e.shape.halfHeight : 0;
+  const q = e.pose.q;
+  const ax = { x: 2 * (q.x * q.y - q.w * q.z), y: 1 - 2 * (q.x * q.x + q.z * q.z), z: 2 * (q.y * q.z + q.w * q.x) };
+  return { x: e.pose.p.x + ax.x * half * end, y: e.pose.p.y + ax.y * half * end, z: e.pose.p.z + ax.z * half * end };
+}
+
+/** The small pit's cover: at least this many bundles on two bearers (of 12). */
+const SMALL_PIT_GRASS_MIN = 6;
+/**
+ * The pit floor under the stakes, about the pit's depth (m). GATE shortM: dug to within this of the depth under every
+ * stake. PIN overM: the planner's last strikes of a layer reach below it (P23 measured the 8 × 6 × 2.5 m pit's floor
+ * under its 108 stakes at -3.00 … -2.37 m, the 3 × 2 × 1.5 m pit's under its 8 at -1.91 … -1.68 m).
+ */
+const FLOOR_BAND = { shortM: 0.15, overM: 0.55 } as const;
+
+/**
+ * GATE: the most standAts a recipe may make where the terrain has no wall or drop (StandAtWhy 'other': a walk that
+ * failed, or the recipe's choice). P23 measured the counts printed by reportStandAts.
+ */
+const OTHER_STANDATS = { furnish: 0, stakedLog: 0, stakedWall: 0, notchedTree: 0, leaningLog: 0, hauledLog: 0 } as const;
+
+/** Prints the harness's standAts by why and returns them. */
+function reportStandAts(h: Harness, label: string): Record<StandAtWhy, number> {
+  const n = h.standAts();
+  console.info(`${label}: standAts wall ${n.wall}, drop ${n.drop}, other ${n.other}${n.other ? ` (${h.fixtures.filter((f) => f.why === 'other').map((f) => `${f.tick} ${f.what}`).join('; ')})` : ''}`);
+  return n;
+}
+
+describe('furnishPit (§11.2(b) steps 2-3 on the small pit)', () => {
+  it('the dug 3 × 2 × 1.5 m pit furnished: every stake driven and credited p1, every bearer rim to rim, every bundle on two bearers', async () => {
+    await yieldToVitest();
+    if (!smallPitDug) throw new Error('the dig planner test (above, same file) did not leave its pit');
+    const h = await loadHarness(smallPitDug);
+    live.push(h);
+    const stick = h.p.inventory!.hands!.entity;
+    const pit = { centre: { x: 0, z: 0 }, ...SMALL_PIT, stakeSpacing: 0.6 };
+    // A 3 × 2 m floor: a 4 × 2 grid; 8 bearers 4 m long; up to 12 bundles in the four rows.
+    const r = furnishPit(h, { ...pit, grass: { count: 12, minCount: SMALL_PIT_GRASS_MIN } }, stick);
+    const grass = r.cover.filter((id) => h.ent(id).look === 'grass');
+    console.info(`furnishPit 3×2: ${r.stakes.length} stakes, ${grass.length} grass laid, tick ${h.w.tick}`);
+    const moves = reportStandAts(h, 'furnishPit 3×2');
+    // GATE: every stake is driven (anchored), sharpened, on the floor and credited to the player who placed it.
+    expect(r.stakes).toHaveLength(8);
+    for (const id of r.stakes) {
+      const e = h.ent(id);
+      expect(e.state).toBe('anchored');
+      expect(e.credit).toEqual(['p1']);
+      expect(Math.max(...e.sharpPoints.map((sp) => sp.sharpness))).toBeGreaterThanOrEqual(0.6 - 1e-9);
+      expect(Math.abs(e.pose.p.x)).toBeLessThan(SMALL_PIT.lengthX / 2);
+      expect(Math.abs(e.pose.p.z)).toBeLessThan(SMALL_PIT.widthZ / 2);
+    }
+    const ys = floorUnder(h, r.stakes, 'furnishPit 3×2');
+    expect(ys[ys.length - 1]).toBeLessThan(-SMALL_PIT.depth + FLOOR_BAND.shortM);
+    expect(ys[0]).toBeGreaterThan(-SMALL_PIT.depth - FLOOR_BAND.overM);
+    // GATE: every bearer spans the pit rim to rim (both ends beyond the long rims, up at the rim), the player's.
+    const bearers = r.cover.filter((id) => h.ent(id).material === 'rottenWood');
+    expect(bearers).toHaveLength(8);
+    for (const id of bearers) {
+      const ends = [pointOnAxis(h, id, 1), pointOnAxis(h, id, -1)].sort((a, b) => a.z - b.z);
+      expect(ends[0].z).toBeLessThan(-SMALL_PIT.widthZ / 2);
+      expect(ends[1].z).toBeGreaterThan(SMALL_PIT.widthZ / 2);
+      expect(Math.abs(h.ent(id).pose.p.x)).toBeLessThan(SMALL_PIT.lengthX / 2);
+      expect(h.ent(id).pose.p.y).toBeGreaterThan(-0.3);
+      expect(h.ent(id).credit).toEqual(['p1']);
+    }
+    // GATE: every bundle laid rests on two bearers (a contact with each), up at the rim, the player's.
+    expect(grass.length).toBeGreaterThanOrEqual(SMALL_PIT_GRASS_MIN);
+    for (const g of grass) {
+      expect(bearers.filter((b) => touching(h, g, b)).length, `grass ${g}`).toBeGreaterThanOrEqual(2);
+      expect(h.ent(g).pose.p.y).toBeGreaterThan(-0.3);
+      expect(h.ent(g).credit).toEqual(['p1']);
+    }
+    // Fixture moves: into the pit (a drop) and out (a wall) for each stake, and up the spoil's berm to the rim lanes
+    // (walls); a standAt where the terrain has neither is a walk that failed (a body or a load in the way).
+    expect(moves.drop + moves.wall).toBeGreaterThanOrEqual(2 * r.stakes.length);
+    expect(moves.other).toBeLessThanOrEqual(OTHER_STANDATS.furnish);
+  });
+});
+
 /** The planner's caps for the small pits (the form of §11.0's 1.2 × 3,185 strikes and 360,000 ticks). */
-const PLANNER_CAP = { strikesPerKernel: 1.2, ticksPerStrike: 88, walkTicks: 24_000 } as const;
+const PLANNER_CAP = { strikesPerKernel: 1.2, ticksPerStrike: 88, walkTicks: 24_000, stuckStandAts: 10 } as const;
 
 // ---------------------------------------------------------------------------
 // The scenes (§11.0): entities and verbs only
 // ---------------------------------------------------------------------------
 
 describe('the scenes', () => {
-  it('scenes.ts calls no entity or joint mutator, no teleport and no creature spawn: only the factory, verbs and the harness', () => {
+  it('scenes.ts writes no property and calls no mutator, teleport, creature or mind: only the factory, verbs and the harness', () => {
     const src = readFileSync(fileURLToPath(new URL('./support/scenes.ts', import.meta.url)), 'utf8');
-    // Code only: comments removed.
-    const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
-    const reads = new Set(['get', 'all', 'view', 'endPoints', 'anchorPoint', 'isAnchored', 'heightAt', 'originalHeightAt']);
-    const calls = [...code.matchAll(/\.(entities|joints)\.(\w+)\(/g)].map((m) => `${m[1]}.${m[2]}`);
-    expect(calls.filter((c) => !reads.has(c.split('.')[1]))).toEqual([]);
-    for (const banned of [/\.teleport\(/, /spawnCreature\(/, /\.setPose\(/, /\.setState\(/, /queueImpulse\(/, /from '\.\.\/\.\.\/src\/world\/factory'/, /\.commands\.push\(/]) {
-      expect(code, String(banned)).not.toMatch(banned);
-    }
+    expect(sceneViolations(src)).toEqual([]);
     // Rule 1 (AC-1's spirit): no trap in a name or a string.
-    expect(code).not.toMatch(/trap/i);
+    expect(stripComments(src)).not.toMatch(/trap/i);
+    // The check itself: each kind of write or call it bans is found in a sample.
+    const samples = [
+      'h.ent(id).sharpPoints[0].sharpness = 1;',
+      'h.ent(id).state = "fixed";',
+      'e.pose.p.y += 1;',
+      'h.ent(id).credit[0] = "p2";',
+      'e.mass++;',
+      'Object.assign(h.ent(id), { mass: 1 });',
+      'h.ent(id).body?.setTranslation(p, true);',
+      'e.body!.applyImpulse(v, true);',
+      'h.mind(f).paused = false;',
+      'h.mind(f);',
+      'h.script(f, s);',
+      'h.creature("ape", at, 0);',
+      'h.w.entities.setPose(e, pose);',
+      'h.w.joints.remove(j);',
+      'h.w.terrain.lower(0, 0, 1);',
+      'h.w.teleport(p, 0, 0);',
+      'h.w.commands.push(c);',
+      'h.w.minds.get(f);',
+      "import { spawnLog } from '../../src/world/factory';",
+    ];
+    for (const bad of samples) expect(sceneViolations(bad), bad).not.toEqual([]);
+    expect(sceneViolations('const [u, v] = [1, 2]; const x = { a: 1 }; let y = 0; y = 2; if (a === b && c !== d && e <= f && g >= h) h.must(v);')).toEqual([]);
   });
 
   it('buildStakedLog: a 300 kg log 1.0 m up lashed to two driven stakes the player placed; anchored (a blocker) once unstaged', async () => {
     const h = await make(41, 40);
     const r = buildStakedLog(h, { centre: { x: 0, y: 1.0, z: 0 }, yaw: 0, massKg: 300, lengthM: 4.4 });
+    expect(reportStandAts(h, 'buildStakedLog').other).toBeLessThanOrEqual(OTHER_STANDATS.stakedLog);
     h.ticks(120);
     const log = h.ent(r.log);
     expect(log.mass).toBeCloseTo(300, 3);
@@ -459,6 +693,7 @@ describe('the scenes', () => {
   it('buildStakedWall: two stacked 16 m logs, 1.0 m high, lashed to stakes at both ends; anchored once unstaged', async () => {
     const h = await make(42, 50);
     const ids = buildStakedWall(h, { start: { x: -8, z: 0 }, dir: { x: 1, z: 0 }, lengthM: 16, height: 1.0 });
+    expect(reportStandAts(h, 'buildStakedWall').other).toBeLessThanOrEqual(OTHER_STANDATS.stakedWall);
     h.ticks(120);
     const [lower, upper, ...stakes] = ids;
     for (const id of [lower, upper]) {
@@ -474,6 +709,7 @@ describe('the scenes', () => {
   it('buildNotchedTree: chopped to remaining from the given side, its vine hanging on the fall side; it stands notched', async () => {
     const h = await make(43, 60);
     const r = buildNotchedTree(h, { at: { x: 0, z: 0 }, fromSide: { x: -1, z: 0 }, remaining: 0.2, vine: { anchorH: 10, lengthM: 18.2 } });
+    expect(reportStandAts(h, 'buildNotchedTree').other).toBeLessThanOrEqual(OTHER_STANDATS.notchedTree);
     h.ticks(120);
     const plant = h.ent(r.tree).plant!;
     expect(plant.phase).toBe('notched');
@@ -489,6 +725,7 @@ describe('the scenes', () => {
   it('buildLeaningLog: a free prop placed upright, a 40 kg log placed sloped onto it (32.9°), bait lashed to the prop by a 0.65 m rope', async () => {
     const h = await make(44, 40);
     const r = buildLeaningLog(h, { at: { x: 0, z: 0 }, yaw: Math.PI / 2 });
+    expect(reportStandAts(h, 'buildLeaningLog').other).toBeLessThanOrEqual(OTHER_STANDATS.leaningLog);
     h.ticks(120);
     const prop = h.ent(r.prop);
     const log = h.ent(r.log);
@@ -509,6 +746,7 @@ describe('the scenes', () => {
   it('buildHauledLog: the 30 kg log hung on two vines, hauled back and tied to a driven stake; the axe on the back', async () => {
     const h = await make(45, 50);
     const r = buildHauledLog(h, { at: { x: 0, z: 0 } });
+    expect(reportStandAts(h, 'buildHauledLog').other).toBeLessThanOrEqual(OTHER_STANDATS.hauledLog);
     h.ticks(180);
     const log = h.ent(r.log);
     const tie = h.w.joints.get(r.tie)!;
@@ -561,11 +799,77 @@ describe('the scene cache (§11.0)', () => {
     }
   });
 
-  it("globalSetup builds what the test files name: cachedScene('probe') is the probe scene, loaded by loadHarness", async () => {
-    expect(wantedScenes()).toContain('probe');
+  it('the hash changes with a real tuning value and covers the sim engine (Rapier) as installed', () => {
+    const h0 = sceneHash();
+    const was = CHARACTER_TUNING.pushN;
+    try {
+      CHARACTER_TUNING.pushN = was + 1;
+      expect(sceneHash()).not.toBe(h0);
+    } finally {
+      CHARACTER_TUNING.pushN = was;
+    }
+    expect(sceneHash()).toBe(h0);
+    // The engine's version is part of it: package-lock's entry for each of the sim's dependencies.
+    const lock = JSON.parse(readFileSync(fileURLToPath(new URL('../../../package-lock.json', import.meta.url)), 'utf8')) as {
+      packages: Record<string, { version: string; integrity: string }>;
+    };
+    const rapier = lock.packages['node_modules/@dimforge/rapier3d-compat'];
+    expect(dependencyFingerprint()).toContain(`@dimforge/rapier3d-compat@${rapier.version} ${rapier.integrity}`);
+  });
+
+  it('sceneOnce builds once across callers under a lock, takes over a stale lock, and fails a run fast but retries the next', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'rotw-scenes-'));
+    try {
+      const hash = sceneHash('lock test');
+      let builds = 0;
+      let release: () => void = () => {};
+      const gate = new Promise<void>((r) => (release = r));
+      const slow = async (): Promise<Uint8Array> => {
+        builds++;
+        await gate;
+        return new Uint8Array([7]);
+      };
+      // Two callers at once (as two workers): one builds, holding the lock; the other waits for its file.
+      const a = sceneOnce(dir, 'probe', hash, 'r1', slow, { pollMs: 5 });
+      const b = sceneOnce(dir, 'probe', hash, 'r1', slow, { pollMs: 5 });
+      await new Promise((r) => setTimeout(r, 50));
+      expect(builds).toBe(1);
+      expect(existsSync(`${scenePath(dir, 'probe', hash)}.lock`)).toBe(true);
+      release();
+      const [ra, rb] = await Promise.all([a, b]);
+      expect([ra.built, rb.built].sort()).toEqual([false, true]);
+      expect([...ra.bytes]).toEqual([7]);
+      expect([...rb.bytes]).toEqual([7]);
+      expect(builds).toBe(1);
+      expect(existsSync(`${scenePath(dir, 'probe', hash)}.lock`)).toBe(false);
+      // A lock left by a process that is gone is taken over.
+      const h2 = sceneHash('stale lock');
+      writeFileSync(`${scenePath(dir, 'probe', h2)}.lock`, '2147483646\n');
+      const r2 = await sceneOnce(dir, 'probe', h2, 'r1', async () => new Uint8Array([8]), { pollMs: 5 });
+      expect(r2.built).toBe(true);
+      // A build that throws: the same run fails at once without building again; the next run tries again.
+      const h3 = sceneHash('failing');
+      let tries = 0;
+      const bad = async (): Promise<Uint8Array> => {
+        tries++;
+        throw new Error('the recipe broke');
+      };
+      await expect(sceneOnce(dir, 'pit', h3, 'r1', bad, { pollMs: 5 })).rejects.toThrow('the recipe broke');
+      await expect(sceneOnce(dir, 'pit', h3, 'r1', bad, { pollMs: 5 })).rejects.toThrow(/failed earlier in this run:\nthe recipe broke/);
+      expect(tries).toBe(1);
+      const r3 = await sceneOnce(dir, 'pit', h3, 'r2', async () => new Uint8Array([9]), { pollMs: 5 });
+      expect(r3.built).toBe(true);
+      expect(readdirSync(dir).filter((n) => n.startsWith('pit-'))).toEqual([`pit-${h3.slice(0, 16)}.json`]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("cachedScene('probe') builds the probe scene lazily (or reuses it), and loadHarness loads it", async () => {
     expect(SCENE_DIR).toMatch(/packages[\\/]sim[\\/]\.cache[\\/]scenes$/);
-    const h = await loadHarness(cachedScene('probe'));
+    const h = await loadHarness(await cachedScene('probe'));
     live.push(h);
+    expect(existsSync(scenePath(SCENE_DIR, 'probe', await currentSceneHash()))).toBe(true);
     const stakes = h.w.entities.all().filter((e) => e.state === 'anchored');
     expect(stakes).toHaveLength(PROBE_SCENE.stakes.length);
     // Where the scene put them (scenes.ts nudges a point 13 mm off the terrain's vertex lines).
@@ -575,27 +879,36 @@ describe('the scene cache (§11.0)', () => {
     expect(flat(log.pose.p, PROBE_SCENE.log)).toBeLessThan(0.1);
   });
 
-  // The AC-2(b)/AC-3 pit (§11.2(b)): built by globalSetup only when a test file names it or ROTW_SCENES lists it (about
-  // a quarter of an hour), so this check runs with ROTW_SCENES=pit.
-  const PIT = ['p', 'i', 't'].join('');
-  it.runIf((process.env.ROTW_SCENES ?? '').split(',').includes(PIT))('the cached pit: 8 × 6 × 2.5 m, 108 driven stakes credited p1, bearers across it and grass on them', async () => {
-    const h = await loadHarness(cachedScene(PIT));
-    live.push(h);
-    const t = h.w.terrain;
-    expect(t.heightAt(0, 0)).toBeLessThan(-2.5 + 0.03);
-    const stakes = h.w.entities.all().filter((e) => e.state === 'anchored');
-    expect(stakes).toHaveLength(108);
-    for (const s of stakes) {
-      expect(s.credit).toEqual(['p1']);
-      expect(s.sharpPoints[0].sharpness).toBeCloseTo(0.6, 6);
-      expect(Math.abs(s.pose.p.x)).toBeLessThan(4);
-      expect(Math.abs(s.pose.p.z)).toBeLessThan(3);
-    }
-    const bearers = h.w.entities.all().filter((e) => e.material === 'rottenWood');
-    expect(bearers).toHaveLength(20);
-    for (const b of bearers) expect(b.pose.p.y).toBeGreaterThan(-0.3);
-    const grassOn = h.w.entities.all().filter((e) => e.look === 'grass' && Math.abs(e.pose.p.x) < 4 && Math.abs(e.pose.p.z) < 3.2);
-    expect(grassOn.length).toBeGreaterThanOrEqual(20);
-    for (const g of grassOn) expect(g.credit).toEqual(['p1']);
-  });
+  // The AC-2(b)/AC-3 pit (§11.2(b)): ≈ 12.5 min to build cold (RT-23), so this check of the harness's own runs only
+  // with ROTW_SCENES=pit (which also builds it in globalSetup); the AC files await cachedScene('pit') in a beforeAll.
+  it.runIf((process.env.ROTW_SCENES ?? '').split(',').includes('pit'))(
+    'the cached pit: 8 × 6 × 2.5 m, 108 driven stakes credited p1 on a dug floor, bearers across it and grass on them',
+    async () => {
+      const h = await loadHarness(await cachedScene('pit'));
+      live.push(h);
+      const t = h.w.terrain;
+      expect(t.heightAt(0, 0)).toBeLessThan(-2.5 + 0.03);
+      const stakes = h.w.entities.all().filter((e) => e.state === 'anchored');
+      expect(stakes).toHaveLength(108);
+      for (const s of stakes) {
+        expect(s.credit).toEqual(['p1']);
+        expect(s.sharpPoints[0].sharpness).toBeCloseTo(0.6, 6);
+        expect(Math.abs(s.pose.p.x)).toBeLessThan(4);
+        expect(Math.abs(s.pose.p.z)).toBeLessThan(3);
+      }
+      const ys = floorUnder(h, stakes.map((s) => s.id), 'the cached pit');
+      expect(ys[ys.length - 1]).toBeLessThan(-2.5 + FLOOR_BAND.shortM);
+      expect(ys[0]).toBeGreaterThan(-2.5 - FLOOR_BAND.overM);
+      const bearers = h.w.entities.all().filter((e) => e.material === 'rottenWood');
+      expect(bearers).toHaveLength(20);
+      for (const b of bearers) expect(b.pose.p.y).toBeGreaterThan(-0.3);
+      const grassOn = h.w.entities.all().filter((e) => e.look === 'grass' && Math.abs(e.pose.p.x) < 4 && Math.abs(e.pose.p.z) < 3.2);
+      expect(grassOn.length).toBeGreaterThanOrEqual(PIT_GRASS_MIN);
+      for (const g of grassOn) {
+        expect(g.credit).toEqual(['p1']);
+        expect(bearers.filter((b) => touching(h, g.id, b.id)).length).toBeGreaterThanOrEqual(2);
+      }
+    },
+    SCENE_BUILD_TIMEOUT_MS,
+  );
 });

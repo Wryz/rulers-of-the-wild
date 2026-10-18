@@ -6,9 +6,12 @@
 // - creatures made by createCreature and driven by their mind's test scripts (§6.6: route, charge, tug, hold), never by
 //   anything that arranges harm (rule 1, orchestrator decision 8);
 // - a few logged fixture operations a test scene may need and no verb provides (D-25: no M1 verb lifts 300 kg): `stage`
-//   (hold an entity fixed at a pose while the player builds around it), `unstage`, `standAt` (a teleport), `keepAwake`,
-//   give('axe2h') (DungeonStyle's two-handed axe, which no entity makes), and `pause` of the player. Each is recorded in
-//   `fixtures`, so a test can print what was not done by the rules;
+//   (hold an entity fixed at a pose while the player builds around it), `unstage`, `standAt` (a teleport, classified
+//   by the terrain on its way: up a wall over 45°, down a drop, or neither), `keepAwake`, give('axe2h') (DungeonStyle's
+//   two-handed axe, which no entity makes), and `pause` of the player. Each is recorded in `fixtures`, so a test can
+//   print what was not done by the rules;
+// - the staging fence (rule 1, orchestrator decision 8): once any creature is in the world, `stage` and `unstage`
+//   refuse and every factory spawn is logged (`spawn`), so no fixture can be a trap's trigger;
 // - observation: every event since the harness was made (`history`), impacts, tripwires, wounds, horizontal distances to
 //   colliders, the body-state bytes and the save.
 //
@@ -29,13 +32,16 @@ import type { CreatureMind, GroundXZ, MindScript } from '../../src/world/creatur
 import type { RulerMind } from '../../src/world/creatures/rulerMind';
 import { GIVE_TOOLS } from '../../src/world/devOps';
 import { spawnBox, spawnGrass, spawnLog, spawnRopeCoil, spawnStick, spawnTree, type XZ } from '../../src/world/factory';
+import { CHARACTER_TUNING } from '../../src/world/characters';
 import { physicsReady } from '../../src/world/physics';
+import type { Terrain } from '../../src/world/terrain';
 import type { Entity, MaterialId, Owner, Pose3, Quat, V3, WorldEvent, WoundRecord } from '../../src/world/types';
 import { isDirtPile } from '../../src/world/verbs/dig';
 import { chestPoint, targetDistance } from '../../src/world/verbs/targets';
 import { VERB_TUNING } from '../../src/world/verbs/tuning';
 import { createWorld, type StepResult, type World, type WorldOptions } from '../../src/world/world';
-import { currentSceneHash, readScene, SCENE_DIR } from './globalSetup';
+import { sceneBytes } from './globalSetup';
+export { SCENE_BUILD_TIMEOUT_MS } from './globalSetup';
 
 export type { XZ } from '../../src/world/factory';
 
@@ -53,9 +59,19 @@ export interface VerbOutcome {
 /** A fixture operation: something a test scene did that no command did (§11.0 "logged fixture ops"). */
 export interface FixtureOp {
   tick: number;
-  op: 'stage' | 'unstage' | 'standAt' | 'keepAwake' | 'give' | 'pause' | 'creature' | 'script' | 'patrol';
+  op: 'stage' | 'unstage' | 'standAt' | 'keepAwake' | 'give' | 'pause' | 'creature' | 'script' | 'patrol' | 'spawn';
   what: string;
+  /** A standAt's kind of way (standAtWhy): up a wall, down a drop, or neither (a walk could have done it). */
+  why?: StandAtWhy;
 }
+
+/**
+ * Why a standAt was a teleport and not a walk, from the terrain on the straight line (§11.0: "a wall steeper than the
+ * KCC's 45°"): `wall` a climb steeper than that (wallOnPath), `drop` a descent as steep and deeper than an autostep
+ * (into a pit: he'd fall), `other` neither (a walk could have done it: a body or a load in the way, or the recipe's
+ * choice).
+ */
+export type StandAtWhy = 'wall' | 'drop' | 'other';
 
 export type GiveTool = 'stoneAxe' | 'diggingStick' | 'spear' | 'axe2h';
 
@@ -88,6 +104,8 @@ export interface Harness {
   // the scripted player
   give(tool: GiveTool, into?: 'hands' | 'back'): number;
   standAt(p: V3 | XZ, yaw?: number): void;
+  /** The standAts so far by why (FixtureOp.why). */
+  standAts(): Record<StandAtWhy, number>;
   verb(v: VerbPayload, o?: { maxTicks?: number }): VerbOutcome;
   /** A verb that must succeed (throws with the reason otherwise). */
   must(v: VerbPayload, what?: string): VerbOutcome;
@@ -135,7 +153,10 @@ export interface WalkOptions {
   tolM?: number;
   /** Return false instead of throwing when the walk can't get there. */
   tryOnly?: boolean;
-  /** Give up after this many ticks without 5 cm of progress. Default 90. */
+  /**
+   * Give up after this many ticks without 5 cm of progress. Default WALK_STUCK_TICKS (3 s): long enough that a walk
+   * only fails where the way is really shut (a wall over the controller's 45°, a body in the way), not at a stumble.
+   */
   stuckTicks?: number;
 }
 
@@ -160,8 +181,14 @@ export interface DigPitResult {
   ticks: number;
   /** Strikes that dug (a `dig` event of this player's swing). */
   digs: number;
-  /** Logged standAt moves the planner made (walks that failed, leaving the pit). */
+  /** Logged standAt moves the planner made, in all (= the sum of standAtWhy). */
   standAts: number;
+  /**
+   * Why: `wall` a stand spot up a terrain wall over the controller's 45° (wallOnPath, §11.0's case), `stuck` a walk
+   * that failed anyway (WALK_STUCK_TICKS without progress), `piles` onto the rim to drag a pile out, `exit` out of the
+   * finished pit.
+   */
+  standAtWhy: { wall: number; stuck: number; piles: number; exit: number };
   /** Dirt piles dragged out of the footprint. */
   pilesMoved: number;
   /** Edge strike centres given up (DIG_PLAN.giveUpFails failed strikes in a row): the pit's corners stay shallower there. */
@@ -186,8 +213,10 @@ export interface DigPitResult {
  * the deeper it reaches, the further right of its aim it comes down, and in a narrow hole it clangs on the walls. So
  * the planner seeds the footprint with a sparse lattice of strikes (the spoil then goes outside it, §4.13), then digs
  * 0.5 m layers in kernel-like passes (each centre once a pass, so the floor goes down evenly), standing about level
- * with each strike, 1.0 m (or 1.4 m) from it, with any wall on the swing's left. Measured: an 8 × 6 × 2.5 m pit in
- * 3,477 strikes and 325,585 ticks (gates 3,822 and 360,000); 3 × 2 × 1.5 m in 240-257 (kernel 250).
+ * with each strike, 1.0 m (or 1.4 m) from it, with any wall on the swing's left. It walks between stand spots, and
+ * takes a logged standAt where the way is up a wall over 45° (wallOnPath) or a walk fails anyway. The measured strikes
+ * and ticks are printed by the tests (`dig …`, `buildPit: dig …`) and kept in docs/work/ledger.md (P23), not here: a
+ * number in this file would change the scene hash.
  */
 export const DIG_PLAN = {
   /** [ahead, below the feet] (m): where the aimed swing lands, and how deep its head gets there. */
@@ -264,6 +293,46 @@ export const DIG_PLAN = {
   forgetPasses: 3,
 } as const;
 
+/** walk's default stuckTicks (3 s at 60 Hz). */
+export const WALK_STUCK_TICKS = 180;
+
+/**
+ * The steepest climb on the terrain from `a` to `b` (extended by the capsule's radius: its edge meets a wall before its
+ * centre does): the largest rise ÷ run over any stretch of the line that rises more than WALL_MIN_RISE_M, as a slope
+ * angle in degrees (0 when nothing rises that much). Sampled every 0.05 m.
+ */
+export function steepestClimbDeg(t: Terrain, a: XZ, b: XZ): number {
+  const d0 = flat(a, b);
+  if (d0 < 1e-6) return 0;
+  const d = d0 + CHARACTER_TUNING.capsuleR;
+  const n = Math.max(1, Math.ceil(d / 0.05));
+  const ys: number[] = [];
+  for (let i = 0; i <= n; i++) {
+    const f = (i / n) * (d / d0);
+    ys.push(t.heightAt(a.x + (b.x - a.x) * f, a.z + (b.z - a.z) * f));
+  }
+  let worst = 0;
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j <= n; j++) {
+      const rise = ys[j] - ys[i];
+      if (rise > WALL_MIN_RISE_M) worst = Math.max(worst, (Math.atan2(rise, ((j - i) / n) * d) * 180) / Math.PI);
+    }
+  }
+  return worst;
+}
+
+/** A rise smaller than this is a step the controller's snap and autostep take whatever its slope (m). */
+export const WALL_MIN_RISE_M = 0.1;
+
+/**
+ * Is there a wall on the way from `a` to `b` (§11.0: "a wall steeper than the KCC's 45°")? A climb steeper than
+ * CHARACTER_TUNING.maxSlopeClimbDeg (steepestClimbDeg). Going down is never a wall (he drops). Terrain only: piles
+ * and bodies are walk's to find.
+ */
+export function wallOnPath(t: Terrain, a: XZ, b: XZ): boolean {
+  return steepestClimbDeg(t, a, b) > CHARACTER_TUNING.maxSlopeClimbDeg;
+}
+
 /** Where the stone axe's head meets a 30 cm trunk (ledger P15 → P23): ~1.2-1.4 m off its surface. */
 export const CHOP_STAND_M = [1.3, 1.2, 1.4, 1.1, 1.5] as const;
 
@@ -293,19 +362,18 @@ export async function loadHarness(bytes: Uint8Array, o?: { nav?: 'full' | 'off' 
 
 
 /**
- * A scene saved by globalSetup (globalSetup.ts): the save bytes of `key` for this tree's hash. Throws when it wasn't
- * built (no test file names it, or the tests ran without the root config) or its build failed.
+ * A cached scene (globalSetup.ts): the save bytes of `key` for this tree's hash, built on the first call that finds
+ * no file (once across workers, under a lock; the pit takes minutes, so await it in a `beforeAll` with
+ * SCENE_BUILD_TIMEOUT_MS). Throws the build's error when it failed in this run.
  */
-export function cachedScene(key: string): Uint8Array {
-  return readScene(SCENE_DIR, key, currentSceneHash());
+export function cachedScene(key: string): Promise<Uint8Array> {
+  return sceneBytes(key);
 }
 
 class WorldHarness implements Harness {
   readonly w: World;
   readonly history: { combat: CombatEvent[]; world: WorldEvent[] } = { combat: [], world: [] };
   readonly fixtures: FixtureOp[] = [];
-  /** True once a test called `script` (staging is refused from then on, §11.0). */
-  private scripted = false;
   /** The pace driver: sends a move before each step while it runs. */
   private driver: (() => void) | null = null;
 
@@ -362,35 +430,52 @@ class WorldHarness implements Harness {
     this.fixtures.push({ tick: this.w.tick, op, what });
   }
 
+  /**
+   * The staging fence (§11.0, rule 1, orchestrator decision 8): once any creature is in the world (brain on or off,
+   * scripted or not), the scene is live. A fixture can then no longer move, pin or free anything (`stage`/`unstage`
+   * refuse), so no fixture can become a trap's trigger; and every factory spawn from then on is logged in `fixtures`.
+   */
+  private live(): boolean {
+    const player = this.w.player;
+    return this.w.combat.fighters.some((f) => f !== player);
+  }
+
+  private spawned(id: number, what: string): number {
+    if (this.live()) this.fixture('spawn', `${what} ${id}`);
+    return id;
+  }
+
   // -------------------------------------------------------------------------
   // Entities (the factory, §6.7). Never `generated`: a harness entity is saved like anything a player made.
   // -------------------------------------------------------------------------
 
   log(o: LogSpec): number {
-    return spawnLog(this.w, { p: o.p, q: o.q, length: o.length, r: o.r, mass: o.mass, material: o.material, state: o.state });
+    return this.spawned(spawnLog(this.w, { p: o.p, q: o.q, length: o.length, r: o.r, mass: o.mass, material: o.material, state: o.state }), 'log');
   }
 
   stick(o: { length: number; r: number; p: V3; q?: Quat; material?: MaterialId; sharp?: { end: 1 | -1; s: number } }): number {
-    return spawnStick(this.w, { p: o.p, q: o.q, length: o.length, r: o.r, material: o.material, sharp: o.sharp });
+    return this.spawned(spawnStick(this.w, { p: o.p, q: o.q, length: o.length, r: o.r, material: o.material, sharp: o.sharp }), 'stick');
   }
 
   coil(o: { material: 'vine' | 'sinew'; lengthM: number; at: V3 }): number {
-    return spawnRopeCoil(this.w, { at: o.at, material: o.material, lengthM: o.lengthM });
+    return this.spawned(spawnRopeCoil(this.w, { at: o.at, material: o.material, lengthM: o.lengthM }), 'coil');
   }
 
   grass(o: { p: V3; mass: number }): number {
-    return spawnGrass(this.w, { p: o.p, mass: o.mass });
+    return this.spawned(spawnGrass(this.w, { p: o.p, mass: o.mass }), 'grass');
   }
 
   tree(o: { at: XZ; diameter: number; height: number; vine?: { anchorH: number; lengthM: number; yaw: number } }): {
     tree: number;
     vine: { rope: number; joint: number } | null;
   } {
-    return spawnTree(this.w, { at: o.at, diameter: o.diameter, height: o.height, vine: o.vine });
+    const t = spawnTree(this.w, { at: o.at, diameter: o.diameter, height: o.height, vine: o.vine });
+    this.spawned(t.tree, `tree${t.vine ? ` (vine ${t.vine.rope})` : ''}`);
+    return t;
   }
 
   box(o: { p: V3; size: [number, number, number]; material: MaterialId; state: 'free' | 'fixed'; look: string }): number {
-    return spawnBox(this.w, { p: o.p, size: o.size, material: o.material, state: o.state, look: o.look });
+    return this.spawned(spawnBox(this.w, { p: o.p, size: o.size, material: o.material, state: o.state, look: o.look }), 'box');
   }
 
   keepAwake(entity: number, on = true): void {
@@ -405,11 +490,11 @@ class WorldHarness implements Harness {
   }
 
   // -------------------------------------------------------------------------
-  // Staging (D-25): fixture ops, before a scene's trigger, never after a creature script has started.
+  // Staging (D-25): fixture ops, before a scene's trigger: refused once any creature exists (`live`).
   // -------------------------------------------------------------------------
 
   stage(entity: number, pose?: Pose3): void {
-    if (this.scripted) throw new Error(`harness.stage(${entity}): refused, a creature script has started (§11.0: staging comes before the trigger)`);
+    if (this.live()) throw new Error(`harness.stage(${entity}): refused, a creature is in the world (§11.0: staging comes before the trigger)`);
     const e = this.ent(entity);
     if (e.state !== 'free' && e.state !== 'fixed') throw new Error(`harness.stage(${entity}): a ${e.state} entity can't be staged`);
     if (pose) this.w.entities.setPose(e, pose);
@@ -418,6 +503,7 @@ class WorldHarness implements Harness {
   }
 
   unstage(entity: number): void {
+    if (this.live()) throw new Error(`harness.unstage(${entity}): refused, a creature is in the world (§11.0: staging comes before the trigger)`);
     const e = this.ent(entity);
     if (e.state !== 'fixed' || e.plant) throw new Error(`harness.unstage(${entity}): not a staged entity (${e.state})`);
     this.w.entities.setState(e, 'free');
@@ -439,6 +525,7 @@ class WorldHarness implements Harness {
     const p = this.p;
     if (tool === 'axe2h') {
       // DEVIATION (§11.4 "through give('axe2h')"): devOps' giveTool has no DS weapon; see the report (P22-fix).
+      // TODO(P23 → SIM-fix3): a `meta 'dev' giveTool` command once devOps gives the DS axe (the coordinator's item 8).
       if (into !== 'hands') throw new Error("harness.give('axe2h'): a DS weapon has no entity to stow");
       if (p.inventory?.hands) this.verb({ verb: 'drop', target: 0 });
       p.weapon = WEAPONS.axe;
@@ -461,13 +548,27 @@ class WorldHarness implements Harness {
 
   /**
    * A logged fixture move (World.teleport between ticks: pose history reset and a contact grace, §4.3): the player at
-   * (x, z) on the highest support there, facing `yaw` if given. (The dev op `teleport` carries no yaw, so the harness
-   * calls World.teleport itself and records it in `fixtures`.)
+   * (x, z) on the highest support there, facing `yaw` if given, its `why` (StandAtWhy) from the terrain on the straight
+   * line. (The dev op `teleport` carries no yaw, so the harness calls World.teleport itself and records it.)
    */
   standAt(at: V3 | XZ, yaw?: number): void {
     const p = this.p;
+    const t = this.w.terrain;
+    const from = { x: p.pos.x, z: p.pos.z };
+    const why: StandAtWhy = wallOnPath(t, from, at)
+      ? 'wall'
+      : steepestClimbDeg(t, at, from) > CHARACTER_TUNING.maxSlopeClimbDeg && t.heightAt(at.x, at.z) < t.heightAt(from.x, from.z) - CHARACTER_TUNING.autostepMaxH
+        ? 'drop'
+        : 'other';
+    // TODO(P23 → SIM-fix3): a `meta 'dev' teleport` command once it carries a yaw (the coordinator's item 8).
     this.w.teleport(p, at.x, at.z, yaw);
-    this.fixture('standAt', `(${at.x.toFixed(2)}, ${at.z.toFixed(2)})${yaw === undefined ? '' : ` yaw ${yaw.toFixed(3)}`}`);
+    this.fixtures.push({ tick: this.w.tick, op: 'standAt', what: `(${at.x.toFixed(2)}, ${at.z.toFixed(2)})${yaw === undefined ? '' : ` yaw ${yaw.toFixed(3)}`} ${why}`, why });
+  }
+
+  standAts(): Record<StandAtWhy, number> {
+    const n: Record<StandAtWhy, number> = { wall: 0, drop: 0, other: 0 };
+    for (const f of this.fixtures) if (f.op === 'standAt' && f.why) n[f.why]++;
+    return n;
   }
 
   /**
@@ -491,13 +592,12 @@ class WorldHarness implements Harness {
     };
     note(this.step());
     if (v.verb === 'focus' || v.verb === 'pull') return { ok: reason === null, reason, events };
-    for (let t = 1; t < max; t++) {
-      if (reason !== null) break;
-      if (p.free && !p.verbRequest && !w.verbs.continuousOf(p)) break;
-      note(this.step());
-      if (t === max - 1) throw new Error(
+    // `max` ticks in all (the first above): the check after the last step decides, not the step count.
+    for (let t = 1; reason === null && !(p.free && !p.verbRequest && !w.verbs.continuousOf(p)); t++) {
+      if (t >= max) throw new Error(
           `harness.verb(${v.verb} ${v.target}): not done in ${max} ticks (state ${p.state}, hands ${p.inventory?.hands ? `${p.inventory.hands.mode} ${p.inventory.hands.entity}` : 'empty'}, continuous ${w.verbs.continuousOf(p)?.verb ?? 'none'})`,
         );
+      note(this.step());
     }
     // A refused verb leaves the player as it was; let a work action that is still playing out finish.
     for (let t = 0; t < max && !(p.free && !p.verbRequest); t++) note(this.step());
@@ -520,7 +620,7 @@ class WorldHarness implements Harness {
     const tol = o.tolM ?? 0.12;
     const speed = o.speed ?? 1;
     const flags = o.crouch ? MOVE_CROUCH : 0;
-    const stuck = o.stuckTicks ?? 90;
+    const stuck = o.stuckTicks ?? WALK_STUCK_TICKS;
     let best = flat(p.pos, to);
     let since = 0;
     for (;;) {
@@ -799,7 +899,7 @@ class WorldHarness implements Harness {
   /**
    * createCreature at (x, z) facing `yaw` (a logged fixture: the dev ops face the player). brain 'off' (§11 "brain
    * off"): its mind runs a `hold` script from the start (senses update, no transitions: it stands until a test script
-   * replaces it). Default 'on'.
+   * replaces it). Default 'on'. From here on the staging fence is up (stage/unstage refuse, spawns are logged).
    */
   creature(kind: 'ape' | 'giantApe', at: XZ, yaw: number, opts?: { brain?: 'off' | 'on' }): Fighter {
     const f = this.w.spawnCreature(kind, at, yaw);
@@ -815,10 +915,9 @@ class WorldHarness implements Harness {
     return m;
   }
 
-  /** The creature's test script (§6.6). From now on staging is refused. */
+  /** The creature's test script (§6.6). (Staging is refused from the creature's spawn on.) */
   script(f: Fighter, s: MindScript): void {
     this.mind(f).script = s;
-    this.scripted = true;
     this.fixture('script', `${f.id} ${s.kind}`);
   }
 
@@ -984,7 +1083,7 @@ function digPitPlanner(h: WorldHarness, o: DigPitOptions): DigPitResult {
   const inside = (q: XZ, inset: number): boolean => q.x >= x0 + inset && q.x <= x1 - inset && q.z >= z0 + inset && q.z <= z1 - inset;
   let strikes = 0;
   let digs = 0;
-  let standAts = 0;
+  const why = { wall: 0, stuck: 0, piles: 0, exit: 0 };
   let pilesMoved = 0;
   const guard = (): void => {
     if (w.tick - start > o.maxTicks) throw new Error(`harness.digPit: not finished within ${o.maxTicks} ticks (${strikes} strikes)`);
@@ -992,9 +1091,14 @@ function digPitPlanner(h: WorldHarness, o: DigPitOptions): DigPitResult {
   };
   const goTo = (q: XZ): void => {
     if (flat(p.pos, q) <= P.standTolM) return;
-    if (!h.walk(q, { tolM: P.standTolM, tryOnly: true, stuckTicks: 25 })) {
+    // Up a wall over 45° (out of a layer onto a higher floor or the rim): a logged standAt, as §11.0 says; anywhere
+    // else he walks, and a walk that fails anyway (WALK_STUCK_TICKS without progress) is a standAt counted apart.
+    if (wallOnPath(t, p.pos, q)) {
       h.standAt(q);
-      standAts++;
+      why.wall++;
+    } else if (!h.walk(q, { tolM: P.standTolM, tryOnly: true })) {
+      h.standAt(q);
+      why.stuck++;
     }
   };
   const inPit = (): boolean => t.heightAt(p.pos.x, p.pos.z) < t.originalHeightAt(p.pos.x, p.pos.z) - P.stepM;
@@ -1025,7 +1129,7 @@ function digPitPlanner(h: WorldHarness, o: DigPitOptions): DigPitResult {
       // Out of a pit deeper than a step, the player is put on the rim beside the pile's way out first.
       if (inPit()) {
         h.standAt({ x: out.x, z: out.z });
-        standAts++;
+        why.piles++;
       }
       if (h.dragTo(id, out, { tolM: 0.6, tryOnly: true })) pilesMoved++;
       else stuck.add(id);
@@ -1206,10 +1310,10 @@ function digPitPlanner(h: WorldHarness, o: DigPitOptions): DigPitResult {
   // Out of the finished pit onto its rim (a logged standAt: the walls are steeper than the controller climbs).
   if (inPit()) {
     h.standAt({ x: x0 - 1.0, z: o.centre.z });
-    standAts++;
+    why.exit++;
   }
   h.ticks(2);
-  return { strikes, ticks: w.tick - start, digs, standAts, pilesMoved, abandoned: centres.filter((c) => c.abandoned).map((c) => ({ x: c.x, z: c.z })), misses: stats.miss, layerStrikes: stats.layers, tickSplit: { walk: stats.walk, swing: stats.swing, piles: stats.piles } };
+  return { strikes, ticks: w.tick - start, digs, standAts: why.wall + why.stuck + why.piles + why.exit, standAtWhy: why, pilesMoved, abandoned: centres.filter((c) => c.abandoned).map((c) => ({ x: c.x, z: c.z })), misses: stats.miss, layerStrikes: stats.layers, tickSplit: { walk: stats.walk, swing: stats.swing, piles: stats.piles } };
 }
 
 /** The centres column by column along x, each column along z, alternate columns reversed (and the whole reversed). */
