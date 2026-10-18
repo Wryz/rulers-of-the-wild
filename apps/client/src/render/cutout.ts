@@ -1,4 +1,8 @@
+// DungeonStyle's see-through scenery (docs/M1-DESIGN.md §10.6, SPEC:638, 828): trunks and canopies between the camera
+// and the player dissolve. Changed for the Clearing (P34): the focus stands CAMERA_TUNING.cutoutHeightM over the ground
+// under the player (DS: y = 1 over the arena floor), through focusCutout; forest materials go through applyCutout (P32).
 import { type Camera, type Material, Vector2, Vector3 } from 'three';
+import { CAMERA_TUNING } from './cameraRig';
 
 /**
  * See-through walls: geometry nearer the camera than the fight is dissolved in a soft,
@@ -63,4 +67,21 @@ export function updateCutout(camera: Camera, focus: Vector3, radiusY: number, as
   cutoutUniforms.uCutRadius.value.set(radiusY / aspect, radiusY);
   _v.copy(focus).applyMatrix4(camera.matrixWorldInverse);
   cutoutUniforms.uCutDepth.value = _v.z;
+}
+
+/**
+ * The cutout around the player (or the fight): centred CAMERA_TUNING.cutoutHeightM over the ground at `at` (x, z), its
+ * ellipse widened by the fight's `spreadM` (DS: 0.3 + min(0.25, spread × 0.06)). Returns the focus (world).
+ */
+export function focusCutout(
+  camera: Camera & { aspect: number },
+  at: { x: number; z: number },
+  ground: (x: number, z: number) => number,
+  spreadM: number,
+  out = new Vector3(),
+): Vector3 {
+  const T = CAMERA_TUNING;
+  out.set(at.x, ground(at.x, at.z) + T.cutoutHeightM, at.z);
+  updateCutout(camera, out, T.cutoutRadius + Math.min(T.cutoutSpreadMax, Math.max(0, spreadM) * T.cutoutSpreadPerM), camera.aspect);
+  return out;
 }

@@ -7,7 +7,8 @@
 // Conventions:
 // - A `cylinder` is a regular N-gon prism, r = circumradius, axis local +Y, vertex k at angle (k + ½)·2π/N from +X
 //   toward +Z (so an 8-gon has a flat face toward ±X and ±Z, as the C labs built it). `cylinderPoints` gives the exact
-//   collider vertices, so the client can draw the same prism.
+//   collider vertices, so the client can draw the same prism; a flat one (a coil, a round: flatPrism) collides as
+//   Rapier's round cylinder of the same height and volume (a Rapier limitation, see colliderDesc).
 // - A shape's long axis (`principalAxis`) is a local coordinate axis: +Y for cylinders, capsules and balls; for boxes
 //   and hulls the axis of the largest extent (ties: Y, then X, then Z). `axisT` (crossCut, Entity.crossCut) is the
 //   signed coordinate along that axis in the local frame, m, between its `min` and `max`.
@@ -94,8 +95,20 @@ export function shapeMass(s: Shape, m: Material): number {
 
 /**
  * The collider descriptor for a shape of a material: density (so the body's mass is density × volume) and friction
- * (combine rule Average, MAP rapier §6). A cylinder is the convex hull of its prism (logs and sticks rest, §2.2).
+ * (combine rule Average, MAP rapier §6). A cylinder is the convex hull of its prism (logs and sticks rest, §2.2), except
+ * a flat one (flatPrism: a coil, a cross-cut round), which is Rapier's round cylinder of the same height and volume.
  * Collision groups, events and CCD are the entity store's (P06). Needs `physicsReady()`.
+ *
+ * DEVIATION (a Rapier limitation; departs from §2.2's "a cylinder is the convex hull of its prism" for flat prisms):
+ * Rapier 0.21's contact between a heightfield built with FIX_INTERNAL_EDGES (§2.6) and a convex polyhedron resting on
+ * a face of 6 or more vertices reports that face's contacts with the wrong sign (separated by as much as it has sunk:
+ * +0.017 m at 0.020 m in, +0.046 at 0.057), so the solver never pushes back and the body falls through the terrain:
+ * a 20 m vine coil (the factory's 8-gon disc) sank in 12 of 30 drops on flat ground, 29-30 of 30 on a 2 % slope and
+ * 19 of 30 on a 10 % one. Without the flag nothing sinks, but the flag keeps bodies from catching on the triangles'
+ * internal edges (a 150 kg log dragged by 600 N slowed from ≥ 1.5 to 0.87 m/s without it). Boxes, 4- and 5-gon prisms,
+ * prisms resting on their quad sides (logs, sticks), a cap broken into faces Rapier keeps apart, and Rapier's own
+ * cylinder never sink, so a prism whose caps are its largest faces (the faces it lies on) is that cylinder.
+ * Measured with the 20 m coil, 30 drops each: 0 sink on flat, 2 %, 10 % and rough terrain.
  */
 export function colliderDesc(s: Shape, m: Material): RAPIER.ColliderDesc {
   let d: RAPIER.ColliderDesc | null;
@@ -110,14 +123,66 @@ export function colliderDesc(s: Shape, m: Material): RAPIER.ColliderDesc {
       d = RAPIER.ColliderDesc.capsule(s.halfHeight, s.r);
       break;
     case 'cylinder':
-      d = RAPIER.ColliderDesc.convexHull(new Float32Array(cylinderPoints(s)));
+      // A prism too thin for Rapier's hull (rapierHullOk: a needle) is its round cylinder too, as a flat one is.
+      d = flatPrism(s) || !rapierHullOk(s)
+        ? RAPIER.ColliderDesc.cylinder(s.halfHeight, roundCylinderR(s))
+        : RAPIER.ColliderDesc.convexHull(new Float32Array(cylinderPoints(s)));
       break;
     case 'hull':
-      d = RAPIER.ColliderDesc.convexHull(new Float32Array(s.points));
+      // ColliderDesc.convexHull never returns null: Rapier computes the hull only when the collider is created, and a
+      // degenerate one then fails there ("expected instance of p"). Test it here, where the error can say what it is.
+      d = rapierHullOk(s) ? RAPIER.ColliderDesc.convexHull(new Float32Array(s.points)) : null;
       break;
   }
   if (!d) throw new Error(`colliderDesc: Rapier could not build a convex hull for a ${s.kind}`);
   return d.setDensity(m.density).setFriction(m.friction).setFrictionCombineRule(RAPIER.CoefficientCombineRule.Average);
+}
+
+/**
+ * The radius of the round cylinder that stands in for an N-gon prism (a flat one, or one too thin for Rapier's hull):
+ * the radius of the circle with the prism's cross-section area, so it has the prism's volume and mass. Every round
+ * stand-in uses it: colliderDesc, the queries' fallback and the client's presentation mirror.
+ */
+export function roundCylinderR(s: { r: number; sides: number }): number {
+  return s.r * Math.sqrt(prismArea(1, s.sides) / Math.PI);
+}
+
+/** rapierHullOk's answers, by shape object (shapes are never mutated in place: a changed shape is a new object). */
+const HULL_OK = new WeakMap<Shape, boolean>();
+
+/**
+ * Whether Rapier can build the shape: true for a ball, box or capsule; for a prism or a hull, whether Rapier's own
+ * convex hull of its points succeeds. Rapier 0.21 rejects needle-thin and flat point sets by aspect, not by a size we
+ * can bound (an 8-gon prism 8 m long builds at r 3 mm but not at 2 mm, and 20 m long not at 5 mm), so only asking it is
+ * safe. A query shape (queries.ts) and a collider (colliderDesc) are hulls of these points. Needs `physicsReady()`.
+ */
+export function rapierHullOk(s: Shape): boolean {
+  if (s.kind !== 'cylinder' && s.kind !== 'hull') return true;
+  const known = HULL_OK.get(s);
+  if (known !== undefined) return known;
+  const pts = s.kind === 'cylinder' ? cylinderPoints(s) : s.points;
+  let ok = pts.length >= 12 && pts.every(Number.isFinite);
+  if (ok) {
+    const raw = new RAPIER.ConvexPolyhedron(new Float32Array(pts), null).intoRaw();
+    ok = !!raw;
+    raw?.free();
+  }
+  HULL_OK.set(s, ok);
+  return ok;
+}
+
+/**
+ * The polyhedron faces Rapier mishandles on a FIX_INTERNAL_EDGES heightfield have this many vertices or more (see
+ * colliderDesc): a fact about Rapier 0.21, not a starting value.
+ */
+const RAPIER_BAD_FACE_VERTICES = 6;
+
+/**
+ * An N-gon prism (N ≥ RAPIER_BAD_FACE_VERTICES) whose caps are its largest faces: it lies on a cap, and colliderDesc
+ * gives it Rapier's round cylinder instead of its hull. The cap's area against one side face's (2r·sin(π/N) × 2·halfHeight).
+ */
+export function flatPrism(s: { halfHeight: number; r: number; sides: number }): boolean {
+  return s.sides >= RAPIER_BAD_FACE_VERTICES && prismArea(s.r, s.sides) > 2 * s.r * Math.sin(Math.PI / s.sides) * 2 * s.halfHeight;
 }
 
 /** A cylinder's exact prism vertices, local xyz triples: the ring at −halfHeight, then the ring at +halfHeight. */
@@ -318,6 +383,25 @@ export function crossCut(s: Shape, axisT: number): [ShapePiece, ShapePiece] {
   const h = convexHull(hullPoints(s));
   const dir = toP3(ax.dir);
   return [cutPiece(h, scale(dir, -1), -t, at(ax.min + lo)), cutPiece(h, dir, t, at(t + hi))];
+}
+
+/**
+ * The shape scaled by k about its own local origin (a piece's centre), every dimension alike: volume × k³. Breaking
+ * uses it to give a piece the volume of a sliver merged into it (SIM-fix3), so the pieces' mass sums to the parent's.
+ */
+export function scaleShape(s: Shape, k: number): Shape {
+  switch (s.kind) {
+    case 'ball':
+      return { kind: 'ball', r: s.r * k };
+    case 'box':
+      return { kind: 'box', hx: s.hx * k, hy: s.hy * k, hz: s.hz * k };
+    case 'capsule':
+      return { kind: 'capsule', halfHeight: s.halfHeight * k, r: s.r * k };
+    case 'cylinder':
+      return { kind: 'cylinder', halfHeight: s.halfHeight * k, r: s.r * k, sides: s.sides };
+    case 'hull':
+      return { kind: 'hull', points: s.points.map((x) => x * k) };
+  }
 }
 
 /**

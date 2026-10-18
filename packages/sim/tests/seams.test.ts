@@ -28,6 +28,8 @@ import { WEAPON_MOVES, WEAPONS } from '../src/sim/weapons';
 import { resetTuning, setTuningValue, TUNING, tuningLeaves } from '../src/tuning/registry';
 import type { BoneName } from '../src/body/skeleton';
 import type { Finish, FighterMover, GroundQuery, Work, WorldPort } from '../src/world/types';
+// (Registers CHARACTER_TUNING, whose hip drop the footwork reads on a slope.)
+import { CHARACTER_TUNING } from '../src/world/characters';
 
 afterEach(() => {
   resetTuning('DAMAGE_TUNING');
@@ -210,14 +212,11 @@ describe('the tick split: beginTick and stepBody', () => {
 });
 
 describe('the seams', () => {
-  it('externalKnockdown is a deprecated alias of physicsOwnsDowned: one flag', () => {
+  it('physicsOwnsDowned is the one flag: DungeonStyle\'s externalKnockdown is gone (MAP gap-7 §3.1, RF-8)', () => {
     const sim = new CombatSim();
     expect(sim.physicsOwnsDowned).toBe(false);
-    expect(sim.externalKnockdown).toBe(false);
-    sim.externalKnockdown = true;
-    expect(sim.physicsOwnsDowned).toBe(true);
-    sim.physicsOwnsDowned = false;
-    expect(sim.externalKnockdown).toBe(false);
+    // Neither an own field nor an accessor on the prototype: a write to it would be a new, ignored property.
+    expect('externalKnockdown' in sim).toBe(false);
   });
 
   it('defaults to DungeonStyle: no mover, no world, flat ground, the fighter-id reading of commands', () => {
@@ -390,6 +389,42 @@ describe('the seams', () => {
       // The feet stand where they would on flat ground (only y differs), and each leg reaches its foot as it would.
       expect(slope.out.length).toBe(flat.out.length);
       for (let i = 0; i < flat.out.length; i++) expect(Math.abs(slope.out[i] - flat.out[i])).toBeLessThan(1e-9);
+    }
+  });
+
+  it('lowers the hips for the downhill leg on a 0.3 grade: a planted ankle sits on its plant as on flat ground, walking or standing (core-fix)', () => {
+    /** The worst planted ankle's height above its plant less ANKLE_HEIGHT (floating > 0), walking `dir` then standing. */
+    const miss = (ground: GroundQuery | null, dir: [number, number]) => {
+      const sim = new CombatSim(5);
+      sim.walkable = { resolve: () => {}, isWalkable: () => true };
+      if (ground) sim.ground = ground;
+      const f = new Fighter('player', 'Walker', PLAYER_MOVES, { walkSpeed: 2.6 }, undefined, { ids: new IdCounter() });
+      sim.add(f);
+      const at = new Vector3();
+      let walking = 0;
+      let standing = 0;
+      for (let i = 0; i < 240; i++) {
+        if (i < 150) sim.commands.push(moveCommand(sim.frame + 1, f.id, dir[0], dir[1]));
+        sim.step();
+        if (i < 30 || (i >= 150 && i < 200)) continue;
+        for (const foot of [f.footwork.L, f.footwork.R]) {
+          if (foot.stepping) continue;
+          const shin = foot.side === 'L' ? 'shinL' : 'shinR';
+          const off = Math.abs(bonePoint(f.rig, shin, SKELETON[shin].length, at).y - foot.pos.y - ANKLE_HEIGHT);
+          if (i < 150) walking = Math.max(walking, off);
+          else standing = Math.max(standing, off);
+        }
+      }
+      return { walking, standing };
+    };
+    // (A 0.3 grade needs about 0.11 m of drop: inside the cap.)
+    expect(CHARACTER_TUNING.maxHipDropM).toBeGreaterThan(0.12);
+    for (const dir of [[0, 1], [0, -1], [1, 0]] as [number, number][]) {
+      const flat = miss(null, dir);
+      const grade = miss({ heightAt: (_x, z) => 0.3 * z }, dir);
+      // (Before: up to 0.108 m walking and 0.054 m more standing; the flat walk's stepping arc misses about 0.02 m.)
+      expect(grade.walking, `walking ${dir}`).toBeLessThan(flat.walking + 0.02);
+      expect(grade.standing, `standing ${dir}`).toBeLessThan(flat.standing + 0.01);
     }
   });
 });
@@ -884,8 +919,10 @@ describe('the fighter\'s M1 fields', () => {
 describe('sim/rules.ts', () => {
   it('registers DAMAGE_TUNING and MOVE_TUNING with the §9 values, a unit and a source on every key', () => {
     expect(DAMAGE_TUNING).toEqual({
-      kS: 3, K: 18, meleeJPerDmg: 18, throwCapJ: 400, leadingCos: 0.7, tipRadiusM: 0.15, impactCooldownTicks: 6,
+      kS: 3, K: 18, meleeJPerDmg: 18, throwCapJ: 400, leadingCos: 0.7, bladeSharpness: 0.8, tipRadiusM: 0.15, impactCooldownTicks: 6,
       minImpactJ: 5, hardLandingBluntOnly: true, zoneGraceTicks: 2,
+      // (Not in §9: the orchestrator's decision on P10's design conflict, an entity's integrity at its point mass.)
+      integrityPointMass: true,
     });
     expect(MOVE_TUNING).toMatchObject({
       sprintMul: 1.4, sprintStaminaPerS: 0.15, sprintMinStamina: 0.1, crouchSpeedMul: 0.5, jumpStamina: 0.05,

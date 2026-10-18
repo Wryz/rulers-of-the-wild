@@ -13,6 +13,23 @@ import {
   Vector3,
 } from 'three';
 
+/**
+ * What blood, gibs and particles land on (docs/M1-DESIGN.md §10.11: `ground(x, z)` floors, stains on the terrain
+ * normal). The presentation world hands them the sim's terrain, read-only; DS's arena floor was y = 0.
+ */
+export interface Ground {
+  /** Height of the ground at (x, z) (m). */
+  height(x: number, z: number): number;
+  /** The ground's unit up-normal at (x, z), into `out`. */
+  normal(x: number, z: number, out: Vector3): Vector3;
+}
+
+/** DS's floor: flat at y = 0 (tests, and until a world is known). */
+export const FLAT_GROUND: Ground = Object.freeze({
+  height: () => 0,
+  normal: (_x: number, _z: number, out: Vector3) => out.set(0, 1, 0),
+});
+
 interface P {
   pos: Vector3;
   vel: Vector3;
@@ -41,9 +58,17 @@ interface Ring {
 
 const MAX = 400;
 const _o = new Object3D();
+const _n = new Vector3();
+const _z = new Vector3(0, 0, 1);
+/** A ring floats this far over the ground (DS: 0.02 m over y = 0), along its normal. */
+const RING_LIFT = 0.02;
+/** A particle bounces this far over the ground (DS: 0.01 m). */
+const PARTICLE_FLOOR = 0.01;
 
-/** Hit sparks, dust puffs, impact flashes and ground rings. */
+/** Hit sparks, dust puffs, impact flashes and ground rings, on the ground they are given (`ground`, settable). */
 export class Effects {
+  /** What sparks and dust bounce off and rings lie on. */
+  ground: Ground;
   private readonly mesh: InstancedMesh;
   private readonly ps: P[] = [];
   private readonly flashes: Flash[] = [];
@@ -51,7 +76,11 @@ export class Effects {
   private readonly flashGeo = new IcosahedronGeometry(1, 0);
   private readonly ringGeo = new RingGeometry(0.85, 1, 32);
 
-  constructor(private readonly scene: Scene) {
+  constructor(
+    private readonly scene: Scene,
+    ground: Ground = FLAT_GROUND,
+  ) {
+    this.ground = ground;
     this.mesh = new InstancedMesh(new TetrahedronGeometry(1), new MeshBasicMaterial({ toneMapped: false }), MAX);
     this.mesh.instanceMatrix.setUsage(DynamicDrawUsage);
     this.mesh.frustumCulled = false;
@@ -95,10 +124,21 @@ export class Effects {
       this.ringGeo,
       new MeshBasicMaterial({ color, transparent: true, depthWrite: false, toneMapped: false, blending: AdditiveBlending }),
     );
-    mesh.rotation.x = -Math.PI / 2;
-    mesh.position.set(at.x, 0.02, at.z);
+    this.placeRing(mesh, at.x, at.z);
     this.scene.add(mesh);
     this.rings.push({ mesh, t: 0, dur, size, follow });
+  }
+
+  /** How many sparks and dust puffs are flying. */
+  get particleCount(): number {
+    return this.ps.length;
+  }
+
+  /** A ring lies on the ground at (x, z), turned to its normal. */
+  private placeRing(mesh: Mesh, x: number, z: number): void {
+    const n = this.ground.normal(x, z, _n);
+    mesh.quaternion.setFromUnitVectors(_z, n);
+    mesh.position.set(x, this.ground.height(x, z), z).addScaledVector(n, RING_LIFT);
   }
 
   /** `simDt` freezes with hit-pause; `realDt` keeps impact flashes alive during it. */
@@ -114,8 +154,9 @@ export class Effects {
       p.vel.y -= p.gravity * simDt;
       p.vel.multiplyScalar(Math.exp(-p.drag * simDt));
       p.pos.addScaledVector(p.vel, simDt);
-      if (p.pos.y < 0.01) {
-        p.pos.y = 0.01;
+      const floor = this.ground.height(p.pos.x, p.pos.z) + PARTICLE_FLOOR;
+      if (p.pos.y < floor) {
+        p.pos.y = floor;
         p.vel.y *= -0.3;
       }
     }
@@ -157,7 +198,7 @@ export class Effects {
         continue;
       }
       const at = r.follow?.();
-      if (at) r.mesh.position.set(at.x, 0.02, at.z);
+      if (at) this.placeRing(r.mesh, at.x, at.z);
       r.mesh.scale.setScalar(r.size * (0.5 + 0.6 * u));
       (r.mesh.material as MeshBasicMaterial).opacity = (1 - u) * 0.9;
     }

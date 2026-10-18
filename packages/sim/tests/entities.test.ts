@@ -339,11 +339,12 @@ describe('anchoring', () => {
     const mEff = reducedMass(4.5, w.entities.isAnchored(stake) ? Infinity : stake.mass);
     expect(mEff).toBe(4.5);
 
-    // Its queued impulse is dropped, and a 300 kg log dropped across it doesn't move it.
+    // Its queued impulse is dropped, and a 300 kg log laid across it doesn't move it (set down from 2 cm: dropped from
+    // 0.5 m, ≈ 1.5 kJ beats capacity × loadLeverM = 120 J and knocks the stake loose, §2.3, P10).
     const pose = structuredClone(stake.pose);
     w.entities.queueImpulse(stake.id, { x: 500, y: 0, z: 0 }, null);
     const r = prismR(300, MATERIALS.greenWood.density, 3, 6);
-    w.entities.create(prism('greenWood', { length: 3, r, sides: 6, p: { x: 0, y: 0.7 + r + 0.5, z: 0 }, q: LYING_Z }));
+    w.entities.create(prism('greenWood', { length: 3, r, sides: 6, p: { x: 0, y: 0.7 + r + 0.02, z: 0 }, q: LYING_Z }));
     for (let t = 0; t < 120; t++) w.step();
     expect(w.entities.pendingImpulses()).toEqual([]);
     expect(stake.pose).toEqual(pose);
@@ -362,6 +363,48 @@ describe('anchoring', () => {
     expect(stake.body!.mass()).toBeCloseTo(stake.mass, 3);
     expect(w.entities.isAnchored(stake)).toBe(false);
     expect(stake.touched).toBe(true);
+  });
+
+  it('unanchor lifts a driven stake clear of the terrain (the lift returned), so it never starts dynamic inside the heightfield and stays in the world', async () => {
+    const w = await make();
+    // Stakes 1.4 m × r 0.05 m driven 0.15-0.3 m into the ground, upright and leaning up to 20°.
+    const stakes: Entity[] = [];
+    for (let i = 0; i < 8; i++) {
+      const lean = axisAngle({ x: Math.cos(i), y: 0, z: Math.sin(i) }, ((i % 3) * 10 * Math.PI) / 180);
+      const driven = 0.15 + (0.15 * i) / 7;
+      const p = { x: -6 + 1.7 * i, y: 0.7 - driven, z: 3 };
+      stakes.push(w.entities.create(prism('dryWood', { length: 1.4, r: 0.05, sides: 8, p, q: lean, state: 'anchored', look: 'stake' })));
+    }
+    w.step();
+    for (const s of stakes) {
+      const depth = w.entities.depthBelowGround(s.shape, s.pose);
+      expect(depth).toBeGreaterThan(0.1);
+      const y0 = s.pose.p.y;
+      const lift = w.entities.unanchor(s);
+      expect(lift).toBeCloseTo(depth, 6);
+      expect(s.pose.p.y - y0).toBeCloseTo(lift, 5);
+      // No vertex below the ground (f32 poses).
+      expect(w.entities.depthBelowGround(s.shape, s.pose)).toBeLessThan(1e-5);
+      expect(s.state).toBe('free');
+      expect(s.body!.isDynamic()).toBe(true);
+    }
+    // A free entity already clear of the ground isn't moved.
+    const log = w.entities.create(prism('dryWood', { length: 2, r: 0.1, sides: 6, p: { x: 0, y: 0.5, z: -3 }, q: LYING_Z }));
+    expect(w.entities.unanchor(log)).toBe(0);
+    // Only a driven (anchored) entity is lifted: a fixed one turned free (a felled trunk on its hinge, a bent sapling on
+    // its root) keeps its pose, even partly in the ground.
+    const rooted = w.entities.create(prism('greenWood', { length: 2, r: 0.04, sides: 8, p: { x: 3, y: 0.8, z: -3 }, state: 'fixed', look: 'sapling' }));
+    expect(w.entities.depthBelowGround(rooted.shape, rooted.pose)).toBeGreaterThan(0.1);
+    const at = structuredClone(rooted.pose);
+    expect(w.entities.unanchor(rooted)).toBe(0);
+    expect(rooted.state).toBe('free');
+    expect(rooted.pose).toEqual(at);
+    for (let t = 0; t < 240; t++) w.step();
+    // Every stake fell over onto the ground and lies on it: none pushed through the heightfield.
+    for (const s of stakes) {
+      expect(s.pose.p.y).toBeGreaterThan(w.terrain.heightAt(s.pose.p.x, s.pose.p.z));
+      expect(w.entities.depthBelowGround(s.shape, s.pose)).toBeLessThan(0.02);
+    }
   });
 
   it('anchor() drives a free stake: fixed body, depth × anchorHoldNPerM, velocities zero', async () => {
@@ -659,17 +702,18 @@ describe('the mirror', () => {
     const a = await pile();
     const b = await pile();
     expect(mirrorText(b)).toBe(mirrorText(a));
-    let prev = a.entities.all().map((e) => structuredClone(e.pose));
+    // By id: light pieces of the pile may break on landing (§4.10, P10), which replaces them with new ids.
+    let prev = new Map(a.entities.all().map((e) => [e.id, structuredClone(e.pose)]));
     for (let t = 1; t <= 1200; t++) {
       a.step();
       b.step();
       // prevPose is the pose one tick earlier; pose is the body's own f32 pose.
       const now = a.entities.all();
       for (let i = 0; i < now.length; i++) {
-        expect(now[i].prevPose).toEqual(prev[i]);
+        if (prev.has(now[i].id)) expect(now[i].prevPose).toEqual(prev.get(now[i].id));
         if (t % 120 === 0) expect(now[i].pose).toEqual(bodyPose(now[i]));
       }
-      prev = now.map((e) => structuredClone(e.pose));
+      prev = new Map(now.map((e) => [e.id, structuredClone(e.pose)]));
       if (t % 60 === 0) expect(mirrorText(b)).toBe(mirrorText(a));
     }
     for (const e of a.entities.all()) {
@@ -1034,7 +1078,9 @@ describe('save records', () => {
     w.entities.remove(mat.id);
     w.entities.release(thrown, 1);
     thrown.thrown = { by: 1, tick: w.tick };
-    w.entities.setGrace(thrown, { from: { kind: 'fighter', id: 1, part: 'zone', bone: 'shinL' }, minUntil: w.tick + 10, maxUntil: w.tick + 600 });
+    // minUntil past the 240 ticks below: from minUntil, P10's grace ends as soon as the piece is clear of its breaker
+    // (RF-7), and this one never touched it.
+    w.entities.setGrace(thrown, { from: { kind: 'fighter', id: 1, part: 'zone', bone: 'shinL' }, minUntil: w.tick + 300, maxUntil: w.tick + 600 });
     thrown.crossCut = { axisT: 0.2, remaining: 0.5, fromDir: { x: 0, y: 0, z: 1 } };
     thrown.loadHist[3] = 120.5;
     thrown.credit = ['p1'];

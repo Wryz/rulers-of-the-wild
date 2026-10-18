@@ -68,6 +68,15 @@ export interface WorldOptions {
   player?: boolean;
   /** Dev ?mode=training: an ape 3 m in front of the player (D-50; the Spawner's). Default false. */
   sparringApe?: boolean;
+  /**
+   * Build the world a save is loaded into (save/load.ts): generation runs, but the player isn't spawned, the spawner
+   * isn't initialised and the navmesh isn't built; the loader adds the save's fighters, restores the spawner from its
+   * record and builds the navmesh once over the loaded ground. `player` and `sparringApe` still say what the saved world
+   * was built with (they are saved again as they are). Not one of `options`. Default false. DEVIATION (§1.5.1's
+   * WorldOptions has no such flag; core-fix: it spares the loader removing what construction made and a navmesh build).
+   * TODO(P22): Spawner.restoreRecord has to put back whatever Spawner.init sets up besides the creatures it makes.
+   */
+  load?: boolean;
 }
 
 /** Player number → credit id (SPEC:566). */
@@ -100,7 +109,7 @@ export interface WorldIds {
 export class World implements WorldPort {
   readonly seed: number;
   /** The options the world was built with, defaults filled in (generation and the spawner read them). */
-  readonly options: Readonly<Required<WorldOptions>>;
+  readonly options: Readonly<Required<Omit<WorldOptions, 'load'>>>;
   readonly ids: WorldIds;
   readonly rngs: WorldRngs;
   readonly physics: PhysicsWorld;
@@ -178,7 +187,7 @@ export class World implements WorldPort {
     this.queries = new WorldQueries(this.physics, {
       mass: (id) => this.entities.get(id)?.mass ?? 0,
       collider: (id) => this.entities.get(id)?.collider ?? null,
-    });
+    }, this.terrain);
 
     this.combat = new CombatSim(this.rngs.seedOf('combat'));
     this.rngs.attachCombat(this.combat.rng);
@@ -213,8 +222,10 @@ export class World implements WorldPort {
     sim.physicsOwnsDowned = true;
     sim.playerFighter = (n) => this.players.get(n);
 
-    // Generation (entities in §6.7's fixed order), the navmesh, the player, the spawner.
+    // Generation (entities in §6.7's fixed order), the navmesh, the player, the spawner; a world built for a load only
+    // generates (the loader makes the rest from the save).
     this.spawnData = this.options.scene === 'clearing' ? generateClearing(this, this.rngs.gen) : null;
+    if (o.load) return;
     this.nav?.build(this);
     if (this.options.player) this.spawnPlayer(this.spawnData?.playerYaw ?? 0);
     this.spawner.init(this, this.spawnData);
@@ -361,7 +372,8 @@ export class World implements WorldPort {
    * the harness stands the player on a scaffold, §11.2(c)); a ruler on the terrain or an entity low enough to stand on
    * (the probe starts at the terrain), never on top of an obstacle. The controller's sweep is skipped for one tick (MAP
    * gap-1 §3.6); the zone or ruler pose history is reset and its contacts get a grace (§4.3), so the jump is never read
-   * as a velocity.
+   * as a velocity. A player or an ape down on its slab (knocked down or KO'd) is moved with the slab, at rest, its hip
+   * over (x, z) on that support (DownedBodies.teleport; core-fix: phase 13a used to put it back where the slab lay).
    *
    * The grace runs DAMAGE_TUNING.zoneGraceTicks from the tick whose phase 4 poses the bodies at the new place: this tick
    * when called before phase 4 (phase 1c dev ops, phase 2 minds, phase 3), otherwise the next one (between steps, or
@@ -370,14 +382,15 @@ export class World implements WorldPort {
    */
   teleport(f: Fighter, x: number, z: number, yaw?: number): void {
     const ground = this.terrain.heightAt(x, z);
-    // TODO(P11): pass the ruler's ankle height as maxAboveTerrainM, as RulerMover does (§4.7 step 1).
-    const y = this.supportAt(x, z, f.ruler ? ground : ground + WORLD_TUNING.teleportProbeM);
+    // A ruler stands on nothing higher than its ankle above the terrain (§4.7 step 1, as RulerMover does).
+    const y = f.ruler ? this.supportAt(x, z, ground, { maxAboveTerrainM: this.rulers.ankleM(f) }) : this.supportAt(x, z, ground + WORLD_TUNING.teleportProbeM);
+    const turn = yaw === undefined ? 0 : yaw - f.yaw;
     f.pos.set(x, y, z);
     if (yaw !== undefined) f.yaw = yaw;
     f.vel.set(0, 0, 0);
     f.walkVel.set(0, 0, 0);
     if (f.ruler) this.rulers.resetHistory(f);
-    else {
+    else if (!this.downed.teleport(f, x, y, z, turn)) {
       this.kcc.teleport(f, x, y, z);
       this.zones.resetHistory(f);
     }
@@ -467,7 +480,7 @@ export class World implements WorldPort {
 
   /** The environmental classification and credit (sim/impact.ts), then parts and death (deaths.ts). */
   onKO(d: Fighter, finish: Finish): { environmental: boolean; credit: string[] } {
-    const r = classifyKO(d, finish, this.tick);
+    const r = isEnvironmental(d, finish, this.tick);
     this.deaths.onKO(this, d, finish);
     return r;
   }
@@ -533,20 +546,4 @@ export class World implements WorldPort {
 
   /** Phase 17, 1 Hz: territory, decay, traplines (M3, M4). */
   private slowSystems(): void {}
-}
-
-/**
- * isEnvironmental (sim/impact.ts), or the legacy answer (not environmental, nobody's credit) while that function is
- * still P01's placeholder, which throws. Any KO in a world (a DS fight in P08's or P13's tests) reaches it, not only a
- * ruler's (RF-8), and packages before P09 must not throw from inside step() for it.
- * TODO(P09): once sim/impact.ts is filled the placeholder's error never occurs and this fallback is dead; world.ts's
- * owner (P05) folds it back into a plain call then, so P09 never has to edit this file for it.
- */
-function classifyKO(d: Fighter, finish: Finish, tick: number): { environmental: boolean; credit: string[] } {
-  try {
-    return isEnvironmental(d, finish, tick);
-  } catch (e) {
-    if (e instanceof Error && e.message.startsWith('sim/impact.ts: isEnvironmental is not implemented yet')) return { environmental: false, credit: [] };
-    throw e;
-  }
 }

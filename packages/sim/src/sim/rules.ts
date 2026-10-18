@@ -21,11 +21,13 @@ export const DAMAGE_TUNING = defineTuning(
     meleeJPerDmg: 18,
     throwCapJ: 400,
     leadingCos: 0.7,
+    bladeSharpness: 0.8,
     tipRadiusM: 0.15,
     impactCooldownTicks: 6,
     minImpactJ: 5,
     hardLandingBluntOnly: true,
     zoneGraceTicks: 2,
+    integrityPointMass: true,
   },
   {
     kS: { unit: '—', source: 'SPEC:281' },
@@ -33,6 +35,9 @@ export const DAMAGE_TUNING = defineTuning(
     meleeJPerDmg: { unit: 'J per DS damage point', source: 'SPEC:283', min: 0 },
     throwCapJ: { unit: 'J', source: 'SPEC:285, 886', min: 0 },
     leadingCos: { unit: 'cos', source: 'DS (projectileStrike leading test)', min: -1, max: 1 },
+    // The thrown rule's s for a DungeonStyle blade (WeaponDef.sharpness absent, edge 'blade'); a blunt one is 0.
+    // TODO(orchestrator): add its §9.1 row (DAMAGE_TUNING bladeSharpness 0.8, sharpness, NEW) and a §9.2 entry.
+    bladeSharpness: { unit: 'sharpness', source: 'NEW: a DS blade without its own sharpness (§4.4, D-12)', min: 0, max: 1 },
     tipRadiusM: { unit: 'm', source: 'NEW: a sharp point counts only near its tip', min: 0 },
     impactCooldownTicks: { unit: 'ticks', source: 'NEW: bounce suppression per pair', min: 0, step: 1 },
     minImpactJ: { unit: 'J', source: 'NEW: ignore brushes (with |Δv| < flinchDv)', min: 0 },
@@ -42,6 +47,11 @@ export const DAMAGE_TUNING = defineTuning(
       source: 'NEW: contacts starting this soon after a pose jump are never scored (RF-1)',
       min: 0,
       step: 1,
+    },
+    integrityPointMass: {
+      unit: '—',
+      source:
+        "NEW: orchestrator decision (P10's design conflict): an entity's integrity reads its effective mass at the contact point, 1/(1/m + (r×n)ᵀI⁻¹(r×n)), not its whole mass (departs from §4.3's m_eff table and SPEC:278 for integrity only; off = the table)",
     },
   },
 );

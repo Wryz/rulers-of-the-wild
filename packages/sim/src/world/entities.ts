@@ -34,7 +34,7 @@ import { collisionGroups, pieceGraceCollisionGroups, solverGroups } from './grou
 import { LOAD_TUNING } from './loads';
 import { MATERIALS } from './materials';
 import { ownerKey, PHYSICS_TUNING } from './physics';
-import { colliderDesc, shapeMass, shapeVolume } from './shapes';
+import { colliderDesc, shapeMass, shapeVolume, triangulate } from './shapes';
 import type { Entity, EntitySpec, EntityState, Owner, PlantState, Pose3, Quat, Shape, SharpPoint, V3 } from './types';
 import { VERB_TUNING } from './verbs/tuning';
 import type { World } from './world';
@@ -254,10 +254,40 @@ export class EntityStore {
     this.transition(e, 'anchored', true);
   }
 
-  /** Dynamic, awake (a pulled-out stake, a dug-out stake, a stake whose capacity a load or impact beat). */
-  unanchor(e: Entity): void {
+  /**
+   * Dynamic, awake (a pulled-out stake, a dug-out stake, a stake whose capacity a load or impact beat; a felled trunk, a
+   * bent sapling). An entity that was `anchored` (driven) is lifted straight up until no vertex of its shape is below
+   * the terrain; others stay where they are. Returns the lift (m; 0 when none).
+   * A driven stake's end is 0.15-0.3 m inside the heightfield, and Rapier pushes a dynamic body that deep down through
+   * the heightfield's triangles about half the time (a 6 kg stake 0.15 m in, measured by P10: it falls out of the
+   * world), so it never starts dynamic inside the ground: the lift is the smallest move that clears it (P10's
+   * workaround in breaking.ts, moved here). A fixed entity turned free keeps its pose: a falling trunk turns about its
+   * hinge on the stump, a bent sapling about its root.
+   */
+  unanchor(e: Entity): number {
     this.own(e, 'unanchor');
+    const driven = e.state === 'anchored';
     this.transition(e, 'free', true);
+    if (!driven) return 0;
+    const lift = this.depthBelowGround(e.shape, e.pose);
+    if (lift > 0) this.setPose(e, { p: { x: e.pose.p.x, y: e.pose.p.y + lift, z: e.pose.p.z }, q: e.pose.q });
+    return lift;
+  }
+
+  /**
+   * How far `shape` at `pose` reaches below the terrain (m; 0 when it doesn't): its deepest vertex under the surface.
+   * The one measure of "inside the ground" for a body about to turn dynamic (unanchor, and the pieces of a driven stake
+   * that broke, world/breaking.ts).
+   */
+  depthBelowGround(shape: Shape, pose: Pose3): number {
+    const { positions } = triangulate(shape, pose);
+    const terrain = this.world.terrain;
+    let d = 0;
+    for (let i = 0; i + 2 < positions.length; i += 3) {
+      const below = terrain.heightAt(positions[i], positions[i + 2]) - positions[i + 1];
+      if (below > d) d = below;
+    }
+    return d;
   }
 
   /**

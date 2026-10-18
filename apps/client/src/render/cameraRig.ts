@@ -1,47 +1,139 @@
+// DungeonStyle's fight camera (docs/M1-DESIGN.md §10.6, SPEC:35, 637): the three-quarter view used while the player is
+// locked onto a creature; render/cameraDirector.ts blends it with the follow camera. Changed for the Clearing (P34):
+// - heights are relative to the ground (`ground(x, z)`, the director hands it the terrain): the camera's height over the
+//   ground under the fight's focus, each fighter's chest over its own feet (`pos.y`, which the sim's movers keep on the
+//   ground; 0 on DS's flat floor, so the DS framing is unchanged there);
+// - the arena containment (`inside`, the side switch and the wall squeeze) is gone: the camera stays at least
+//   CAMERA_TUNING.groundClearanceM above the terrain, and trunks between it and the fight dissolve (render/cutout.ts);
+// - far plane RENDER_TUNING.cameraFar (600 m); CAMERA_TUNING is a registered live table;
+// - shake, the zoom punch and the slow-motion zoom moved to the director (render/cameraDirector.ts), which applies them
+//   to whichever camera the frame is seen through, so the rig no longer has its own.
 import { PerspectiveCamera, Vector3 } from 'three';
+import { defineTuning } from '@wild/sim';
+import { RENDER_TUNING } from './terrainView';
 
-export const CAMERA_TUNING = {
-  /** Vertical field of view (degrees). */
-  fov: 52,
-  /** How far back from the fight the camera sits beyond what it takes to fit both in (m). */
-  distance: 3.4,
-  /** Camera height (m, for someone your size): high enough to look down over your shoulder at them. */
-  rise: 2.35,
-  /**
-   * How far round to the side of the line between the fighters the camera sits (rad):
-   * behind you and off to one side, so you never stand between it and your opponent.
-   */
-  sideAngle: 0.6,
-  /** Out of a fight (no one near): off to the right of behind you a little. */
-  shoulder: 0.7,
-  /**
-   * How briskly the camera swings round after the player turns (rad/s of a critically
-   * damped spring): it lags, picks up speed, and eases in as it catches up.
-   */
-  turnRate: 3.2,
-  /** How tightly it follows the player's position (1/s): close, not rigid. */
-  follow: 7,
-  shakeMul: 1,
-  /** 0.5 frames the midpoint between the fighters, 0 frames the player. */
-  focusMix: 0.55,
-};
+export const CAMERA_TUNING = defineTuning(
+  'CAMERA_TUNING',
+  'Client › camera',
+  {
+    /** Vertical field of view (degrees). */
+    fov: 52,
+    /** How far back from the fight the camera sits beyond what it takes to fit both in (m). */
+    distance: 3.4,
+    /** Camera height (m, for someone your size): high enough to look down over your shoulder at them. */
+    rise: 2.35,
+    /**
+     * How far round to the side of the line between the fighters the camera sits (rad):
+     * behind you and off to one side, so you never stand between it and your opponent.
+     */
+    sideAngle: 0.6,
+    /** Out of a fight (no one near): off to the right of behind you a little. */
+    shoulder: 0.7,
+    /**
+     * How briskly the camera swings round after the player turns (rad/s of a critically
+     * damped spring): it lags, picks up speed, and eases in as it catches up.
+     */
+    turnRate: 3.2,
+    /** How tightly it follows the player's position (1/s): close, not rigid. */
+    follow: 7,
+    shakeMul: 1,
+    /** 0.5 frames the midpoint between the fighters, 0 frames the player. */
+    focusMix: 0.55,
+    /** The fight camera stays this far above the terrain under it (m): replaces DS's arena containment. */
+    groundClearanceM: 0.3,
+    // Not §9.1 rows (P34 DEVIATIONS): the DS values the changed and new camera code reads. (The framing arithmetic
+    // inside CameraRig.place — gap × 0.85, a giant's 2.2 m and 1.4 m per scale, chest heights — stays as DS wrote it.)
+    /** How fast the shake dies away (trauma per second; DS cameraRig). */
+    traumaDecay: 1.6,
+    /** The shake's reach at full trauma: across the screen (m) and in roll (rad) (DS cameraRig). */
+    shakeAmpM: 0.12,
+    shakeRollRad: 0.025,
+    /** How fast a zoom punch dies away (per second), and how much it narrows the view per unit (DS cameraRig). */
+    punchDecay: 4,
+    punchFov: 0.05,
+    /** A camera cut never goes lower than this over the ground under it (m; DS cinematics.ts floor, over y = 0). */
+    cutFloorM: 0.15,
+    /** The view tightens by this while slow motion runs (fov divisor; DS game.ts camRig.zoom). */
+    slowmoZoom: 1.12,
+    /** The see-through ellipse is centred this high over the ground under the player (m; DS cutFocus.y = 1). */
+    cutoutHeightM: 1,
+    /** The ellipse's half-height (NDC), and how it widens with the fight's spread (DS game.ts updateCutout call). */
+    cutoutRadius: 0.3,
+    cutoutSpreadPerM: 0.06,
+    cutoutSpreadMax: 0.25,
+    /** A big opponent counts as this much more spread per unit of scale over 1 (m; DS game.ts updateCutout call). */
+    cutoutSpreadPerScale: 2.2,
+    /** A big body or a heavy thing landing shakes the camera (DS bodyLanding, now from the sim's `land` event). */
+    landShakePerHuman: 0.08,
+    landShakeMax: 0.6,
+    /** Only something heavier than this many humans is felt (DS: a body over 1.5 "mass", scale³). */
+    landMinHumans: 1.5,
+    /** The landing speed at which it is felt fully (m/s; DS: hard = fall speed / 5). */
+    landHardSpeed: 5,
+    /** Felt within this many metres per unit of size (∛ humans): a human-sized body 6 m, a 300 kg log 9.5 m. */
+    landRangePerScaleM: 6,
+  },
+  {
+    fov: { unit: '°', source: 'DS (cameraRig.ts:3)', min: 30, max: 90, step: 1 },
+    distance: { unit: 'm', source: 'DS (cameraRig.ts:3)', min: 1.5, max: 8, step: 0.05 },
+    rise: { unit: 'm', source: 'DS (cameraRig.ts:3)', min: 0.5, max: 5, step: 0.05 },
+    sideAngle: { unit: 'rad', source: 'DS (cameraRig.ts:3)', min: 0, max: 1.4, step: 0.02, label: 'side angle' },
+    shoulder: { unit: 'm', source: 'DS (cameraRig.ts:3)', min: -1, max: 1, step: 0.05 },
+    turnRate: { unit: 'rad/s (spring)', source: 'DS', min: 0.5, max: 10, step: 0.1, label: 'turn spring' },
+    follow: { unit: '1/s', source: 'DS', min: 0.5, max: 30, step: 0.5 },
+    shakeMul: { unit: '×', source: 'DS', min: 0, max: 3, step: 0.05, label: 'shake ×' },
+    focusMix: { unit: 'fraction', source: 'DS', min: 0, max: 1, step: 0.01, label: 'focus mix' },
+    groundClearanceM: { unit: 'm', source: 'NEW: replaces arena containment (§10.6)', min: 0, max: 2, step: 0.05, label: 'ground clearance' },
+    traumaDecay: { unit: 'trauma/s', source: 'DS (cameraRig.ts update: 1.6/s)', min: 0.1, max: 10, step: 0.1, label: 'shake decay' },
+    shakeAmpM: { unit: 'm', source: 'DS (cameraRig.ts update: ±0.12 m)', min: 0, max: 1, step: 0.01, label: 'shake reach' },
+    shakeRollRad: { unit: 'rad', source: 'DS (cameraRig.ts update: ±0.025 rad)', min: 0, max: 0.2, step: 0.005, label: 'shake roll' },
+    punchDecay: { unit: '1/s', source: 'DS (cameraRig.ts update: 4/s)', min: 0.1, max: 20, step: 0.1, label: 'punch decay' },
+    punchFov: { unit: 'fov fraction per punch', source: 'DS (cameraRig.ts update: fov × (1 − 0.05·punch))', min: 0, max: 0.3, step: 0.005, label: 'punch narrows' },
+    cutFloorM: { unit: 'm', source: 'DS (cinematics.ts place: 0.15 over y = 0); §10.6', min: 0, max: 2, step: 0.05, label: 'cut floor' },
+    slowmoZoom: { unit: '× (fov divisor)', source: 'DS (game.ts: camRig.zoom = 1.12 in slow motion)', min: 1, max: 2, step: 0.01, label: 'slow-mo zoom' },
+    cutoutHeightM: { unit: 'm', source: 'DS (game.ts cutFocus.y = 1), over the ground (§10.6)', min: 0, max: 3, step: 0.05, label: 'cutout height' },
+    cutoutRadius: { unit: 'NDC', source: 'DS (game.ts updateCutout: 0.3)', min: 0.05, max: 1, step: 0.01, label: 'cutout radius' },
+    cutoutSpreadPerM: { unit: 'NDC per m', source: 'DS (game.ts updateCutout: spread × 0.06)', min: 0, max: 0.5, step: 0.005, label: 'cutout per m' },
+    cutoutSpreadMax: { unit: 'NDC', source: 'DS (game.ts updateCutout: ≤ 0.25)', min: 0, max: 1, step: 0.01, label: 'cutout spread max' },
+    cutoutSpreadPerScale: { unit: 'm per scale over 1', source: 'DS (game.ts updateCutout: (scale − 1) × 2.2)', min: 0, max: 10, step: 0.1, label: 'cutout per scale' },
+    landShakePerHuman: { unit: 'trauma per human mass', source: 'DS (game.ts bodyLanding: 0.08·mass·hard)', min: 0, max: 1, step: 0.01, label: 'landing shake' },
+    landShakeMax: { unit: 'trauma', source: 'DS (game.ts bodyLanding: ≤ 0.6)', min: 0, max: 1, step: 0.05, label: 'landing shake max' },
+    landMinHumans: { unit: 'human masses', source: 'DS (game.ts bodyLanding: mass > 1.5)', min: 0, max: 20, step: 0.1, label: 'landing felt over' },
+    landHardSpeed: { unit: 'm/s', source: 'DS (game.ts bodyLanding: fall speed / 5)', min: 0.5, max: 30, step: 0.5, label: 'landing full at' },
+    landRangePerScaleM: { unit: 'm per ∛(human masses)', source: 'NEW: DS giant footfalls are felt within 6 m × scale', min: 0, max: 30, step: 0.5, label: 'landing felt within' },
+  },
+);
 
-/** What the camera follows. */
+/** What the camera follows. `pos.y` is the feet (0 on DS's flat floor; the sim's movers keep it on the ground). */
 export interface Followed {
   pos: Vector3;
   yaw: number;
   scale: number;
 }
 
+/** Ground height (m) at a point: the terrain (DS: the floor at 0). */
+export type GroundFn = (x: number, z: number) => number;
+
+const FLAT: GroundFn = () => 0;
+
 const wrap = (a: number) => Math.atan2(Math.sin(a), Math.cos(a));
+
+/** Keeps the camera's projection in step with the live tables (fov, far plane): reprojects only on a change. */
+export function setLens(cam: PerspectiveCamera, fov: number): void {
+  const far = RENDER_TUNING.cameraFar;
+  if (cam.fov !== fov || cam.far !== far) {
+    cam.fov = fov;
+    cam.far = far;
+    cam.updateProjectionMatrix();
+  }
+}
 
 /**
  * Fight camera: a three-quarter view from behind you and off to one side of the line
  * between you and your opponent, high enough to look down over your shoulder — so both of
  * you are always in shot and they're never hidden behind you. It pulls back as you
- * separate (and for a giant), swings round on a spring as you circle, and switches sides
- * rather than backing into a wall. Out of a fight it sits behind you. Trauma-based shake
- * on top.
+ * separate (and for a giant) and swings round on a spring as you circle. Out of a fight
+ * it sits behind you. (Its shake and zoom punch are the director's now.)
  */
 export class CameraRig {
   readonly camera: PerspectiveCamera;
@@ -49,23 +141,17 @@ export class CameraRig {
   private yawVel = 0;
   /** Which side of the line between the fighters the camera works from (+1 / -1). */
   private side: 1 | -1 = 1;
-  private sideSwitchCool = 0;
   /** How far back the camera currently is (eased, so it doesn't pump with every step). */
   private dist = 0;
-  private squeeze = 0;
-  private squeezeEased = 0;
-  private readonly pos = new Vector3();
+  /** Where the camera is (eased toward where it should be). */
+  private readonly spot = new Vector3();
   private readonly look = new Vector3();
-  private trauma = 0;
-  private punch = 0;
-  private t = 0;
   private ready = false;
-  zoom = 1;
-  /** Is this ground point inside the arena? (The camera stays in the room.) */
-  inside: ((x: number, z: number) => boolean) | null = null;
+  /** The ground under a point (the director sets the terrain's; DS's flat floor by default). */
+  ground: GroundFn = FLAT;
 
   constructor() {
-    this.camera = new PerspectiveCamera(CAMERA_TUNING.fov, 16 / 9, 0.1, 300);
+    this.camera = new PerspectiveCamera(CAMERA_TUNING.fov, 16 / 9, 0.1, RENDER_TUNING.cameraFar);
   }
 
   /** Ground-plane forward/right of the view, for camera-relative movement input. */
@@ -77,26 +163,34 @@ export class CameraRig {
     return new Vector3(-Math.cos(this.yaw), 0, Math.sin(this.yaw));
   }
 
+  /** The heading the camera looks along (rad, from +z toward +x: the move convention). */
+  get heading(): number {
+    return this.yaw;
+  }
+
   resize(w: number, h: number) {
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
   }
 
-  addTrauma(amount: number) {
-    this.trauma = Math.min(1, this.trauma + amount * CAMERA_TUNING.shakeMul);
-  }
-
-  zoomPunch(amount: number) {
-    this.punch = Math.max(this.punch, amount);
-  }
-
-  /** Jump straight to behind `f` (a new round, a respawn). */
-  snap(f: Followed, target: Followed | null = null) {
+  /**
+   * Jump straight to behind `f` (a new round, a respawn), or into the fight with `target`. `nearYaw` (P34): work from
+   * the side of the fight whose heading is nearer this one (the camera the director is blending from), so the blend
+   * into the fight doesn't swing across the line between the fighters.
+   */
+  snap(f: Followed, target: Followed | null = null, nearYaw: number | null = null) {
+    if (target && nearYaw !== null) {
+      const toThem = Math.atan2(target.pos.x - f.pos.x, target.pos.z - f.pos.z);
+      const a = Math.abs(wrap(toThem - CAMERA_TUNING.sideAngle - nearYaw));
+      const b = Math.abs(wrap(toThem + CAMERA_TUNING.sideAngle - nearYaw));
+      this.side = a <= b ? 1 : -1;
+    }
     this.yaw = this.headingFor(f, target);
     this.yawVel = 0;
     this.dist = 0;
     this.place(f, target, 1);
     this.ready = true;
+    this.aim();
   }
 
   /**
@@ -111,14 +205,7 @@ export class CameraRig {
   }
 
   update(dt: number, f: Followed, target: Followed | null) {
-    this.t += dt;
     if (!this.ready) this.snap(f, target);
-    this.sideSwitchCool = Math.max(0, this.sideSwitchCool - dt);
-    // Backed into a wall on this side: work from the other side instead.
-    if (target && this.inside && this.sideSwitchCool <= 0 && this.blocked(f, target, this.side) && !this.blocked(f, target, -this.side as 1 | -1)) {
-      this.side = -this.side as 1 | -1;
-      this.sideSwitchCool = 1.5;
-    }
     // Swing round to the heading: a critically damped spring, so a turn starts slowly,
     // carries, and settles without overshooting.
     const w = CAMERA_TUNING.turnRate;
@@ -126,39 +213,16 @@ export class CameraRig {
     this.yawVel += (w * w * diff - 2 * w * this.yawVel) * dt;
     this.yaw = wrap(this.yaw + this.yawVel * dt);
     this.place(f, target, 1 - Math.exp(-dt * CAMERA_TUNING.follow));
-
-    this.trauma = Math.max(0, this.trauma - dt * 1.6);
-    this.punch = Math.max(0, this.punch - dt * 4);
-    const cam = this.camera;
-    cam.position.copy(this.pos);
-    cam.up.set(0, 1, 0);
-    cam.lookAt(this.look);
-    // Shake in screen space.
-    const s = this.trauma * this.trauma;
-    if (s > 0) {
-      const n = (fq: number, o: number) => Math.sin(this.t * fq + o) * 0.6 + Math.sin(this.t * fq * 2.3 + o * 1.7) * 0.4;
-      cam.updateMatrixWorld();
-      const right = new Vector3().setFromMatrixColumn(cam.matrixWorld, 0);
-      const up = new Vector3().setFromMatrixColumn(cam.matrixWorld, 1);
-      cam.position.addScaledVector(right, n(47, 0) * s * 0.12).addScaledVector(up, n(53, 2) * s * 0.12);
-      cam.rotateZ(n(31, 5) * s * 0.025);
-    }
-    // (Squeezed in by a wall, see a little wider.)
-    this.squeezeEased += (this.squeeze - this.squeezeEased) * Math.min(1, dt * 4);
-    const fov = (CAMERA_TUNING.fov * (1 + this.squeezeEased * 0.25) * (1 - this.punch * 0.05)) / this.zoom;
-    if (Math.abs(cam.fov - fov) > 1e-3) {
-      cam.fov = fov;
-      cam.updateProjectionMatrix();
-    }
+    this.aim();
   }
 
-  /** Would the camera, working from `side`, end up outside the arena? */
-  private blocked(f: Followed, target: Followed, side: 1 | -1): boolean {
-    const yaw = Math.atan2(target.pos.x - f.pos.x, target.pos.z - f.pos.z) - side * CAMERA_TUNING.sideAngle;
-    const d = this.dist || CAMERA_TUNING.distance;
-    const mx = f.pos.x + (target.pos.x - f.pos.x) * CAMERA_TUNING.focusMix;
-    const mz = f.pos.z + (target.pos.z - f.pos.z) * CAMERA_TUNING.focusMix;
-    return !this.inside!(mx - Math.sin(yaw) * d * 0.8, mz - Math.cos(yaw) * d * 0.8);
+  /** The camera at the rig's position, looking at its look point, with its lens. */
+  private aim() {
+    const cam = this.camera;
+    cam.position.copy(this.spot);
+    cam.up.set(0, 1, 0);
+    cam.lookAt(this.look);
+    setLens(cam, CAMERA_TUNING.fov);
   }
 
   /** Move toward where the camera should be (k = 1: there at once). */
@@ -177,36 +241,25 @@ export class CameraRig {
       const mx = f.pos.x + (target.pos.x - f.pos.x) * T.focusMix;
       const mz = f.pos.z + (target.pos.z - f.pos.z) * T.focusMix;
       const height = T.rise * s + gap * 0.25 + big * 1.4;
-      _want.set(mx - fx * this.dist, height, mz - fz * this.dist);
+      // (Over the ground under the fight, not over y = 0.)
+      _want.set(mx - fx * this.dist, this.ground(mx, mz) + height, mz - fz * this.dist);
     } else {
       this.dist = 0;
       const dist = T.distance * s;
       const height = (T.rise - 0.2) * s;
-      _want.set(f.pos.x - fx * dist - fz * T.shoulder, height, f.pos.z - fz * dist + fx * T.shoulder);
+      _want.set(f.pos.x - fx * dist - fz * T.shoulder, f.pos.y + height, f.pos.z - fz * dist + fx * T.shoulder);
     }
-    const fp = target ? _mid.set(f.pos.x + (target.pos.x - f.pos.x) * T.focusMix, 0, f.pos.z + (target.pos.z - f.pos.z) * T.focusMix) : f.pos;
-    // Backed up against a wall: come in closer (and look down a little more steeply)
-    // rather than ending up on the other side of it.
-    this.squeeze = 0;
-    if (this.inside) {
-      let u = 1;
-      // (Never so close the player drops out of the picture: past that, the wall behind
-      // is dissolved instead — see the cutout.)
-      while (u > 0.5 && !this.inside(fp.x + (_want.x - fp.x) * u, fp.z + (_want.z - fp.z) * u)) u -= 0.05;
-      _want.x = fp.x + (_want.x - fp.x) * u;
-      _want.z = fp.z + (_want.z - fp.z) * u;
-      // (Brought in close by a wall: go up instead, looking down on the two of you.)
-      _want.y += (1 - u) * 3.2 * s;
-      this.squeeze = 1 - u;
-    }
-    this.pos.lerp(_want, k);
-    // Look past the player at the fight (or ahead of them, out of one).
+    // Never into the hillside: at least groundClearanceM over the terrain where it stands (DS kept it in the arena).
+    _want.y = Math.max(_want.y, this.ground(_want.x, _want.z) + T.groundClearanceM);
+    this.spot.lerp(_want, k);
+    this.spot.y = Math.max(this.spot.y, this.ground(this.spot.x, this.spot.z) + T.groundClearanceM);
+    // Look past the player at the fight (or ahead of them, out of one): chests over their own feet.
     if (target) {
       // Between you, at chest height — a little nearer them.
-      _aim.set(target.pos.x, 1.15 * target.scale, target.pos.z);
-      _lookWant.set(f.pos.x, 1.0 * s, f.pos.z).lerp(_aim, T.focusMix);
+      _aim.set(target.pos.x, target.pos.y + 1.15 * target.scale, target.pos.z);
+      _lookWant.set(f.pos.x, f.pos.y + 1.0 * s, f.pos.z).lerp(_aim, T.focusMix);
     } else {
-      _lookWant.set(f.pos.x + fx * 2.2 * s, 1.15 * s, f.pos.z + fz * 2.2 * s);
+      _lookWant.set(f.pos.x + fx * 2.2 * s, f.pos.y + 1.15 * s, f.pos.z + fz * 2.2 * s);
     }
     if (k >= 1) this.look.copy(_lookWant);
     else this.look.lerp(_lookWant, Math.min(1, k * 1.4));
@@ -214,6 +267,5 @@ export class CameraRig {
 }
 
 const _want = new Vector3();
-const _mid = new Vector3();
 const _aim = new Vector3();
 const _lookWant = new Vector3();

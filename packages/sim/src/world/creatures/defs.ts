@@ -56,6 +56,7 @@ export const CREATURE_TUNING = defineTuning(
       loopRadiusM: 15,
       lookAroundS: 3,
       lookAroundDeg: 60,
+      investigateArriveM: 1.5,
       fightEnterM: 4.5,
       fightExitM: 8,
       fightExitTicks: 60,
@@ -63,6 +64,7 @@ export const CREATURE_TUNING = defineTuning(
       fleeChance: 0.5,
       fleeS: [6, 10],
       fleeDistM: 25,
+      fleeAwarenessMul: 0.5,
       gloatS: 3,
       respawnS: 300,
       respawnMinPlayerDistM: 40,
@@ -132,6 +134,8 @@ export const CREATURE_TUNING = defineTuning(
       windedCooldownMul: 1.5,
       windedChaseMul: 0.85,
       woundAwareness: 1.2,
+      // Not a §9.1 row (P20 review, finding 4): the climb out of a pit is re-planned when it makes less progress than this.
+      climbStuckFrac: 0.5,
     },
   },
   {
@@ -187,6 +191,7 @@ export const CREATURE_TUNING = defineTuning(
       loopRadiusM: meta('m', 'NEW'),
       lookAroundS: meta('s', 'NEW'),
       lookAroundDeg: meta('°', 'NEW (RR-7)'),
+      investigateArriveM: meta('m', 'NEW: §6.3 investigate "on arrival (≤ 1.5 m)"; also home and the loop waypoints'),
       fightEnterM: meta('m', 'NEW'),
       fightExitM: meta('m', 'NEW'),
       fightExitTicks: meta('ticks', 'NEW'),
@@ -194,6 +199,7 @@ export const CREATURE_TUNING = defineTuning(
       fleeChance: meta('—', 'NEW'),
       fleeS: meta('s [min, max]', 'NEW'),
       fleeDistM: meta('m', 'NEW'),
+      fleeAwarenessMul: meta('×', 'NEW: §6.3 flee → return "awareness halved"'),
       gloatS: meta('s', 'NEW'),
       respawnS: meta('s', 'NEW: D-9 (q)'),
       respawnMinPlayerDistM: meta('m', 'NEW: D-9 (q)'),
@@ -280,6 +286,10 @@ export const CREATURE_TUNING = defineTuning(
       windedCooldownMul: meta('×', 'NEW'),
       windedChaseMul: meta('×', 'NEW'),
       woundAwareness: meta('awareness', 'NEW'),
+      climbStuckFrac: meta(
+        '× the way its slower climb rate covers in stuckTicks',
+        'NEW (P20 review): a climb out of a pit that moves less than this in stuckTicks is blocked (0.4 m of a normal 0.8 m), and goes for another rim',
+      ),
     },
   },
 );
@@ -308,6 +318,12 @@ export const NOISE_TUNING = defineTuning(
     apeShout: 30,
     giantRoar: 120,
     crouchNoiseMul: 0.3,
+    // Not §9.1 rows (P18): the gait a footstep is heard at (§6.2: "from each fighter's walkVel and moveFlags"). A foot set
+    // down at or above runMinSpeed × √scale is a running step, at or above sprintMinSpeed × √scale a sprinting one;
+    // crouched, a crouching step whatever the speed. √scale: a body `scale` times as long walks and runs √scale times as
+    // fast at the same gait (dynamic similarity), so the giant's 7 m/s charge is a run and its 1.8 m/s patrol a walk.
+    runMinSpeed: 2.9,
+    sprintMinSpeed: 4.5,
   },
   {
     stepCrouch: meta('m (× scale)', 'NEW: SPEC:755'),
@@ -330,5 +346,7 @@ export const NOISE_TUNING = defineTuning(
     apeShout: meta('m', 'NEW'),
     giantRoar: meta('m', 'NEW'),
     crouchNoiseMul: meta('×', 'NEW'),
+    runMinSpeed: meta('m/s × √scale', "NEW (P18): the middle of footwork's walk-to-run blend (2.2-3.6 m/s, footwork.ts)"),
+    sprintMinSpeed: meta('m/s × √scale', 'NEW (P18): between the 3.77 m/s run and the 5.28 m/s sprint (§5.5)'),
   },
 );

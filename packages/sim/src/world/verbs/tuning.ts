@@ -1,6 +1,8 @@
 // The verbs' starting values (docs/M1-DESIGN.md §5, §9.1): VERB_TUNING and TOOL_TUNING.
 //
-// Registered by P05 with their §9 values (a tuning table is never added after P05); P14 owns this file from here.
+// Registered by P05 with their §9 values (a tuning table is never added after P05); P14 owns this file from here and
+// adds the keys the design states only in prose, each with its unit and a NEW source (§13.0: new keys go into the
+// owning module's table).
 import { defineTuning, type FieldMeta } from '../../tuning/registry';
 
 /** A tool class's DS WeaponDef numbers (§5.2: the template synthWeapon starts from). */
@@ -48,6 +50,7 @@ export const VERB_TUNING = defineTuning(
     placeSupportM: 0.6,
     placeReachVertM: 1.5,
     placeShrinkM: 0.02,
+    placeShrinkMaxFrac: 0.5,
     placeDropM: 0.02,
     placeFramesLying: 24,
     placeFramesDriven: 60,
@@ -93,6 +96,17 @@ export const VERB_TUNING = defineTuning(
     creatureHandSpeedMps: 0.8,
     haulTautM: 0.05,
     haulRampMps: 0.2,
+    // P14: values the design gives in prose (§5.0, §5.1, §5.4) or not at all.
+    heldJoinDepth: 3,
+    takeGrabFrac: 0.5,
+    takeHoldFrames: 3,
+    carryFrontUpM: 1.05,
+    carryFrontFwdM: 0.4,
+    carryShoulderUpM: 1.55,
+    carryShoulderSideM: 0.2,
+    repeatStopInput: 0.1,
+    takeReachM: 0.85,
+    workStepM: 0.045,
   },
   {
     targetRadiusM: { unit: 'm', source: 'SPEC:406' },
@@ -127,6 +141,7 @@ export const VERB_TUNING = defineTuning(
     placeSupportM: { unit: 'm', source: 'NEW' },
     placeReachVertM: { unit: 'm', source: 'NEW (RR-7)' },
     placeShrinkM: { unit: 'm', source: 'NEW (RR-7)' },
+    placeShrinkMaxFrac: { unit: 'of the smallest half-extent', source: 'NEW (SIM-fix3: a thin bearer never shrinks into a needle)' },
     placeDropM: { unit: 'm', source: 'NEW (RR-7)' },
     placeFramesLying: { unit: 'ticks', source: 'NEW' },
     placeFramesDriven: { unit: 'ticks', source: 'NEW' },
@@ -172,6 +187,24 @@ export const VERB_TUNING = defineTuning(
     creatureHandSpeedMps: { unit: 'm/s', source: 'NEW: C §5 (ape 907.5 N)' },
     haulTautM: { unit: 'm', source: 'NEW: the haul model (I-2) [I-rev ran: swing_light.out]' },
     haulRampMps: { unit: 'm/s', source: 'NEW: the haul model (I-2) [I-rev ran: swing_light.out]' },
+    heldJoinDepth: { unit: 'joints', source: 'NEW: §5.0 (a held object is the entity in the hands plus every entity lash-joined to it, depth ≤ 3)', min: 0, step: 1 },
+    takeGrabFrac: { unit: '× the take frames', source: "NEW: the hands close half-way through a take (DS pickup's grabAt = frames × 0.5)", min: 0, max: 1 },
+    takeHoldFrames: { unit: 'ticks', source: "NEW: the low pose held as the hands close (DS pickup's grabAt + 3 key)", min: 0, step: 1 },
+    carryFrontUpM: { unit: 'm × scale above the feet', source: 'NEW: where a carried load sits (§5.1 carryFront)', min: 0 },
+    carryFrontFwdM: { unit: 'm × scale ahead', source: 'NEW: where a carried load sits (§5.1 carryFront)', min: 0 },
+    carryShoulderUpM: { unit: 'm × scale above the feet', source: 'NEW: a long load on the shoulder (§5.1 carryShoulder)', min: 0 },
+    carryShoulderSideM: { unit: 'm × scale to the right', source: 'NEW: a long load on the shoulder (§5.1 carryShoulder)' },
+    repeatStopInput: { unit: 'move input (0..1)', source: 'NEW: §5.4 "strokes until … the player moves" (DS: moving = input > 0.1)', min: 0, max: 1 },
+    takeReachM: {
+      unit: 'm × scale, horizontal from the feet',
+      source: "NEW: §5.0 Reach, rule 3: a take's hands close only this near the target (DS advancePickup's grab reach, 0.85 × scale)",
+      min: 0,
+    },
+    workStepM: {
+      unit: 'm × scale per tick',
+      source: "DS (PICKUP_STEP, combat.ts:144): a work action's step-in (CombatSim faceWork), which plans a take's walk-in",
+      min: 0,
+    },
   },
 );
 
@@ -208,6 +241,9 @@ export const TOOL_TUNING = defineTuning(
     haftMarginM: 0.02,
     refSharpness: { stoneAxe: 0.9, longAxe: 0.9, flintBlade: 0.9, spear: 0.6, sharpStick: 0.6 },
     pointTaperRadii: 5,
+    // P14: the cosines of §5.0's predicate table.
+    pointAxisCos: 0.7,
+    edgeAxisCos: 0.5,
   },
   {
     toolMaxKg: { unit: 'kg', source: 'NEW' },
@@ -245,5 +281,7 @@ export const TOOL_TUNING = defineTuning(
       sharpStick: { unit: 'sharpness', source: "NEW: the sharpness a class's DS template stands for (RR-13)" },
     },
     pointTaperRadii: { unit: '× radius', source: "NEW: the shaped point's taper (0.25 m on a 5 cm stake, the C labs' hull) (RF-18)" },
+    pointAxisCos: { unit: 'cos', source: 'NEW: §5.0 ("a point at an end: |dir·axis| ≥ 0.7")', min: 0, max: 1 },
+    edgeAxisCos: { unit: 'cos', source: 'NEW: §5.0 ("an edge: |dir·axis| < 0.5")', min: 0, max: 1 },
   },
 );

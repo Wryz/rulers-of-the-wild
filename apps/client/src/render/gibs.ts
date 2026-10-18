@@ -1,4 +1,5 @@
-import { BoxGeometry, Color, Group, Mesh, MeshStandardMaterial, type Scene, Vector3 } from 'three';
+import { BoxGeometry, Color, Euler, Group, Mesh, MeshStandardMaterial, Quaternion, type Scene, Vector3 } from 'three';
+import { FLAT_GROUND, type Ground } from './particles';
 
 interface Gib {
   obj: Group;
@@ -9,6 +10,13 @@ interface Gib {
 }
 
 const MAX_GIBS = 40;
+/** A gib rests on the ground this fraction of its size above it (DS: 0.25 × size over y = 0). */
+const REST_LIFT = 0.25;
+const _up = new Vector3(0, 1, 0);
+const _n = new Vector3();
+const _tilt = new Quaternion();
+const _flat = new Quaternion();
+const _e = new Euler();
 const RAW = new MeshStandardMaterial({ color: '#9e1016', roughness: 0.3, flatShading: true });
 const skinMats = new Map<string, MeshStandardMaterial>();
 const skinMat = (c: string) => {
@@ -20,12 +28,24 @@ const skinMat = (c: string) => {
 /**
  * Pieces of people: an ear, a flap of scalp, a lump of muscle — skin on one side, raw
  * on the other. They fly off on a ballistic arc, tumble, bounce once or twice and lie
- * where they land until the arena is cleaned up.
+ * where they land, flat on the ground's slope, until they are cleared.
  */
 export class Gibs {
   private readonly list: Gib[] = [];
+  /** What gibs land on (the terrain in the game; settable). */
+  ground: Ground;
 
-  constructor(private readonly scene: Scene) {}
+  constructor(
+    private readonly scene: Scene,
+    ground: Ground = FLAT_GROUND,
+  ) {
+    this.ground = ground;
+  }
+
+  /** The pieces flying or lying (tests, read-only): where each one is and whether it has come to rest. */
+  pieces(): { at: Vector3; rest: boolean; size: number }[] {
+    return this.list.map((g) => ({ at: g.obj.position.clone(), rest: g.rest, size: g.size }));
+  }
 
   spawn(at: Vector3, vel: Vector3, size: number, skin: string, piece: string) {
     const g = new Group();
@@ -51,11 +71,12 @@ export class Gibs {
       g.obj.rotation.x += g.spin.x * dt;
       g.obj.rotation.y += g.spin.y * dt;
       g.obj.rotation.z += g.spin.z * dt;
-      const floor = g.size * 0.25;
-      if (g.obj.position.y < floor) {
-        g.obj.position.y = floor;
+      const p = g.obj.position;
+      const floor = this.ground.height(p.x, p.z) + g.size * REST_LIFT;
+      if (p.y < floor) {
+        p.y = floor;
         const speed = -g.vel.y;
-        if (speed > 0.6) onLand?.(g.obj.position, speed);
+        if (speed > 0.6) onLand?.(p, speed);
         // Wet and soft: hardly bounces, slides a little, stops.
         g.vel.y = speed * 0.2;
         g.vel.x *= 0.45;
@@ -63,9 +84,12 @@ export class Gibs {
         g.spin.multiplyScalar(0.4);
         if (speed < 0.8) {
           g.rest = true;
-          // Lies flat.
-          g.obj.rotation.x = Math.round(g.obj.rotation.x / (Math.PI / 2)) * (Math.PI / 2);
-          g.obj.rotation.z = Math.round(g.obj.rotation.z / (Math.PI / 2)) * (Math.PI / 2);
+          // Lies flat on a face, on the slope of the ground there.
+          const r = g.obj.rotation;
+          _e.set(Math.round(r.x / (Math.PI / 2)) * (Math.PI / 2), r.y, Math.round(r.z / (Math.PI / 2)) * (Math.PI / 2));
+          _flat.setFromEuler(_e);
+          _tilt.setFromUnitVectors(_up, this.ground.normal(p.x, p.z, _n));
+          g.obj.quaternion.copy(_tilt).multiply(_flat);
         }
       }
     }

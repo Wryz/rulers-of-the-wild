@@ -369,7 +369,12 @@ export interface RulerState {
   /** M2; always false in M1. */
   stuck: boolean;
   burning: boolean;
-  /** Both planted feet more than pitDownDepthFrac × knee height below the original terrain (§4.7). */
+  /**
+   * In a pit (§4.7, RR-1, as RulerBodies.updatePit reads it): into it when the ground under the root (the pelvis while
+   * tripped) lies more than pitDownDepthFrac × knee height below terrain.originalHeightAt; out again only when that point
+   * is within pitOutDepthFrac × knee height of the original ground and, standing, the terrain under the root is no
+   * steeper than maxSlopeDeg (on the rim, not on the pit wall it climbs).
+   */
   inPit: boolean;
   /** The wound finishing damage goes to: the wound that tripped, pitted or pinned it (§4.6). */
   downWound: number | null;
@@ -644,14 +649,23 @@ export type WorldEvent =
   /** ruler.inPit changed (§4.7). */
   | { type: 'pit'; f: Fighter; on: boolean }
   /** §4.9. */
-  | { type: 'tripwire'; joint: number; by: Owner; loadN: number; snapped: boolean; loosed: number[] }
+  | { type: 'tripwire'; joint: number; by: Owner; loadN: number; snapped: boolean; loosed: number[]; point: V3 }
   | { type: 'pinned'; f: Fighter; on: boolean }
   | { type: 'shove'; ruler: Fighter; entity: number }
   | { type: 'deflect'; ruler: Fighter; along: V3 }
   /** Thud, dust, shake ∝ mass (SPEC:581). */
   | { type: 'land'; entity: number | null; f: Fighter | null; point: V3; energy: number; mass: number }
   | { type: 'break'; entity: number; pieces: number[]; point: V3; energy: number }
-  | { type: 'joint'; joint: number; what: 'snap' | 'cut' | 'untie' | 'loose' | 'release' }
+  /**
+   * SIM-fix3: a break Rapier failed (a WASM error making a piece, or releasing or removing the parent): `stage` says
+   * where, `kept` whether the entity is still there (whole, integrity 1). A diagnostic for the harness and the dev panel.
+   */
+  | { type: 'breakFailed'; entity: number; stage: 'pieces' | 'split'; kept: boolean; error: string }
+  /**
+   * point: the middle of the joint's anchors when it happened (a snapped joint is gone by phase 17b, so listeners read
+   * the point here).
+   */
+  | { type: 'joint'; joint: number; what: 'snap' | 'cut' | 'untie' | 'loose' | 'release'; point: V3 }
   | { type: 'chop'; tree: number; point: V3; remaining: number }
   | { type: 'fell'; tree: number; dir: V3 }
   | { type: 'crossCut'; entity: number; pieces: number[] | null }

@@ -1,0 +1,37 @@
+## Wave 6 (launched; base 7f6170b, pushed)
+- save fix 7f6170b pushed (P13+P32 merged, integration green: 66 files, 970 passed, 2 skipped)
+- workflow A wf_cbe75731-173 (task wo7yv9cw7): P10, P11, CORE
+- workflow B wf_8ea6b572-e44 (task w7gd5h3ze): P19, P17, P36
+- script: /root/.claude/projects/-home-user/af22c14c-9be6-54bb-9fed-8058f6dbeadf/workflows/scripts/implement-wave-wf_1d08cd3d-356.js
+- after: merge order P10, CORE, P11, P19, P17, P36 via merge-wave.sh 6 ... && push && cleanup
+- merged P19+P17 at a76e8d5 (70 files, 1034 passed), pushed; P36 re-run wf_b3e27422-1c3 (task wz2rezoa3) after a worktree-creation failure (cwd drift: never cd outside the repo in Bash before/while workflows spawn worktrees)
+- P35 launched early: wf_12d6d20b-18f (task wbpt3l6du) base a76e8d5
+- screenshot tool agent launched (worktree, base a76e8d5); shots -> scratchpad/shots/<wave>/; send shots after each wave merge (user request)
+- Vercel fix: apps/client/vercel.json (384a5ec) on dev branch; check preview deploy state; main d45580f still broken (needs the same commit on main)
+- main now abd8e94 (cherry-pick of Vercel fix, user-approved push to main); check production deploy READY
+- merged P36 (73 files, 1065 passed), pushed. User: switch to extra-high agents instead of ultracode (no new workflows).
+- merged shots tool (74 files, 1070 passed), pushed; sent 12 wave-6 shots; visual findings in ledger (V-fix)
+- merged P10 (ce5a3b9) + P11 (0bb2dd7) locally, NOT pushed: 2 red tests in rulerBody.test.ts (AC-5 fixture log never trips: why ''; pinned lid: EntityStore.remove no entity 1). CORE failed to start again (cwd drift). Next: single xhigh agents (user): SIM-fix (rulerBody reds, entity-integrity m_eff at contact point, tripwire cap, unanchor depth, small TODO fixes), CORE, P21.
+- launched single xhigh agents (worktree, base 0bb2dd7): SIM-fix, CORE, P21. P35 workflow still running. Each needs an independent reviewer agent after it returns (then SendMessage the implementer with findings).
+- decisions: entity-integrity m_eff = effective mass at contact point (departure from §4.3 table); tripwire end Δp cap m_end·|v·n̂|·tripwireEndSpeedMul.
+- pushed 0bb2dd7 (P10+P11 merged) with 2 known red rulerBody tests, pending SIM-fix (stop hook asked for push)
+- merged P35 (dd3adb8), pushed (same 2 known reds). C-fix must wire main.ts for VerbInput deps (ledger).
+- launched P15 + P20 (xhigh agents, base dd3adb8). Running: SIM-fix, CORE, P21, P15, P20. P16 next when a slot frees; then reviews per package.
+- SIM-fix done (b260360), review running; P16 launched (base dd3adb8).
+- P15 done (37c8847), review running.
+- P21 done (1b2a2fd), review running.
+- merged SIM-fix → ac026a2 GREEN (82 files, 1228 passed), pushed. SIM-fix worktree kept for SIM-fix2 follow-up. P20 done (2d9ee57) → review next.
+- P15 review: changes (kick weakened); decisions sent to P15 agent (limb-mass unarmed push, pilesNearR 15). SIM-fix2 running in SIM-fix worktree. P20 review running.
+- CORE done (89e730c); author merging ac026a2 (+fixture regen); CORE review running on snapshot rev-core. Pending: P20 review, P21 review, P15 fixes, SIM-fix2, P16 impl.
+- CORE merged ac026a2 in its branch → fe2f79a (84 files, 1248 passed, no failures). Await CORE review, then merge.
+- merged P21 → c499012 (83 files, 1270 passed), pushed. P21 worktree kept for its minor follow-ups.
+- sent 4 Clearing shots (scratchpad/shots/clearing). Running: CORE review, P20 review, P15 fixes, SIM-fix2, P21 follow-ups, P16 impl.
+- P20 review: changes → knuckle-charge pose decision sent to P20 agent (base c499012).
+- CORE review: changes (blocker: slab pair filter rebuilt each 4a lets fast logs pass through lying player; fix = only-shrink set from launch/teleport, saved in SlabRecV1) + minors + contact-after-load loss → sent to CORE agent.
+- merged P15 → 9aa8411 (85 files, 1298 passed), pushed. USER: new art direction (painterly storybook stylized) — plan look overhaul.
+- ART: docs/ART-DIRECTION.md committed f75b4cb (replaces SPEC Look lines on owner's request; record in m1 report departures). Art A agent running (worktree, base f75b4cb): paint.ts, lighting, sky, post, backdrop, hide boundary walls. Then B1/B2/B3 + art review. P16 done (491b505) → review running (haul tether drags player; bracedHauler helper suspicious).
+- USER CANCELLED art overhaul: Art A stopped, f75b4cb reverted (674ba1e), pushed. Keep original low-poly look. Earlier defect fixes (rim faces near-black, boundary wall band, carry/drag hands) still stand as bug fixes within the original style.
+- merged P21 follow-ups + skip 'boundary' look in worldViews → bcd5580 (85 files, 1302 passed), pushed.
+- P20 fixes done (4a8fb51, includes CORE fe2f79a) → wait for CORE fixes, then merge CORE then P20.
+- merged CORE, P20, SIM-fix2 → 0943cb9 (88 files, 1400 passed), pushed. P16 review: changes (tether drag, snap assist) → send to P16.
+- launched P22 + C-fix (xhigh, base 0943cb9); P16 fixing review findings (tether one-sided P14-fix authorised). Next: P23 after P16; wave 9 ACs.

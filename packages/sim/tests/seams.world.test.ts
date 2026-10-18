@@ -25,10 +25,11 @@ if (!TUNING.some((e) => e.name === 'VERB_TUNING')) {
   defineTuning(
     'VERB_TUNING',
     'Verbs',
-    { faceTurnRate: 0.12, standOffM: 0.6 },
+    { faceTurnRate: 0.12, standOffM: 0.6, workStepM: 0.045 },
     {
       faceTurnRate: { unit: 'fraction of the remaining angle per tick', source: 'test stand-in for P14 (§9)' },
       standOffM: { unit: 'm', source: 'test stand-in for P14 (§9)' },
+      workStepM: { unit: 'm × scale per tick', source: 'test stand-in for P14 (DS PICKUP_STEP)' },
     },
   );
 }
@@ -726,6 +727,19 @@ describe('work actions (§5.0)', () => {
     const again = working({ x: 1.2, y: 0, z: 0 });
     for (let i = 0; i < 30; i++) again.sim.step();
     expect(again.f.pos.x).toBeCloseTo(0.3, 12);
+  });
+
+  it('steps in VERB_TUNING.workStepM × scale a tick (live tuning, not a bare constant: core-fix)', () => {
+    setTuningValue('VERB_TUNING', 'workStepM', 0.02);
+    const { sim, f } = working({ x: 1.2, y: 0, z: 0 });
+    sim.step();
+    const x1 = f.pos.x;
+    sim.step();
+    expect(f.pos.x - x1).toBeCloseTo(0.02, 12);
+    f.scale = 1.5;
+    const x2 = f.pos.x;
+    sim.step();
+    expect(f.pos.x - x2).toBeCloseTo(0.03, 12);
   });
 
   it('leaves the fighter to the world when completeWork ends the action or starts another', () => {

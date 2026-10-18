@@ -48,6 +48,32 @@ function bad(list: [number, number, number, number][], ok: (gi: number, gj: numb
   return out.slice(0, 10);
 }
 
+/**
+ * The steepest heightfield triangle (°) within a square of half-width r around (cx, cz) that has no ever-dug vertex
+ * (each cell's two triangles, split along (r+1, c)–(r, c+1) as Rapier's heightfield and normalAt are).
+ */
+function maxSlopeDeg(t: Terrain, win: { cx: number; cz: number; r: number }): number {
+  const a = t.vertexIndex(win.cx - win.r, win.cz - win.r);
+  const b = t.vertexIndex(win.cx + win.r, win.cz + win.r);
+  const s = t.spacing;
+  let most = 0;
+  for (let gj = a.gj; gj < b.gj; gj++) {
+    for (let gi = a.gi; gi < b.gi; gi++) {
+      const h00 = t.vertexHeightAt(gi, gj);
+      const h01 = t.vertexHeightAt(gi + 1, gj);
+      const h10 = t.vertexHeightAt(gi, gj + 1);
+      const h11 = t.vertexHeightAt(gi + 1, gj + 1);
+      const d00 = t.isDugVertex(gi, gj);
+      const d01 = t.isDugVertex(gi + 1, gj);
+      const d10 = t.isDugVertex(gi, gj + 1);
+      const d11 = t.isDugVertex(gi + 1, gj + 1);
+      if (!d00 && !d01 && !d10) most = Math.max(most, Math.atan(Math.hypot(h01 - h00, h10 - h00) / s));
+      if (!d11 && !d01 && !d10) most = Math.max(most, Math.atan(Math.hypot(h11 - h10, h11 - h01) / s));
+    }
+  }
+  return (most * 180) / Math.PI;
+}
+
 /** Σ (height − original) × cell area over the world vertices (each counted once) within `r` m of (cx, cz). */
 function netVolume(t: Terrain, cx: number, cz: number, r: number): number {
   let v = 0;
@@ -198,19 +224,40 @@ describe('spoil: raise and the spoil search (§4.13, RT-2)', () => {
     expect(t.heightAt(30, -30)).toBeGreaterThan(0);
   });
 
-  it('caps every vertex at original + 1 m and reports what it could not place', () => {
+  // UPDATED (SIM-fix4): this test asserted §4.13's old shape, a mound filled flat to the cap over the 9 vertices of the
+  // 0.5 m kernel with sheer sides (5 m³ asked, 0.56 m³ placed). Spoil now settles at its angle of repose: the same cap,
+  // but a flat-topped pyramid whose faces lie at spoilReposeDeg, spreading up to spoilSlideM from the pour.
+  it('caps every vertex at original + 1 m, settles its flanks at the repose angle, and reports what it could not place', () => {
     const t = new Terrain(null, 200);
-    const r = t.raise(-40, 20, 5);
-    const near = vertices(t, { cx: -40, cz: 20, r: 2 });
-    const inKernel = (x: number, z: number) => Math.hypot(x + 40, z - 20) < TERRAIN_TUNING.digRadiusM;
-    const eligible = near.filter(([, , x, z]) => inKernel(x, z)).length;
-    expect(eligible).toBe(9);
-    expect(bad(near, (gi, gj, x, z) => (inKernel(x, z) ? Math.abs(t.vertexHeightAt(gi, gj) - 1) < 1e-5 : t.vertexHeightAt(gi, gj) === 0))).toEqual([]);
-    expect(netVolume(t, -40, 20, 3)).toBeCloseTo(r.raisedM3, 9);
-    expect(r.raisedM3).toBeCloseTo(eligible * t.spacing * t.spacing, 5);
-    expect(r.raisedM3).toBeLessThan(5);
+    const r = t.raise(-40, 20, 100);
+    const slide = TERRAIN_TUNING.spoilSlideM;
+    const near = vertices(t, { cx: -40, cz: 20, r: slide + 2 });
+    const d = t.spoilStepM();
+    // Capped: nothing above original + 1 m; the top (the pour point and the vertices around it) at the cap.
+    expect(bad(near, (gi, gj) => t.vertexHeightAt(gi, gj) <= Math.fround(1) + 1e-9)).toEqual([]);
+    expect(t.heightAt(-40, 20)).toBeCloseTo(1, 5);
+    expect(t.heightAt(-40 + 1, 20 - 1)).toBeCloseTo(1, 5);
+    // Settled: no x- or z-neighbours differ by more than d, so no triangle is steeper than the repose angle.
+    expect(bad(near, (gi, gj) => Math.abs(t.vertexHeightAt(gi + 1, gj) - t.vertexHeightAt(gi, gj)) <= d + 1e-6 && Math.abs(t.vertexHeightAt(gi, gj + 1) - t.vertexHeightAt(gi, gj)) <= d + 1e-6)).toEqual([]);
+    expect(maxSlopeDeg(t, { cx: -40, cz: 20, r: slide + 2 })).toBeLessThanOrEqual(TERRAIN_TUNING.spoilReposeDeg + 0.01);
+    // Nothing beyond spoilSlideM (grid steps along x plus z) of the pour.
+    expect(bad(near, (gi, gj, x, z) => Math.abs(x + 40) + Math.abs(z - 20) <= slide + 1e-9 || t.vertexHeightAt(gi, gj) === 0)).toEqual([]);
+    // Exact volume, and less than asked: the window is full.
+    expect(netVolume(t, -40, 20, slide + 2)).toBeCloseTo(r.raisedM3, 9);
+    expect(r.raisedM3).toBeGreaterThan(5);
+    expect(r.raisedM3).toBeLessThan(100);
     // A full mound takes nothing more.
     expect(t.raise(-40, 20, 1).raisedM3).toBe(0);
+  });
+
+  it('a small pour is a pyramid at the repose angle, its volume exact (SIM-fix4)', () => {
+    const t = new Terrain(null, 200);
+    const r = t.raise(10, 10, 0.0391);
+    expect(r.raisedM3).toBeCloseTo(0.0391, 6);
+    expect(maxSlopeDeg(t, { cx: 10, cz: 10, r: 3 })).toBeLessThanOrEqual(TERRAIN_TUNING.spoilReposeDeg + 0.01);
+    // Its apex: Σ over the pyramid's vertices of (H − d·m) = V / s², 4m vertices at m steps.
+    expect(t.heightAt(10, 10)).toBeGreaterThan(0.2);
+    expect(t.heightAt(10, 10)).toBeLessThan(TERRAIN_TUNING.spoilMaxRiseM);
   });
 
   it('never raises an ever-dug vertex or one within 1.5 m of one', () => {
@@ -319,6 +366,118 @@ describe('spoil: raise and the spoil search (§4.13, RT-2)', () => {
     let rimMax = -Infinity;
     for (let x = -4; x <= 4 + 1e-9; x += t.spacing) for (const z of [3.25, 3.5, 3.75, 4, -3.25, -3.5, -3.75, -4]) rimMax = Math.max(rimMax, t.heightAt(x, z));
     console.info(`terrain: rim under the cover's branch ends rises at most ${rimMax.toFixed(2)} m`);
+    // GATE (SIM-fix4): the spoil settles at its angle of repose. No triangle outside the dug ground is steeper than
+    // spoilReposeDeg; the setback ring round the pit holds no spoil (no lip at the rim); and the berm rises from the ring
+    // no faster than the repose slope, so no step at the pit's edge comes near the giant's 1.0 m (RULER_BODY_TUNING).
+    const slope = maxSlopeDeg(t, { cx: 0, cz: 0, r: 22 });
+    let lip = -Infinity;
+    let peak = -Infinity;
+    for (const [gi, gj] of vertices(t, { cx: 0, cz: 0, r: 22 })) {
+      const rise = t.vertexHeightAt(gi, gj) - t.vertexOriginalAt(gi, gj);
+      peak = Math.max(peak, rise);
+      if (t.isNearDug(gi, gj) && !t.isDugVertex(gi, gj)) lip = Math.max(lip, rise);
+    }
+    console.info(`terrain: berm ${peak.toFixed(2)} m high, steepest spoil triangle ${slope.toFixed(2)}°, the setback ring at most ${lip.toFixed(3)} m above original`);
+    expect(slope).toBeLessThanOrEqual(TERRAIN_TUNING.spoilReposeDeg + 0.01);
+    expect(lip).toBeLessThanOrEqual(1e-6);
+    expect(peak).toBeGreaterThan(0.5); // the dirt is a berm round the pit, not spread to nothing
+  });
+});
+
+describe('generate', () => {
+  beforeAll(async () => {
+    await physicsReady();
+  });
+
+  /**
+   * The heights generate() wrote before its tile-by-tile loop (SIM-fix2): every world vertex (gi, gj) read once, in
+   * rows of z then x, at (minX + gi·spacing, minZ + gj·spacing), as float32, into every tile that holds it (the old
+   * forEachCopy). Returns [original, heights] per tile.
+   */
+  function reference(t: Terrain, h: (x: number, z: number) => number): Float32Array[][] {
+    const n = t.cells;
+    const tiles = t.tilesX * t.tilesZ;
+    const O = Array.from({ length: tiles }, () => new Float32Array((n + 1) * (n + 1)));
+    const H = Array.from({ length: tiles }, () => new Float32Array((n + 1) * (n + 1)));
+    const vx = t.tilesX * n + 1;
+    const vz = t.tilesZ * n + 1;
+    for (let gj = 0; gj < vz; gj++) {
+      for (let gi = 0; gi < vx; gi++) {
+        const v = Math.fround(h(t.minX + gi * t.spacing, t.minZ + gj * t.spacing));
+        const xs: [number, number][] = [];
+        const zs: [number, number][] = [];
+        const tx = Math.floor(gi / n);
+        if (gi % n === 0 && tx > 0) xs.push([tx - 1, n]);
+        if (tx < t.tilesX) xs.push([tx, gi - tx * n]);
+        const tz = Math.floor(gj / n);
+        if (gj % n === 0 && tz > 0) zs.push([tz - 1, n]);
+        if (tz < t.tilesZ) zs.push([tz, gj - tz * n]);
+        for (const [z, r] of zs) {
+          for (const [x, c] of xs) {
+            O[z * t.tilesX + x][r + c * (n + 1)] = v;
+            H[z * t.tilesX + x][r + c * (n + 1)] = v;
+          }
+        }
+      }
+    }
+    return [O, H];
+  }
+
+  /** A seeded height function: a sum of 6 sines with random wave vectors, phases and amplitudes. */
+  function seeded(seed: number): (x: number, z: number) => number {
+    const rng = new Rng(seed);
+    const waves = Array.from({ length: 6 }, () => ({ kx: rng.range(-2, 2), kz: rng.range(-2, 2), ph: rng.range(0, 6.3), a: rng.range(0.01, 3) }));
+    return (x, z) => waves.reduce((s, q) => s + q.a * Math.sin(q.kx * x + q.kz * z + q.ph), 0);
+  }
+
+  /** The first byte where two float32 arrays differ, or -1 (byte for byte: −0 against 0 and NaN payloads count). */
+  function firstDiff(a: Float32Array, b: Float32Array): number {
+    const x = new Uint8Array(a.buffer, a.byteOffset, a.byteLength);
+    const y = new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
+    if (x.length !== y.length) return Math.min(x.length, y.length);
+    for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return i;
+    return -1;
+  }
+
+  it('fills the 200 m Clearing terrain (64 tiles of 101²) in ≤ 20 ms of its own time (the best of 5; the per-vertex version took 66 ms)', () => {
+    const p = new PhysicsWorld();
+    try {
+      const t = new Terrain(p, 200);
+      expect(t.tileCount).toBe(64);
+      const flat = (): number => 0;
+      let best = Infinity;
+      for (let k = 0; k < 5; k++) {
+        const a = performance.now();
+        t.generate(flat);
+        best = Math.min(best, performance.now() - a);
+      }
+      console.info(`terrain: generate(h ≡ 0) over 64 tiles, best of 5: ${best.toFixed(1)} ms`);
+      expect(best).toBeLessThanOrEqual(20);
+    } finally {
+      p.free();
+    }
+  });
+
+  it('writes byte for byte the heights the per-vertex version wrote, for seeded and awkward height functions', () => {
+    const fns: [string, (x: number, z: number) => number][] = [
+      ...[1, 2, 3, 20261017].map((s): [string, (x: number, z: number) => number] => [`seed ${s}`, seeded(s)]),
+      ['bumpy', bumpy],
+      ['exact bits', (x, z) => x * z * 1e-3 + 1 / 3 + x / 7],
+      ['steps', (x, z) => (Math.floor(x * 1.3) % 2 === 0 ? 0.5 : -0.25) + Math.floor(z / 3.7)],
+      ['large', (x, z) => 1e4 + x * 123.456 - z * z * 0.789],
+    ];
+    for (const size of [200, 75]) {
+      for (const [name, h] of fns) {
+        const t = new Terrain(null, size);
+        t.generate(h);
+        const [O, H] = reference(t, h);
+        expect(t.original.length).toBe(O.length);
+        for (let k = 0; k < O.length; k++) {
+          expect(firstDiff(t.original[k], O[k]), `${name}, ${size} m, tile ${k} original`).toBe(-1);
+          expect(firstDiff(t.heights[k], H[k]), `${name}, ${size} m, tile ${k} heights`).toBe(-1);
+        }
+      }
+    }
   });
 });
 

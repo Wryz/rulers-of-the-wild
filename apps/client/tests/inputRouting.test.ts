@@ -26,6 +26,7 @@ function offences(patterns: RegExp[], allowed: string[] = []): string[] {
 
 const LOOP = '../src/game/loop.ts';
 const VERB_INPUT = '../src/input/verbInput.ts';
+const PANEL = '../src/debug/panel.ts';
 
 describe('client input routing', () => {
   it('reads the client sources', () => {
@@ -80,7 +81,31 @@ describe('client input routing', () => {
     expect(SOURCES[LOOP]).toMatch(/dev\(op: DevOp, args: number\[\], tuning\?: TuningEdit\)/);
   });
 
-  it.todo('debug/panel.ts binds no sim table or fighter field (P37: edits go through loop.dev("setTuning", …))');
+  it('debug/panel.ts binds no sim table or fighter field (P37: edits go through loop.dev("setTuning", …))', () => {
+    const panel = code(SOURCES[PANEL]).join('\n');
+    // Sim values reach the panel only through the registry (TUNING, getTuningValue): it imports no table by name (DS
+    // bound FACING and the PLAYER_MOVES/ENEMY_MOVES rows in place).
+    const simImports = [...panel.matchAll(/import\s*(?:type\s*)?\{([^}]*)\}\s*from\s*'@wild\/sim'/g)].flatMap((m) =>
+      m[1]
+        .split(',')
+        .map((s) => s.trim().replace(/^type\s+/, ''))
+        .filter(Boolean),
+    );
+    expect(simImports).toContain('TUNING');
+    for (const name of simImports) expect(name, name).not.toMatch(/_TUNING$|^FACING$|_MOVES$|^MATERIALS$|^SPECIES_BODY$|^WEAPONS$|^BONE_|^HUMANOID_/);
+    // It binds only its own objects (a field's proxy, its read-outs, a note): never a registry table, the world, the game,
+    // a fighter or what a fighter holds (DS bound footwork and idle styles, motionInfo and the AI config). (`obj` is the
+    // Tweakpane adapter passing its caller's object on.)
+    const bound = [...panel.matchAll(/\.addBinding\(\s*([^,]+),/g)].map((m) => m[1].trim());
+    expect(bound.length).toBeGreaterThan(4);
+    for (const obj of bound) expect(obj, obj).toMatch(/^(view\.proxy|this\.ro|this\.inspect|note|obj)$/);
+    expect(bound.filter((b) => b === 'obj')).toHaveLength(1);
+    // The DS panel's direct calls into Game are gone (Game keeps them, deprecated, until a follow-up removes them).
+    expect(panel).not.toMatch(/\b(aiCfg|spawnEnemy|giveWeapon)\b|\.restart\(/);
+    // Sim edits go out as setTuning commands through the loop; dev ops too.
+    expect(panel).toMatch(/loop\.dev\('setTuning', \[\], \{ table: v\.entry\.name, key: v\.key, value \}\)/);
+    expect(panel).toMatch(/\.loop\?\.dev\(devOp, a\)/);
+  });
 
   it('calls no world, entity, joint, terrain or CombatSim mutator (dev ops are commands, RF-19)', () => {
     expect(

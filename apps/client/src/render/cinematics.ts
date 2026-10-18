@@ -1,4 +1,11 @@
+// DungeonStyle's camera cuts (docs/M1-DESIGN.md §10.6, SPEC:583): the kill cams play through here (game/killcam.ts is the
+// one caller, rule 8). Changed for the Clearing (P34): a cut stands at least CAMERA_TUNING.cutFloorM over the ground
+// under it (`ground(x, z)`, the terrain; DS's floor at y = 0 by default, so cinematics.test.ts reads the same), its
+// line of sight is the game's `blocked` (terrain and trunks through the world's read-only queries), and its far plane
+// is RENDER_TUNING.cameraFar (600 m).
 import { PerspectiveCamera, Vector3 } from 'three';
+import { CAMERA_TUNING, setLens } from './cameraRig';
+import { RENDER_TUNING } from './terrainView';
 
 /**
  * A camera cut: where to look, where the camera sits relative to that (spherical, in
@@ -33,7 +40,7 @@ export interface Shot {
  * motion and letterbox bars, then hands back to the gameplay camera.
  */
 export class Cinematics {
-  readonly camera = new PerspectiveCamera(38, 16 / 9, 0.05, 200);
+  readonly camera = new PerspectiveCamera(38, 16 / 9, 0.05, RENDER_TUNING.cameraFar);
   private shot: Shot | null = null;
   private t = 0;
   private readonly look = new Vector3();
@@ -43,6 +50,8 @@ export class Cinematics {
   onChange: ((active: boolean) => void) | null = null;
   /** Is the line from a camera spot to what it looks at obstructed? (Set by the game.) */
   blocked: ((cam: Vector3, look: Vector3) => boolean) | null = null;
+  /** The ground under a point (m): a cut never goes below it + CAMERA_TUNING.cutFloorM. Set by the game (the terrain). */
+  ground: (x: number, z: number) => number = () => 0;
 
   get active() {
     return this.shot !== null;
@@ -95,7 +104,7 @@ export class Cinematics {
         dir.copy(base).applyAxisAngle(_up, k * 0.4 + (s.orbit ?? 0) * t);
         const d = Math.max(0.6, s.distance + (s.dolly ?? 0) * t);
         spot.copy(this.look).addScaledVector(dir, d);
-        spot.y = Math.max(0.15, this.look.y + s.height);
+        spot.y = this.floored(spot.x, spot.z, this.look.y + s.height);
         if (this.blocked(spot, this.look)) {
           clear = false;
           break;
@@ -139,10 +148,14 @@ export class Cinematics {
     const d = Math.max(0.6, s.distance + (s.dolly ?? 0) * this.t);
     const cam = this.camera;
     cam.position.copy(this.look).addScaledVector(this.side, d);
-    cam.position.y = Math.max(0.15, this.look.y + s.height);
-    cam.fov = s.fov ?? 38;
-    cam.updateProjectionMatrix();
+    cam.position.y = this.floored(cam.position.x, cam.position.z, this.look.y + s.height);
+    setLens(cam, s.fov ?? 38);
     cam.lookAt(this.look);
+  }
+
+  /** A camera height `y` at (x, z), kept CAMERA_TUNING.cutFloorM over the ground there (DS: max(0.15, y)). */
+  private floored(x: number, z: number, y: number): number {
+    return Math.max(this.ground(x, z) + CAMERA_TUNING.cutFloorM, y);
   }
 }
 

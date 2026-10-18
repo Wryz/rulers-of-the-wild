@@ -82,7 +82,7 @@ describe('the tables P05 registers', () => {
       pileMergeR: 1.5,
       pileCapKg: 150,
       maxPilesNear: 12,
-      pilesNearR: 10,
+      pilesNearR: 15, // P15 review (orchestrator decision): the per-pit budget of §4.13
       spoilMinGapM: 0.5,
       spoilSearchMaxM: 15,
       spoilMaxRiseM: 1,
