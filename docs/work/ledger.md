@@ -213,3 +213,8 @@
 - DEVIATION (contacts.ts strikingLeg): during the knuckle charge (posture headLow) a forearm counts as a leg for legStrike (SPEC:782 "its legs strike"). Needed: forearms reach the log first, so the trip never fired. Band still measured from the shins vs the obstacle's top.
 - Follow-ups (P38): scripted charge without telegraph snaps headLow at weight 1 → forearms 33 m/s for a tick (ramp it); posture ramp 12 frames is human-tuned — 37 m/s forearm and a 23 HP hit when a charge ends untripped; strikingLeg checks posture id not weight (first ~0.12 s of a telegraph after a fast chase); shinBand impact-trip still shins only; split AC-5's it.fails into two (rising 11.87 vs 8.4 pin; still +6.27 vs +5.58); AC-6.1 assert boulder dynamic.
 - AC-6 part 2 press branch is seed-dependent (seed 63: dv 3.06, 93.4 % kept) — §11.8 R8 margin.
+
+## AC-7 (P30, verified independently: approve) and AC-4 (P25, verification pending)
+- AC-7 departures from §11.7: log is 4,209 ticks (not 3,600; header says ≈4,100 — fix in P38), 6 digs (not 20), no splice / pendulum / sloped place / carry / drag, world C runs 1,200 ticks. No end-to-end negative control (only comparator byte flips) — P38 follow-up. Tick cost 10–11 ms (design pin ~1 ms/step) — P38 perf item. planPlace doesn't check `at` is finite (NaN → noSupport not noTarget).
+- AC-4 bug: a save of a pinned, sleeping ruler can't load (entity records don't save sleep; ruler body's is restored; refreshQueries' zero-length step wakes the ruler → "the zero-length step changed Rapier body"). Save-format change (P13 area) — P38 or M3.
+- AC-4 design text: §11.4 mash re-placement "while free" never fires; test re-places on a swing's frame 0.
