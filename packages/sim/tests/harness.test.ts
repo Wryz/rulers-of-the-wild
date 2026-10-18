@@ -566,6 +566,14 @@ const SMALL_PIT_GRASS_MIN = 6;
  * under its 108 stakes at -3.00 … -2.37 m, the 3 × 2 × 1.5 m pit's under its 8 at -1.91 … -1.68 m).
  */
 const FLOOR_BAND = { shortM: 0.15, overM: 0.55 } as const;
+/**
+ * PIN overM for the 3 × 2 × 1.5 m pit (SIM-fix4, re-measured): -2.15 … -1.59 m under its 8 stakes. With the spoil now
+ * settled at its angle of repose (no sheer ring at the rim) the planner stands elsewhere: it gives up the edge centre
+ * (1.15, −0.75) after DIG_PLAN.giveUpFails strikes that clang on its wall, and four of their misses land at (0.75, −0.6),
+ * digging that spot to -2.20 m, 0.65 m below the depth (P23 measured -1.91 … -1.68 with the old ring). The 8 × 6 pit's
+ * band is unchanged (-3.00 … -2.39 m, the 3 m dig floor). The GATE shortM is unchanged.
+ */
+const SMALL_PIT_FLOOR_OVER_M = 0.7;
 
 /**
  * GATE: the most standAts a recipe may make where the terrain has no wall or drop (StandAtWhy 'other': a walk that
@@ -605,7 +613,7 @@ describe('furnishPit (§11.2(b) steps 2-3 on the small pit)', () => {
     }
     const ys = floorUnder(h, r.stakes, 'furnishPit 3×2');
     expect(ys[ys.length - 1]).toBeLessThan(-SMALL_PIT.depth + FLOOR_BAND.shortM);
-    expect(ys[0]).toBeGreaterThan(-SMALL_PIT.depth - FLOOR_BAND.overM);
+    expect(ys[0]).toBeGreaterThan(-SMALL_PIT.depth - SMALL_PIT_FLOOR_OVER_M);
     // GATE: every bearer spans the pit rim to rim (both ends beyond the long rims, up at the rim), the player's.
     const bearers = r.cover.filter((id) => h.ent(id).material === 'rottenWood');
     expect(bearers).toHaveLength(8);

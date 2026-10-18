@@ -1237,7 +1237,9 @@ export class RulerBodies {
       const c1 = frontier[k];
       const others: RAPIER.Collider[] = [];
       rapier.contactPairsWith(c1, (c2) => {
-        others.push(c2);
+        // Null for a collider removed since the last step (a cover piece broken this tick): the narrow phase still
+        // lists the pair until the next step.
+        if (c2) others.push(c2);
       });
       others.sort((a, b) => a.handle - b.handle);
       for (const c2 of others) {

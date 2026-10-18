@@ -13,7 +13,9 @@
 //   spoil never refills the hole, RT-2). Then (1) a dirt pile within pileMergeR of S that stays ≤ pileCapKg grows (its
 //   hull rescaled to the new volume); else (2) while fewer than maxPilesNear piles lie within pilesNearR of S, a new
 //   pile (a low 8-point hull of the volume) is set down at S (or beside the piles and things already there,
-//   newPileNear); else (3) the volume is raised into the terrain at S, the remainder at the next spoil point (the berm).
+//   newPileNear); else (3) the volume is raised into the terrain at S, the remainder at the next spoil point (the berm,
+//   settled at TERRAIN_TUNING.spoilReposeDeg: a sloped mound whose inner flank comes down to the setback ring, SIM-fix4;
+//   spoil a later dig brings into the setback slides off and is poured again by terrain.lower).
 //   pilesNearR (15 m) is the per-pit budget, so a ruler pit makes at most 12 piles and a berm, not 1,180 bodies. Dirt
 //   the berm can't take (nothing free within spoilSearchMaxM) is set down as a pile at the nearest free spot beyond the
 //   setback (placeFar), never lost silently (spoilLostM3 counts the float rounding).
@@ -77,14 +79,19 @@ const SPOIL_EPS_M3 = 1e-8;
 
 /**
  * A dirt pile's hull for `volumeM3` (§4.13: "a low 8-point hull"): a square frustum, base half-width a on its local
- * y = 0 plane, top half-width pileTopRatio·a at height pileHeightRatio·a, so V = (4/3)·h·(a² + ab + b²). Its origin is
+ * y = 0 plane, top half-width pileTopRatio·a at height pileHeightRatio·a, so V = (4/3)·h·(a² + ab + b²); its faces no
+ * steeper than TERRAIN_TUNING.spoilReposeDeg (SIM-fix4: the top is narrowed, or the height held, to keep them so). Its origin is
  * the middle of its base: rescaled in place, a pile keeps its base on what it rests on.
  */
 export function dirtPileShape(volumeM3: number): Extract<Shape, { kind: 'hull' }> {
   if (!(volumeM3 > 0) || !Number.isFinite(volumeM3)) throw new Error(`dirtPileShape: a pile's volume must be positive, not ${volumeM3}`);
   const T = DIG_TUNING;
-  const hr = T.pileHeightRatio;
-  const tr = Math.min(1, Math.max(0, T.pileTopRatio));
+  // SIM-fix4: a pile's faces (rise h over run a − b) are never steeper than loose dirt's angle of repose
+  // (TERRAIN_TUNING.spoilReposeDeg, as the terrain's spoil): the height ratio is held to tan(repose) and the top shrunk
+  // until its faces are that steep at most.
+  const tanRepose = Math.tan((TERRAIN_TUNING.spoilReposeDeg * Math.PI) / 180);
+  const hr = Math.min(T.pileHeightRatio, tanRepose);
+  const tr = Math.min(1 - hr / tanRepose, Math.max(0, T.pileTopRatio));
   const a = Math.cbrt(volumeM3 / ((4 / 3) * hr * (1 + tr + tr * tr)));
   const b = tr * a;
   const h = hr * a;
@@ -314,12 +321,16 @@ export function digAt(w: World, x: number, z: number, depthMul: number, by: Figh
   const r = T.digRadiusM;
   const credit = by?.playerId ? [by.playerId] : [];
   const dug = w.terrain.lower(x, z, depthMul);
+  // Spoil the dig made slide (off the new setback ring, SIM-fix4) was poured again by lower; what found no spoil point
+  // is set down as dirt the berm can't take.
+  const settledFar = dug.unplacedM3 > 0 ? placeFar(w, x, z, dug.unplacedM3, credit).point : null;
   const spoil = placeSpoil(w, x, z, dug.volumeM3, credit);
+  const spoilPoints = [...dug.spoil, ...(settledFar ? [settledFar] : []), ...spoil.points];
   const y = w.terrain.heightAt(x, z);
   // The navmesh (phase 16 also finds terrain and entity changes by its own scan; marking them is cheap and immediate).
   if (w.nav) {
     w.nav.markDirty({ min: { x: x - r, y: y - T.maxDigDepthM, z: z - r }, max: { x: x + r, y: y + T.spoilMaxRiseM, z: z + r } }, 'dig');
-    for (const s of spoil.points) {
+    for (const s of spoilPoints) {
       const sy = w.terrain.heightAt(s.x, s.z);
       w.nav.markDirty({ min: { x: s.x - T.pileMergeR, y: sy - T.spoilMaxRiseM, z: s.z - T.pileMergeR }, max: { x: s.x + T.pileMergeR, y: sy + T.spoilMaxRiseM, z: s.z + T.pileMergeR } }, 'spoil');
     }

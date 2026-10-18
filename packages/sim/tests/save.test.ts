@@ -516,6 +516,8 @@ const INVENTORY: Record<string, Record<string, string>> = {
     vz: 'not saved: derived from the size',
     nearDug: 'not saved: derived from the dug mask',
     nearDugSetback: 'not saved: TERRAIN_TUNING.spoilSetbackM',
+    spoilLimit: 'not saved: derived from the heights and the dug mask (rebuilt on load, equal to the live field)',
+    spoilKey: 'not saved: the tuning the spoil limit was built for',
   },
   GroundCover: {
     world: 'not saved: a link',

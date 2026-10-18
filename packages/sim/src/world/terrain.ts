@@ -15,12 +15,27 @@
 // find the new shape at once only where they meet the tile's old bounding box (a downward ray through the old surface);
 // below it (a horizontal ray into a fresh pit's wall, an overlap at its floor) they find it after the next step.
 // heightAt, normalAt and supportAt read the heights, so they are exact at once.
+//
+// Spoil settles at its angle of repose (SIM-fix4, departure from §4.13's capped cone; docs/work/ledger.md): with
+// d = spacing · tan(spoilReposeDeg) / √2, no two x- or z-neighbours of spoil differ by more than d, so no heightfield
+// triangle of it (whose slope is the hypotenuse of its two edge slopes) is steeper than spoilReposeDeg. `spoilLimit` is
+// the highest a vertex may hold spoil: original + spoilMaxRiseM, and no more than d per grid step above the setback ring
+// (the vertices within spoilSetbackM of dug ground, which hold no spoil), so a berm's inner flank comes down to that
+// ring at the repose angle. `raise` pours a pyramid of that slope under the limit; `lower` takes the spoil off any
+// vertex the dig brings into the setback (and off spoil its own hole left over-steep) and pours it again at the next
+// spoil point.
 import RAPIER from '@dimforge/rapier3d-compat';
 import { defineTuning } from '../tuning/registry';
 import { collisionGroups, solverGroups } from './groups';
 import { MATERIAL_IDS, MATERIALS } from './materials';
 import type { PhysicsWorld } from './physics';
 import type { GroundQuery, MaterialId, V3 } from './types';
+
+const DEG = Math.PI / 180;
+/** m: a vertex within this of its spoil limit is full (the float32 heights' rounding). A numerical tolerance. */
+const SPOIL_FULL_EPS_M = 1e-6;
+/** m³: settled spoil left to pour below which lower stops (as dig.ts's SPOIL_EPS_M3). A numerical tolerance. */
+const SPOIL_SETTLE_EPS_M3 = 1e-8;
 
 export const TERRAIN_TUNING = defineTuning(
   'TERRAIN_TUNING',
@@ -44,6 +59,8 @@ export const TERRAIN_TUNING = defineTuning(
     spoilMaxRiseM: 1,
     spoilUndugTolM: 0.05,
     spoilSetbackM: 1.5,
+    spoilReposeDeg: 34,
+    spoilSlideM: 4,
   },
   {
     tileSize: { unit: 'm', source: 'NEW: D-7 (8 × 8 tiles = one 200 m chunk); read when a world is built' },
@@ -69,6 +86,18 @@ export const TERRAIN_TUNING = defineTuning(
     spoilSetbackM: {
       unit: 'm',
       source: 'NEW: spoil never lands within this of dug ground (RT-2; 3,573 strikes, rim 0-0.23 m [RT lab: spoil_setback.out])',
+    },
+    spoilReposeDeg: {
+      unit: '°',
+      source:
+        "NEW (SIM-fix4, P29): loose dirt's angle of repose (≈ 30-35°, rule 3): no terrain triangle of spoil is steeper. Keep it below RULER_BODY_TUNING.maxSlopeDeg (40°), or a berm fences a ruler out of its pit (so the panel caps it at 39°)",
+      min: 1,
+      max: 39,
+    },
+    spoilSlideM: {
+      unit: 'm',
+      source: "NEW (SIM-fix4): how far (grid steps × spacing, along x plus along z) a raise's dirt may slide from its spoil point down the slopes it settles on",
+      min: 0.25,
     },
   },
 );
@@ -109,6 +138,14 @@ export class Terrain implements GroundQuery {
   /** Per world vertex (gj·vx + gi): how many ever-dug vertices lie within `nearDugSetback` of it. */
   private nearDug: Uint16Array;
   private nearDugSetback: number;
+  /**
+   * Per world vertex: the highest it may hold spoil (m): min over the vertex's spoil cap and the setback ring's vertices
+   * u of (u's height, or original − spoilUndugTolM once u is dug) + d per grid step (x plus z) from u. Kept by decreases
+   * as the ring grows (its values only ever fall), rebuilt from the heights when stale (`spoilKey`).
+   */
+  private spoilLimit: Float64Array;
+  /** The tuning the limit field was built for ('' = rebuild before use). */
+  private spoilKey = '';
 
   /**
    * `physics` null builds the heights alone (no colliders): kernel tests and tools that need no Rapier. `size` (m) is
@@ -133,6 +170,7 @@ export class Terrain implements GroundQuery {
     this.version = new Uint32Array(tiles);
     this.nearDug = new Uint16Array(this.vx * this.vz);
     this.nearDugSetback = T.spoilSetbackM;
+    this.spoilLimit = new Float64Array(this.vx * this.vz);
     this.physics = physics;
     this.colliders = [];
     for (let t = 0; t < tiles; t++) this.colliders.push(physics ? this.makeCollider(physics, t) : null);
@@ -183,6 +221,7 @@ export class Terrain implements GroundQuery {
     for (const d of this.dug) d.fill(0);
     this.nearDug.fill(0);
     this.nearDugSetback = TERRAIN_TUNING.spoilSetbackM;
+    this.spoilKey = '';
     this.refresh(this.allTiles());
   }
 
@@ -219,6 +258,7 @@ export class Terrain implements GroundQuery {
     }
     for (const [t, i] of dug) this.dug[t][i] = 1;
     this.rebuildNearDug();
+    this.spoilKey = '';
     this.refresh([...touched].sort((a, b) => a - b));
   }
 
@@ -269,15 +309,28 @@ export class Terrain implements GroundQuery {
   /**
    * One dig: every vertex within digRadiusM of (x, z) drops by digDepthM × depthMul × (1 − dist/r) (the cone kernel,
    * D-40), clamped to original − maxDigDepthM. Returns the removed volume (Σ Δh × spacing²) and the tiles changed.
+   *
+   * Then the spoil settles (SIM-fix4): spoil on a vertex the dig brought within spoilSetbackM of dug ground, and spoil
+   * left steeper than the repose angle (above the new setback ring, or beside the dig's own hole in a heap), slides off
+   * and is poured again at the dig's next spoil points (findSpoilPoint, raise). `settledM3` is that volume (terrain to
+   * terrain, not part of `volumeM3`); `unplacedM3` what of it found no spoil point (the caller sets it down elsewhere);
+   * `spoil` the points it went to.
    */
-  lower(x: number, z: number, depthMul: number): { volumeM3: number; tiles: number[] } {
+  lower(x: number, z: number, depthMul: number): { volumeM3: number; tiles: number[]; settledM3: number; unplacedM3: number; spoil: { x: number; z: number }[] } {
     const T = TERRAIN_TUNING;
     const r = T.digRadiusM;
     const peak = T.digDepthM * depthMul;
     const touched = new Set<number>();
     let volume = 0;
+    let settled = 0;
+    let rest = 0;
+    const spoil: { x: number; z: number }[] = [];
     if (peak > 0 && r > 0) {
+      this.syncSpoil();
       const cellArea = this.spacing * this.spacing;
+      const lowered: number[] = [];
+      const ring: number[] = [];
+      const dugNow: number[] = [];
       this.forVerticesWithin(x, z, r, (gi, gj, d) => {
         const h = this.vertexHeight(this.heights, gi, gj);
         const o = this.vertexHeight(this.original, gi, gj);
@@ -285,61 +338,40 @@ export class Terrain implements GroundQuery {
         if (!(target < h)) return;
         volume += (h - target) * cellArea;
         this.setVertex(gi, gj, target, touched);
-        if (o - target > T.spoilUndugTolM) this.markDug(gi, gj);
+        lowered.push(gj * this.vx + gi);
+        if (o - target > T.spoilUndugTolM && this.markDug(gi, gj, ring)) dugNow.push(gj * this.vx + gi);
       });
+      settled = this.settle(lowered, ring, dugNow, touched);
+      rest = settled;
+      while (rest > SPOIL_SETTLE_EPS_M3) {
+        const s = this.findSpoilPoint(x, z);
+        if (!s) break;
+        const placed = this.deposit(s.x, s.z, rest, touched);
+        spoil.push(s);
+        if (!(placed > 0)) break;
+        rest -= placed;
+      }
     }
     const tiles = [...touched].sort((a, b) => a - b);
     this.refresh(tiles);
-    return { volumeM3: volume, tiles };
+    return { volumeM3: volume, tiles, settledM3: settled, unplacedM3: Math.max(0, rest), spoil };
   }
 
   /**
-   * Adds `volumeM3` of spoil around (x, z) as a mound (an inverted cone of radius digRadiusM, Δh = k·(1 − dist/r)) of
-   * exactly that volume, each vertex capped at original + spoilMaxRiseM: the cone is filled level by level, so capped
-   * vertices pass their share to the others. Never touches an ever-dug vertex or one within spoilSetbackM of one.
-   * Returns the volume actually placed (less than asked only when every eligible vertex is at its cap; the caller
-   * takes the remainder to the next spoil point) and the tiles changed.
+   * Adds `volumeM3` of spoil poured at (x, z), settled at the angle of repose (SIM-fix4; it was §4.13's inverted cone of
+   * radius digRadiusM capped flat at original + spoilMaxRiseM): a pyramid from the vertex nearest (x, z), falling d per
+   * grid step along x and z (so its faces lie at spoilReposeDeg), each vertex filled up to it but never above its spoil
+   * limit (spoilLimitAt: the cap, and the repose slope up from the setback ring), within spoilSlideM (in steps along x
+   * plus z) of the pour; the pyramid's height is solved so the volume is exact. Never touches an ever-dug vertex or one
+   * within spoilSetbackM of one, and pours nothing unless a vertex within digRadiusM of (x, z) may take spoil. Returns
+   * the volume actually placed (less than asked only when the window is full; the caller takes the remainder to the
+   * next spoil point) and the tiles changed.
    */
   raise(x: number, z: number, volumeM3: number): { tiles: number[]; raisedM3: number } {
-    const T = TERRAIN_TUNING;
-    const r = T.digRadiusM;
-    const cellArea = this.spacing * this.spacing;
     const touched = new Set<number>();
-    if (!(volumeM3 > 0) || !(r > 0)) return { tiles: [], raisedM3: 0 };
-    this.syncNearDug();
-    // Eligible vertices in a fixed order (rows of z, then x), with their cone weight and headroom.
-    const cand: { gi: number; gj: number; w: number; cap: number; h: number }[] = [];
-    this.forVerticesWithin(x, z, r, (gi, gj, d) => {
-      if (this.nearDug[gj * this.vx + gi] > 0) return;
-      const h = this.vertexHeight(this.heights, gi, gj);
-      const top = this.spoilCap(gi, gj);
-      if (h >= top) return;
-      cand.push({ gi, gj, w: 1 - d / r, cap: top - h, h });
-    });
-    if (cand.length === 0) return { tiles: [], raisedM3: 0 };
-    // Find k with Σ min(k·w, cap) = volume / cellArea (vertices saturate in order of cap / w).
-    const order = cand.map((_, i) => i).sort((a, b) => cand[a].cap / cand[a].w - cand[b].cap / cand[b].w || a - b);
-    let remaining = volumeM3 / cellArea;
-    let wsum = 0;
-    for (const c of cand) wsum += c.w;
-    let k = Infinity;
-    for (const i of order) {
-      const c = cand[i];
-      const need = remaining / wsum;
-      if (need <= c.cap / c.w) {
-        k = need;
-        break;
-      }
-      remaining -= c.cap;
-      wsum -= c.w;
-    }
-    let raised = 0;
-    for (const c of cand) {
-      const target = Math.fround(c.h + Math.min(k * c.w, c.cap));
-      if (!(target > c.h)) continue;
-      raised += (target - c.h) * cellArea;
-      this.setVertex(c.gi, c.gj, target, touched);
-    }
+    if (!(volumeM3 > 0)) return { tiles: [], raisedM3: 0 };
+    this.syncSpoil();
+    const raised = this.deposit(x, z, volumeM3, touched);
     const tiles = [...touched].sort((a, b) => a - b);
     this.refresh(tiles);
     return { tiles, raisedM3: raised };
@@ -348,11 +380,12 @@ export class Terrain implements GroundQuery {
   /**
    * The spoil point for a dig at (x, z) (§4.13): the first vertex, searching rings `spacing` apart outward from
    * digRadiusM + spoilMinGapM to spoilSearchMaxM, each ring in a fixed angular order from +x toward +z, that has no
-   * ever-dug vertex within spoilSetbackM and lies below original + spoilMaxRiseM. null when none is found.
+   * ever-dug vertex within spoilSetbackM and lies below its spoil limit (spoilLimitAt: original + spoilMaxRiseM, and the
+   * repose slope up from the setback ring, SIM-fix4). null when none is found.
    */
   findSpoilPoint(x: number, z: number): { x: number; z: number } | null {
     const T = TERRAIN_TUNING;
-    this.syncNearDug();
+    this.syncSpoil();
     const r0 = T.digRadiusM + T.spoilMinGapM;
     const rings = Math.floor((T.spoilSearchMaxM - r0) / this.spacing + 1e-9);
     for (let k = 0; k <= rings; k++) {
@@ -363,13 +396,28 @@ export class Terrain implements GroundQuery {
         const gi = Math.round((x + r * Math.cos(th) - this.minX) / this.spacing);
         const gj = Math.round((z + r * Math.sin(th) - this.minZ) / this.spacing);
         if (gi < 0 || gj < 0 || gi >= this.vx || gj >= this.vz) continue;
-        if (this.nearDug[gj * this.vx + gi] > 0) continue;
-        const h = this.vertexHeight(this.heights, gi, gj);
-        if (h >= this.spoilCap(gi, gj)) continue;
+        const v = gj * this.vx + gi;
+        if (this.nearDug[v] > 0) continue;
+        if (!(this.spoilLimit[v] - this.vertexHeight(this.heights, gi, gj) > SPOIL_FULL_EPS_M)) continue;
         return { x: this.minX + gi * this.spacing, z: this.minZ + gj * this.spacing };
       }
     }
     return null;
+  }
+
+  /**
+   * The highest world vertex (gi, gj) may hold spoil (SIM-fix4): its spoil cap, and no more than d (spacing ·
+   * tan(spoilReposeDeg) / √2) per grid step, along x plus along z, above any vertex of the setback ring (within
+   * spoilSetbackM of dug ground: its height, or original − spoilUndugTolM once dug).
+   */
+  spoilLimitAt(gi: number, gj: number): number {
+    this.syncSpoil();
+    return this.spoilLimit[gj * this.vx + gi];
+  }
+
+  /** m: the most two x- or z-neighbouring vertices of spoil may differ by (d = spacing · tan(spoilReposeDeg) / √2). */
+  spoilStepM(): number {
+    return (this.spacing * Math.tan(TERRAIN_TUNING.spoilReposeDeg * DEG)) / Math.SQRT2;
   }
 
   /**
@@ -505,14 +553,19 @@ export class Terrain implements GroundQuery {
     });
   }
 
-  private markDug(gi: number, gj: number): void {
-    if (this.isDugVertex(gi, gj)) return;
+  /**
+   * Marks world vertex (gi, gj) ever-dug; false when it already was. Every vertex this brings within spoilSetbackM of
+   * dug ground for the first time is pushed to `ring` (world index gj·vx + gi).
+   */
+  private markDug(gi: number, gj: number, ring?: number[]): boolean {
+    if (this.isDugVertex(gi, gj)) return false;
     // (Synced before the mark: a rebuild after it would count this vertex twice.)
     this.syncNearDug();
     this.forEachCopy(gi, gj, (t, i) => {
       this.dug[t][i] = 1;
     });
-    this.addNearDug(gi, gj, 1);
+    this.addNearDug(gi, gj, 1, ring);
+    return true;
   }
 
   /** Vertices within `r` (strictly) of (x, z), rows of z then x, with their distance. */
@@ -530,14 +583,21 @@ export class Terrain implements GroundQuery {
     }
   }
 
-  /** Adds `delta` to the near-dug count of every vertex within spoilSetbackM (inclusive) of (gi, gj). */
-  private addNearDug(gi: number, gj: number, delta: number): void {
+  /**
+   * Adds `delta` to the near-dug count of every vertex within spoilSetbackM (inclusive) of (gi, gj); a vertex whose
+   * count leaves 0 is pushed to `ring`.
+   */
+  private addNearDug(gi: number, gj: number, delta: number, ring?: number[]): void {
     const s = this.spacing;
     const R = this.nearDugSetback;
     const k = Math.ceil(R / s);
     for (let b = Math.max(0, gj - k); b <= Math.min(this.vz - 1, gj + k); b++) {
       for (let a = Math.max(0, gi - k); a <= Math.min(this.vx - 1, gi + k); a++) {
-        if (Math.hypot((a - gi) * s, (b - gj) * s) <= R + 1e-9) this.nearDug[b * this.vx + a] += delta;
+        if (Math.hypot((a - gi) * s, (b - gj) * s) <= R + 1e-9) {
+          const v = b * this.vx + a;
+          if (ring && delta > 0 && this.nearDug[v] === 0) ring.push(v);
+          this.nearDug[v] += delta;
+        }
       }
     }
   }
@@ -551,5 +611,226 @@ export class Terrain implements GroundQuery {
     this.nearDug.fill(0);
     this.nearDugSetback = TERRAIN_TUNING.spoilSetbackM;
     for (let gj = 0; gj < this.vz; gj++) for (let gi = 0; gi < this.vx; gi++) if (this.isDugVertex(gi, gj)) this.addNearDug(gi, gj, 1);
+  }
+
+  // -------------------------------------------------------------------------
+  // The angle of repose (SIM-fix4)
+  // -------------------------------------------------------------------------
+
+  /** The near-dug field and the spoil limit, rebuilt from the heights and the dug mask if stale or retuned. */
+  private syncSpoil(): void {
+    this.syncNearDug();
+    const T = TERRAIN_TUNING;
+    const key = `${T.spoilSetbackM}|${T.spoilMaxRiseM}|${T.spoilReposeDeg}|${T.spoilUndugTolM}`;
+    if (key !== this.spoilKey) this.rebuildSpoilLimit(key);
+  }
+
+  /** What a setback-ring vertex holds the spoil limit down to: its height, or original − spoilUndugTolM once dug. */
+  private ringSource(gi: number, gj: number): number {
+    return this.isDugVertex(gi, gj) ? this.vertexHeight(this.original, gi, gj) - TERRAIN_TUNING.spoilUndugTolM : this.vertexHeight(this.heights, gi, gj);
+  }
+
+  /**
+   * The spoil limit from scratch: every vertex's spoil cap, every ring vertex's source, then min(·, neighbour + d) swept
+   * along each row both ways and each column both ways (the exact 4-neighbour distance transform). It equals what the
+   * live updates (settle) keep, value for value: the ring's sources only ever fall, and both are the least, over every
+   * cap and source, of that value with d added once per grid step (so a reloaded world finds the same spoil points).
+   */
+  private rebuildSpoilLimit(key: string): void {
+    const E = this.spoilLimit;
+    const vx = this.vx;
+    const vz = this.vz;
+    const d = this.spoilStepM();
+    for (let gj = 0; gj < vz; gj++) {
+      for (let gi = 0; gi < vx; gi++) {
+        const v = gj * vx + gi;
+        let e = this.spoilCap(gi, gj);
+        if (this.nearDug[v] > 0) e = Math.min(e, this.ringSource(gi, gj));
+        E[v] = e;
+      }
+    }
+    for (let gj = 0; gj < vz; gj++) {
+      const row = gj * vx;
+      for (let gi = 1; gi < vx; gi++) E[row + gi] = Math.min(E[row + gi], E[row + gi - 1] + d);
+      for (let gi = vx - 2; gi >= 0; gi--) E[row + gi] = Math.min(E[row + gi], E[row + gi + 1] + d);
+    }
+    for (let gi = 0; gi < vx; gi++) {
+      for (let gj = 1; gj < vz; gj++) E[gj * vx + gi] = Math.min(E[gj * vx + gi], E[(gj - 1) * vx + gi] + d);
+      for (let gj = vz - 2; gj >= 0; gj--) E[gj * vx + gi] = Math.min(E[gj * vx + gi], E[(gj + 1) * vx + gi] + d);
+    }
+    this.spoilKey = key;
+  }
+
+  /** Calls fn with the in-terrain x- and z-neighbours of world vertex v (by world index), in a fixed order. */
+  private forNeighbours(v: number, fn: (n: number, gi: number, gj: number) => void): void {
+    const gi = v % this.vx;
+    const gj = (v - gi) / this.vx;
+    if (gi > 0) fn(v - 1, gi - 1, gj);
+    if (gi < this.vx - 1) fn(v + 1, gi + 1, gj);
+    if (gj > 0) fn(v - this.vx, gi, gj - 1);
+    if (gj < this.vz - 1) fn(v + this.vx, gi, gj + 1);
+  }
+
+  /**
+   * After a dig (lower): the setback ring's new vertices give up their spoil; the ring's new, lowered and newly dug
+   * vertices lower the spoil limit around them, and spoil now above it is cut down to it; spoil beside a lowered vertex
+   * outside the ring (a scoop into a heap) is cut to d per step above it. Returns the volume taken off (for lower to
+   * pour again).
+   */
+  private settle(lowered: readonly number[], ring: readonly number[], dugNow: readonly number[], touched: Set<number>): number {
+    const vx = this.vx;
+    const E = this.spoilLimit;
+    const d = this.spoilStepM();
+    let vol = 0;
+    // 1. The ring holds no spoil.
+    for (const v of ring) {
+      const gi = v % vx;
+      const gj = (v - gi) / vx;
+      if (this.isDugVertex(gi, gj)) continue;
+      vol += this.cutTo(gi, gj, -Infinity, touched);
+    }
+    // 2. The limit falls around the ring's changed vertices; spoil above it is cut.
+    const queue: number[] = [];
+    const source = (v: number): void => {
+      if (this.nearDug[v] === 0) return;
+      const gi = v % vx;
+      const s = this.ringSource(gi, (v - gi) / vx);
+      if (s < E[v]) {
+        E[v] = s;
+        queue.push(v);
+      }
+    };
+    for (const v of ring) source(v);
+    for (const v of lowered) source(v);
+    for (const v of dugNow) source(v);
+    for (let q = 0; q < queue.length; q++) {
+      const c = E[queue[q]] + d;
+      this.forNeighbours(queue[q], (n, gi, gj) => {
+        if (!(c < E[n])) return;
+        E[n] = c;
+        queue.push(n);
+        if (this.nearDug[n] === 0) vol += this.cutTo(gi, gj, c, touched);
+      });
+    }
+    // 3. Spoil left over-steep by the dig's own hole outside the ring.
+    const cut = lowered.filter((v) => this.nearDug[v] === 0);
+    for (let q = 0; q < cut.length; q++) {
+      const u = cut[q];
+      const ui = u % vx;
+      const c = this.vertexHeight(this.heights, ui, (u - ui) / vx) + d;
+      this.forNeighbours(u, (n, gi, gj) => {
+        if (this.nearDug[n] !== 0) return;
+        const dv = this.cutTo(gi, gj, c, touched);
+        if (dv > 0) {
+          vol += dv;
+          cut.push(n);
+        }
+      });
+    }
+    return vol;
+  }
+
+  /** Cuts world vertex (gi, gj) down to `top`, never below its original height: the volume taken off. */
+  private cutTo(gi: number, gj: number, top: number, touched: Set<number>): number {
+    const h = this.vertexHeight(this.heights, gi, gj);
+    const t = Math.fround(Math.max(this.vertexHeight(this.original, gi, gj), top));
+    if (!(h > t + SPOIL_FULL_EPS_M)) return 0;
+    this.setVertex(gi, gj, t, touched);
+    return (h - t) * this.spacing * this.spacing;
+  }
+
+  /**
+   * raise's pour (the heights only; the caller refreshes the tiles): see raise. The pyramid of apex height H over the
+   * vertex nearest (x, z) fills an open vertex v (outside the ring, below its limit E) at m grid steps to min(E, H − d·m),
+   * which is Σ clamp(H − a, 0, E − h) with a = h + d·m: piecewise linear in H, solved by a sweep over the sorted a and
+   * E + d·m. H is held so the pyramid meets the ground no later than the window's edge (an open vertex just outside
+   * it), so no step forms there.
+   */
+  private deposit(x: number, z: number, volumeM3: number, touched: Set<number>): number {
+    const T = TERRAIN_TUNING;
+    const sp = this.spacing;
+    const cellArea = sp * sp;
+    const E = this.spoilLimit;
+    const vx = this.vx;
+    const d = this.spoilStepM();
+    if (!(volumeM3 > 0) || !(d > 0)) return 0;
+    let open = false;
+    this.forVerticesWithin(x, z, T.digRadiusM, (gi, gj) => {
+      const v = gj * vx + gi;
+      if (!open && this.nearDug[v] === 0 && E[v] - this.vertexHeight(this.heights, gi, gj) > SPOIL_FULL_EPS_M) open = true;
+    });
+    if (!open) return 0;
+    const c = this.vertexIndex(x, z);
+    // The window reaches at least as far as a full-height mound's flank (a numerical floor, so a short spoilSlideM can't
+    // stop a pour at an open spoil point).
+    const K = Math.max(1, Math.round(T.spoilSlideM / sp), Math.ceil(T.spoilMaxRiseM / d) + 1);
+    const cgi: number[] = [];
+    const cgj: number[] = [];
+    const ch: number[] = [];
+    const ca: number[] = [];
+    const cb: number[] = [];
+    let hHi = Infinity;
+    for (let dj = -(K + 1); dj <= K + 1; dj++) {
+      const gj = c.gj + dj;
+      if (gj < 0 || gj >= this.vz) continue;
+      const w = K + 1 - Math.abs(dj);
+      for (let di = -w; di <= w; di++) {
+        const gi = c.gi + di;
+        if (gi < 0 || gi >= vx) continue;
+        const v = gj * vx + gi;
+        if (this.nearDug[v] > 0) continue;
+        const h = this.vertexHeight(this.heights, gi, gj);
+        if (!(E[v] - h > SPOIL_FULL_EPS_M)) continue;
+        const m = Math.abs(di) + Math.abs(dj);
+        if (m > K) {
+          hHi = Math.min(hHi, h + d * m);
+          continue;
+        }
+        cgi.push(gi);
+        cgj.push(gj);
+        ch.push(h);
+        ca.push(h + d * m);
+        cb.push(E[v] + d * m);
+      }
+    }
+    const n = ca.length;
+    if (n === 0) return 0;
+    const val = new Float64Array(2 * n);
+    const del = new Int8Array(2 * n);
+    for (let i = 0; i < n; i++) {
+      val[2 * i] = ca[i];
+      del[2 * i] = 1;
+      val[2 * i + 1] = cb[i];
+      del[2 * i + 1] = -1;
+    }
+    const order = Array.from({ length: 2 * n }, (_, i) => i).sort((p, q) => val[p] - val[q] || p - q);
+    const target = volumeM3 / cellArea;
+    let f = 0;
+    let slope = 0;
+    let H = -Infinity;
+    for (const k of order) {
+      const at = Math.min(val[k], hHi);
+      if (slope > 0) {
+        const fn = f + slope * (at - H);
+        if (fn >= target) {
+          H += (target - f) / slope;
+          break;
+        }
+        f = fn;
+      }
+      H = at;
+      if (val[k] >= hHi) break;
+      slope += del[k];
+    }
+    let raised = 0;
+    for (let i = 0; i < n; i++) {
+      const add = Math.min(Math.max(H - ca[i], 0), cb[i] - ca[i]);
+      if (!(add > 0)) continue;
+      const t = Math.fround(ch[i] + add);
+      if (!(t > ch[i])) continue;
+      raised += (t - ch[i]) * cellArea;
+      this.setVertex(cgi[i], cgj[i], t, touched);
+    }
+    return raised;
   }
 }
