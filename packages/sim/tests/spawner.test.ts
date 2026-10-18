@@ -9,6 +9,7 @@
 // Spawner.init; the Clearing scenes are the real generated Clearing. Scene numbers (positions, seeds) are test
 // constants, never tuning (§9); expected values come from the tuning tables.
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { YIELD_TICKS, yieldToVitest } from './support/yieldToVitest';
 import { loadWorld } from '../src/save/load';
 import { serializeWorld } from '../src/save/serialize';
 import type { CombatEvent } from '../src/sim/combat';
@@ -49,9 +50,10 @@ beforeAll(async () => {
   await physicsReady();
 });
 
-afterEach(() => {
+afterEach(async () => {
   for (const w of live.splice(0)) w.dispose();
   resetTuning();
+  await yieldToVitest();
 });
 
 /** A dev command for the next tick, from player 1. */
@@ -61,15 +63,21 @@ function dev(w: World, op: DevOp, args: number[] = []): void {
 }
 
 /** Steps `n` ticks; the combat events of every tick. */
-function run(w: World, n: number): CombatEvent[] {
+async function run(w: World, n: number): Promise<CombatEvent[]> {
   const out: CombatEvent[] = [];
-  for (let i = 0; i < n; i++) out.push(...w.step().combat);
+  for (let i = 0; i < n; i++) {
+    out.push(...w.step().combat);
+    if ((i + 1) % YIELD_TICKS === 0) await yieldToVitest();
+  }
   return out;
 }
 
 /** Steps until tick `t` has run. */
-function runTo(w: World, t: number): void {
-  while (w.tick < t) w.step();
+async function runTo(w: World, t: number): Promise<void> {
+  while (w.tick < t) {
+    w.step();
+    if (w.tick % YIELD_TICKS === 0) await yieldToVitest();
+  }
 }
 
 const byId = (w: World, id: number | null): Fighter | undefined => (id === null ? undefined : w.combat.fighters.find((f) => f.id === id));
@@ -136,7 +144,7 @@ describe('the Clearing populates itself (§6.6, §6.7)', () => {
     expect(small.combat.fighters.map((f) => f.id)).toEqual([1]);
     expect(small.spawner.slots().homes).toEqual(homes.map(() => ({ fighter: null, respawnTick: -1 })));
     // An empty slot never respawns.
-    run(small, 5);
+    await run(small, 5);
     expect(small.spawner.slots().homes).toEqual(homes.map(() => ({ fighter: null, respawnTick: -1 })));
   });
 });
@@ -153,19 +161,19 @@ describe('respawn (§6.6)', () => {
     const [a1] = apes(w);
     expect(flat(a1.pos, home)).toBeLessThan(0.01);
     expect(flat(w.player!.pos, home)).toBeGreaterThan(A.respawnMinPlayerDistM);
-    run(w, 30);
+    await run(w, 30);
     dev(w, 'killCreature', [a1.id]);
-    run(w, 1);
+    await run(w, 1);
     const ko = w.tick;
     expect(a1.alive).toBe(false);
     const due = ko + secs(A.respawnS);
     expect(secs(A.respawnS)).toBe(18000);
     expect(w.spawner.slots().homes).toEqual([{ fighter: null, respawnTick: due }]);
-    runTo(w, due - 1);
+    await runTo(w, due - 1);
     expect(apes(w).filter((f) => f.alive)).toEqual([]);
     // The corpse went its own way (Deaths: corpseDespawnS, no player near) long before.
     expect(byId(w, a1.id)).toBeUndefined();
-    run(w, 1);
+    await run(w, 1);
     const [a2] = apes(w);
     expect(a2.alive).toBe(true);
     expect(a2.id).toBeGreaterThan(a1.id);
@@ -182,24 +190,24 @@ describe('respawn (§6.6)', () => {
     const [a1] = apes(w);
     dev(w, 'pauseMinds', [1]);
     dev(w, 'killCreature', [a1.id]);
-    run(w, 1);
+    await run(w, 1);
     const due = w.tick + secs(A.respawnS);
     // The player stands 35 m from the home when it is due (and well before).
     dev(w, 'teleport', [1500, 0]);
-    runTo(w, due);
+    await runTo(w, due);
     expect(flat(w.player!.pos, home)).toBeLessThanOrEqual(A.respawnMinPlayerDistM);
     expect(apes(w).filter((f) => f.alive)).toEqual([]);
     const retry = due + secs(A.respawnRetryS);
     expect(w.spawner.slots().homes).toEqual([{ fighter: null, respawnTick: retry }]);
     // Still there at the retry: again 10 s later.
-    runTo(w, retry);
+    await runTo(w, retry);
     expect(apes(w).filter((f) => f.alive)).toEqual([]);
     expect(w.spawner.slots().homes).toEqual([{ fighter: null, respawnTick: retry + secs(A.respawnRetryS) }]);
     // Gone (41 m away) by the next retry: the ape is back at that tick, not before.
     dev(w, 'teleport', [900, 0]);
-    runTo(w, retry + secs(A.respawnRetryS) - 1);
+    await runTo(w, retry + secs(A.respawnRetryS) - 1);
     expect(apes(w).filter((f) => f.alive)).toEqual([]);
-    run(w, 1);
+    await run(w, 1);
     const back = apes(w).filter((f) => f.alive);
     expect(back).toHaveLength(1);
     expect(flat(back[0].pos, home)).toBeLessThan(0.01);
@@ -212,11 +220,11 @@ describe('respawn (§6.6)', () => {
     const [g] = giants(w);
     expect(flat(g.pos, lair)).toBeLessThan(0.01);
     expect((w.minds.get(g) as RulerMind).lair).toEqual(lair);
-    run(w, 30);
+    await run(w, 30);
     dev(w, 'killCreature', [g.id]);
-    run(w, 1);
+    await run(w, 1);
     expect(g.alive).toBe(false);
-    runTo(w, w.tick + secs(A.respawnS) + secs(A.respawnRetryS) + 60);
+    await runTo(w, w.tick + secs(A.respawnS) + secs(A.respawnRetryS) + 60);
     expect(giants(w)).toEqual([g]);
     expect(w.combat.fighters.map((f) => f.id)).toEqual([1, g.id]);
   });
@@ -249,6 +257,7 @@ describe('the sparring ape (?mode=training, D-50)', () => {
     for (let t = 0; t < secs(10); t++) {
       evs.push(...w.step().combat);
       if (f.state === 'attack' && f.sinceMoveStart === 0) swings++;
+      if ((t + 1) % YIELD_TICKS === 0) await yieldToVitest();
     }
     expect(mind.state).toBe('fight');
     expect(swings).toBeGreaterThan(1);
@@ -262,14 +271,14 @@ describe('the sparring ape (?mode=training, D-50)', () => {
     // The player turned and moved since: the new one comes in front of where the player is now.
     dev(w, 'teleport', [300, -200]);
     dev(w, 'killCreature', [first.id]);
-    run(w, 1);
+    await run(w, 1);
     const ko = w.tick;
     expect(first.alive).toBe(false);
     const due = ko + secs(A.sparringRespawnS);
     expect(w.spawner.slots().sparring).toEqual({ fighter: first.id, respawnTick: due });
-    runTo(w, due - 1);
+    await runTo(w, due - 1);
     expect(byId(w, first.id)).toBe(first);
-    run(w, 1);
+    await run(w, 1);
     expect(byId(w, first.id)).toBeUndefined();
     const sp = w.spawner.slots().sparring;
     const next = byId(w, sp.fighter)!;
@@ -300,10 +309,10 @@ describe("the spawner's record (§6.8)", () => {
     expect(flat(w.player!.pos, home)).toBeGreaterThan(A.respawnMinPlayerDistM);
     const homeApe = apes(w)[homeIdx];
     const sparring = byId(w, w.spawner.slots().sparring.fighter)!;
-    run(w, 20);
+    await run(w, 20);
     dev(w, 'killCreature', [homeApe.id]);
     dev(w, 'killCreature', [sparring.id]);
-    run(w, 10);
+    await run(w, 10);
     const slots = w.spawner.slots();
     const homeDue = slots.homes[homeIdx].respawnTick;
     expect(slots.homes[homeIdx]).toEqual({ fighter: null, respawnTick: w.tick - 9 + secs(2) });
@@ -317,9 +326,9 @@ describe("the spawner's record (§6.8)", () => {
     for (const k of Object.keys(a)) if (!['bodies', 'contactGrace', 'navDirty'].includes(k)) expect(JSON.stringify(b[k]), k).toBe(JSON.stringify(a[k]));
     // Both bring the home ape back at its home on its tick (and the sparring ape at its own), as the same new fighters.
     for (const x of [w, l]) {
-      runTo(x, homeDue - 1);
+      await runTo(x, homeDue - 1);
       expect(x.spawner.slots().homes[homeIdx].fighter).toBeNull();
-      run(x, 1);
+      await run(x, 1);
     }
     expect(l.spawner.toRecord()).toEqual(w.spawner.toRecord());
     for (const x of [w, l]) {
@@ -327,7 +336,7 @@ describe("the spawner's record (§6.8)", () => {
       expect(back.alive).toBe(true);
       expect(flat(back.pos, home)).toBeLessThan(0.01);
       expect((x.minds.get(back) as ApeMind).homeIdx).toBe(homeIdx);
-      runTo(x, slots.sparring.respawnTick);
+      await runTo(x, slots.sparring.respawnTick);
       expect(byId(x, sparring.id)).toBeUndefined();
       expect(byId(x, x.spawner.slots().sparring.fighter)?.alive).toBe(true);
     }

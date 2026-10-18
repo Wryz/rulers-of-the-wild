@@ -20,6 +20,7 @@
 //
 // Rule 1: a helper moves the player or a creature; it never places harm. Scenes (scenes.ts) are built only from the
 // factory and `verb`, which the harness test checks by reading scenes.ts.
+import { yieldToVitest } from './yieldToVitest';
 import RAPIER from '@dimforge/rapier3d-compat';
 import { bodyStateBytes } from '../../src/save/bodyState';
 import { loadWorld } from '../../src/save/load';
@@ -115,6 +116,8 @@ export interface Harness {
   dragTo(entity: number, to: XZ, o?: { tolM?: number; tryOnly?: boolean }): boolean;
   strikeAt(target: number | V3, button: Button, n: number): { combat: CombatEvent[]; world: WorldEvent[] };
   digPit(o: DigPitOptions): DigPitResult;
+  /** The same planner, yielding between strikes to keep Vitest RPC responsive. */
+  digPitAsync(o: DigPitOptions): Promise<DigPitResult>;
   chopTo(tree: number, remaining: number): { chops: number; swings: number };
   pull(onTicks: number): { combat: CombatEvent[]; world: WorldEvent[] };
   reelIn(joint: number, leaveSlackM: number, o?: { maxTicks?: number }): number;
@@ -889,7 +892,20 @@ class WorldHarness implements Harness {
   // -------------------------------------------------------------------------
 
   digPit(o: DigPitOptions): DigPitResult {
-    return digPitPlanner(this, o);
+    const planner = digPitPlanner(this, o);
+    let next = planner.next();
+    while (!next.done) next = planner.next();
+    return next.value;
+  }
+
+  async digPitAsync(o: DigPitOptions): Promise<DigPitResult> {
+    const planner = digPitPlanner(this, o);
+    let next = planner.next();
+    while (!next.done) {
+      await yieldToVitest();
+      next = planner.next();
+    }
+    return next.value;
   }
 
   // -------------------------------------------------------------------------
@@ -1030,7 +1046,7 @@ interface Centre {
   abandoned: boolean;
 }
 
-function digPitPlanner(h: WorldHarness, o: DigPitOptions): DigPitResult {
+function* digPitPlanner(h: WorldHarness, o: DigPitOptions): Generator<void, DigPitResult> {
   const w = h.w;
   const t = w.terrain;
   const P = DIG_PLAN;
@@ -1266,7 +1282,10 @@ function digPitPlanner(h: WorldHarness, o: DigPitOptions): DigPitResult {
       if (!seeds.includes(best)) seeds.push(best);
     }
   }
-  for (const c of serpentine(seeds, false)) strike(c);
+  for (const c of serpentine(seeds, false)) {
+    strike(c);
+    yield;
+  }
   stats.layers.push(strikes);
 
   // Then layers of layerM, each dug in passes as the RT lab's kernel strikes: every centre still above the layer's
@@ -1290,6 +1309,7 @@ function digPitPlanner(h: WorldHarness, o: DigPitOptions): DigPitResult {
       for (const c of serpentine(centres, (k + pass) % 2 === 1)) {
         if (excessOf(c, floor) <= tolOf(c)) continue;
         if (strike(c)) struck++;
+        yield;
       }
       stats.layers.push(strikes);
       lastStruck = struck;

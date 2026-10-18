@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { yieldToVitest } from './support/yieldToVitest';
 import { toCm } from '../src/sim/commands';
 import { WEAPONS } from '../src/sim/weapons';
 import { rulerDamage } from '../src/sim/ruler';
@@ -30,8 +31,9 @@ async function make(seed = 11, size = 40): Promise<Harness> {
   return h;
 }
 
-afterEach(() => {
+afterEach(async () => {
   for (const h of live.splice(0)) h.w.dispose();
+  await yieldToVitest();
 });
 
 const flat = (a: { x: number; z: number }, b: { x: number; z: number }): number => Math.hypot(a.x - b.x, a.z - b.z);
@@ -461,13 +463,6 @@ function sceneViolations(src: string): string[] {
   return out;
 }
 
-/**
- * A macrotask turn for the worker's event loop. The planner and furnish tests each run about 30 s of synchronous sim;
- * back to back (Vitest moves between tests by microtasks) they starve Vitest's RPC past its 60 s timeout ("Timeout
- * calling onTaskUpdate"), so each starts by letting the loop turn.
- */
-const yieldToVitest = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
-
 /** The small pit the planner test digs (its save bytes, for the furnishPit test after it). */
 const SMALL_PIT = { lengthX: 3, widthZ: 2, depth: 1.5 } as const;
 let smallPitDug: Uint8Array | null = null;
@@ -487,7 +482,7 @@ describe('the dig planner (§11.0)', () => {
       // kernel's strikes, and 88 ticks a strike plus 24,000.
       const maxStrikes = Math.ceil(PLANNER_CAP.strikesPerKernel * kernel);
       const maxTicks = Math.ceil(PLANNER_CAP.ticksPerStrike * maxStrikes + PLANNER_CAP.walkTicks);
-      const r = h.digPit({ centre: { x: 0, z: 0 }, ...pit, maxTicks, maxStrikes, pileSides: 'z' });
+      const r = await h.digPitAsync({ centre: { x: 0, z: 0 }, ...pit, maxTicks, maxStrikes, pileSides: 'z' });
       console.info(`dig ${pit.lengthX}×${pit.widthZ}×${pit.depth}: ${JSON.stringify(r)}; kernel ${kernel}, caps ${maxStrikes} strikes / ${maxTicks} ticks`);
       expect(r.strikes).toBeLessThanOrEqual(maxStrikes);
       expect(r.ticks).toBeLessThanOrEqual(maxTicks);
