@@ -13,10 +13,11 @@ import { CLEARING_TUNING } from '../src/world/clearing';
 import { GIVE_TOOLS } from '../src/world/devOps';
 import { heldMembers } from '../src/world/verbs/tools';
 import { resetTuning } from '../src/tuning/registry';
-import { BREAK_TUNING, settlePieces } from '../src/world/breaking';
-import { spawnLog, spawnStick } from '../src/world/factory';
+import { BREAK_TUNING, isRapierError, settlePieces } from '../src/world/breaking';
+import { spawnLog, spawnStarterAxe, spawnStick } from '../src/world/factory';
 import { physicsReady } from '../src/world/physics';
-import { colliderDesc, crossCut, cylinderPoints, principalAxis, rapierHullOk, shapeVolume } from '../src/world/shapes';
+import { colliderDesc, crossCut, cylinderPoints, principalAxis, rapierHullOk, roundCylinderR, shapeVolume } from '../src/world/shapes';
+import { queryShape } from '../src/world/queries';
 import { breakEnergyJ, MATERIALS } from '../src/world/materials';
 import type { Shape, V3 } from '../src/world/types';
 import { planPlace, shrinkShape } from '../src/world/verbs/place';
@@ -134,6 +135,14 @@ describe('bug 1: shrinkShape on a thin bearer', () => {
       expect(() => w.queries.castShape(s, { ...pose, p: { x: 0, y: 1, z: 3 } }, { x: 0, y: -1, z: 0 }, 2, { terrain: true, entities: 'all' })).not.toThrow();
       expect(w.queries.castShape(s, { ...pose, p: { x: 0, y: 1, z: 3 } }, { x: 0, y: -1, z: 0 }, 2, { terrain: true, entities: 'all' })?.owner).toEqual({ kind: 'entity', id: stick });
     }
+    // Every round stand-in for the needle has its volume: the query's (and the client mirror's) radius is colliderDesc's.
+    const qs = queryShape(needle);
+    expect(qs.shape).toBeInstanceOf(RAPIER.Cylinder);
+    const round = qs.shape as RAPIER.Cylinder;
+    expect(round.radius).toBeCloseTo(roundCylinderR(needle as { r: number; sides: number }), 12);
+    expect(Math.PI * round.radius ** 2 * 2 * round.halfHeight).toBeCloseTo(shapeVolume(needle), 12);
+    // rapierHullOk is asked once per shape object (cached), with the same answer.
+    expect(rapierHullOk(needle)).toBe(rapierHullOk(needle));
     expect(() => colliderDesc(sliver, MATERIALS.dryWood)).toThrow(/could not build a convex hull/);
     // A needle prism collides as Rapier's round cylinder: it can be an entity.
     expect(() => colliderDesc(needle, MATERIALS.dryWood)).not.toThrow();
@@ -285,6 +294,11 @@ describe('bug 5: teleport with a yaw', () => {
     w.commands.push(tele(w, [0, 200, p.id, 192]));
     w.step();
     expect(angleOff(p.yaw, -Math.PI / 2)).toBeLessThan(0.05);
+    // The 3-argument form is unchanged: id 0 is no fighter there, so nothing moves.
+    const at0 = { ...p.pos };
+    w.commands.push(tele(w, [700, 700, 0]));
+    w.step();
+    expect(Math.hypot(p.pos.x - at0.x, p.pos.z - at0.z)).toBeLessThan(0.01);
     // No such fighter: nothing happens; a negative id is malformed.
     const at = { ...p.pos };
     w.commands.push(tele(w, [900, 900, 999, 0]));
@@ -379,29 +393,59 @@ describe('bug 2: Breaking.split and zero-volume pieces', () => {
     expect(massOf(w, brk!.pieces)).toBeCloseTo(mass, 6);
   });
 
-  it('a piece the entity store still refuses is never an exception out of World.step: the parent comes back whole', async () => {
+  /** The stone axe (handle lashed to the flint head): the handle, its lash joint, and the store's create made to fail. */
+  async function axeWithFailingCreate(fail: () => Error): Promise<{ w: World; stick: number; joint: number }> {
     const w = await make(202);
-    const id = spawnLog(w, { p: { x: 0, y: 0.3, z: 3 }, length: 3, r: 0.15 });
-    w.step();
-    const e = w.entities.get(id)!;
+    const axe = spawnStarterAxe(w, { x: 0, y: 0, z: 3 });
+    run(w, 5);
     const create = w.entities.create.bind(w.entities);
     let calls = 0;
     vi.spyOn(w.entities, 'create').mockImplementation((spec, credit) => {
-      if (++calls === 2) throw new Error('expected instance of p');
+      if (++calls === 2) throw fail();
       return create(spec, credit);
     });
-    const before = w.entities.all().length;
+    return { w, stick: axe.stick, joint: axe.joint };
+  }
+
+  it('a piece Rapier fails to make is no exception out of World.step: the parent is kept as it was, and breakFailed says so', async () => {
+    const { w, stick, joint } = await axeWithFailingCreate(() => new Error('expected instance of p'));
+    const e = w.entities.get(stick)!;
+    const shape = e.shape;
+    const before = w.entities.all().map((x) => x.id);
     w.breaking.hit(e, 5 * breakEnergyJ(MATERIALS[e.material], e.mass), e.pose.p, null);
     expect(() => w.step()).not.toThrow();
     vi.restoreAllMocks();
-    // Nothing half-made: no stray first piece; the break made one piece of the parent's whole shape and mass.
-    const brk = breakOf(w, id);
-    expect(brk!.pieces.length).toBe(1);
-    const whole = w.entities.get(brk!.pieces[0])!;
-    expect(whole.shape).toEqual(e.shape);
-    expect(whole.mass).toBeCloseTo(e.mass, 9);
-    expect(whole.integrity).toBe(1);
-    expect(w.entities.all().length).toBe(before);
+    // The same entity, whole, its lashing still on; no stray piece, and no break, spawn or remove event for it.
+    expect(w.entities.get(stick)).toBe(e);
+    expect(e.shape).toBe(shape);
+    expect(e.integrity).toBe(1);
+    expect(w.joints.get(joint)).toBeDefined();
+    expect(e.joints).toContain(joint);
+    expect(w.entities.all().map((x) => x.id)).toEqual(before);
+    expect(breakOf(w, stick)).toBeNull();
+    expect(w.events.some((x) => x.type === 'spawn' || x.type === 'remove')).toBe(false);
+    expect(w.events).toContainEqual({ type: 'breakFailed', entity: stick, stage: 'pieces', kept: true, error: 'expected instance of p' });
     expect(() => run(w, 30)).not.toThrow();
+  });
+
+  it('any other error in a break is a bug: it is rethrown, never swallowed', async () => {
+    const { w, stick } = await axeWithFailingCreate(() => new TypeError('a bug'));
+    const e = w.entities.get(stick)!;
+    w.breaking.hit(e, 5 * breakEnergyJ(MATERIALS[e.material], e.mass), e.pose.p, null);
+    expect(() => w.step()).toThrow('a bug');
+    expect(isRapierError(new TypeError('a bug'))).toBe(false);
+    expect(isRapierError(new Error('expected instance of RawShape'))).toBe(true);
+  });
+
+  it('a split that succeeds keeps the event order it always had: joint events, remove, the spawns, break', async () => {
+    const w = await make(202);
+    const axe = spawnStarterAxe(w, { x: 0, y: 0, z: 3 });
+    run(w, 5);
+    const e = w.entities.get(axe.stick)!;
+    w.breaking.hit(e, 5 * breakEnergyJ(MATERIALS[e.material], e.mass), e.pose.p, null);
+    w.step();
+    const brk = breakOf(w, axe.stick)!;
+    const kinds = w.events.filter((x) => (x.type === 'joint' && x.joint === axe.joint) || (x.type === 'remove' && x.entity === axe.stick) || (x.type === 'spawn' && brk.pieces.includes(x.entity)) || x === brk).map((x) => x.type);
+    expect(kinds).toEqual(['joint', 'remove', ...brk.pieces.map(() => 'spawn'), 'break']);
   });
 });

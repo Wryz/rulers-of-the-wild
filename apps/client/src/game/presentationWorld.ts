@@ -20,6 +20,7 @@ import {
   BONES,
   type BoneName,
   cylinderPoints,
+  roundCylinderR,
   defineTuning,
   DT,
   type Entity,
@@ -611,7 +612,7 @@ export class PresentationWorld implements PresentationPort, BodyFallSource {
       // hull of is its round cylinder, as the sim's colliderDesc builds it; such a hull gets no mirror.
       case 'cylinder': {
         const pts = new Float32Array(cylinderPoints(s));
-        return this.hullBuilds(pts) ? C.convexHull(pts) : C.cylinder(s.halfHeight, s.r);
+        return this.hullBuilds(pts) ? C.convexHull(pts) : C.cylinder(s.halfHeight, roundCylinderR(s));
       }
       case 'hull': {
         const pts = new Float32Array(s.points);

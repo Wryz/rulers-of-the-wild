@@ -657,6 +657,11 @@ export type WorldEvent =
   | { type: 'land'; entity: number | null; f: Fighter | null; point: V3; energy: number; mass: number }
   | { type: 'break'; entity: number; pieces: number[]; point: V3; energy: number }
   /**
+   * SIM-fix3: a break Rapier failed (a WASM error making a piece, or releasing or removing the parent): `stage` says
+   * where, `kept` whether the entity is still there (whole, integrity 1). A diagnostic for the harness and the dev panel.
+   */
+  | { type: 'breakFailed'; entity: number; stage: 'pieces' | 'split'; kept: boolean; error: string }
+  /**
    * point: the middle of the joint's anchors when it happened (a snapped joint is gone by phase 17b, so listeners read
    * the point here).
    */

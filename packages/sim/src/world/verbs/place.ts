@@ -202,6 +202,10 @@ export function shrinkShape(s: Shape, m: number): Shape {
         lo = v(Math.min(lo.x, p.x), Math.min(lo.y, p.y), Math.min(lo.z, p.z));
         hi = v(Math.max(hi.x, p.x), Math.max(hi.y, p.y), Math.max(hi.z, p.z));
       }
+      // The least half-extent of the local axis-aligned bounds. A hull thin along a diagonal (a sliver lying across
+      // the axes) has fat bounds, so this overestimates its thin side and the clamp may let it shrink too far; the
+      // rapierHullOk fallback below still catches a result Rapier can't build. Every M1 hull is a prism's or a
+      // fracture's, built along its local axes.
       const k = pts.length ? room(Math.min(hi.x - lo.x, hi.y - lo.y, hi.z - lo.z) / 2) : 0;
       const flat: number[] = [];
       for (const p of pts) {

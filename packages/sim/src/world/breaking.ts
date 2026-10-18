@@ -114,12 +114,16 @@ export class Breaking {
     for (const e of now) {
       if (w.entities.get(e.id) !== e) continue;
       const p = this.pending.get(e.id) ?? { kind: 'impact' as const, energy: 0, ratio: 1, point: { ...e.pose.p }, breaker: null, loadPoints: [] };
-      // SIM-fix3: no exception escapes World.step from a break. split makes only pieces the store accepts and recovers
-      // from a failed create itself; anything else thrown here (a WASM failure) leaves the parent whole, if it is there.
+      // SIM-fix3: a Rapier (WASM) failure in a break never escapes World.step: split makes the pieces before it touches
+      // the parent, and keeps the parent whole when they can't be made. A failure after that (releasing its joints,
+      // removing it) is caught here and reported as a `breakFailed` event; any other error is a bug and is rethrown.
       try {
         this.split(w, e, p);
-      } catch {
-        if (w.entities.get(e.id) === e) e.integrity = 1;
+      } catch (err) {
+        if (!isRapierError(err)) throw err;
+        const kept = w.entities.get(e.id) === e;
+        if (kept) e.integrity = 1;
+        w.events.push({ type: 'breakFailed', entity: e.id, stage: 'split', kept, error: errorText(err) });
       }
     }
     this.pending.clear();
@@ -141,14 +145,6 @@ export class Breaking {
     const cut = p.kind === 'load' ? loadPieces(e.shape, pose, p.loadPoints) : fracture(e.shape, pieceCount(p.ratio), w.rngs.world);
     // SIM-fix3: no piece without volume (or one Rapier can't build) reaches the entity store, and mass is conserved.
     const pieces = settlePieces(e.shape, cut);
-    // Its joints go first: a rope's end on it lies loose where it was; anything else is released.
-    for (const jid of [...e.joints]) {
-      const j = w.joints.get(jid);
-      if (!j) continue;
-      const end = j.a.entity === e.id && j.a.fighter === undefined && !j.a.loose ? 'a' : j.b.entity === e.id && j.b.fighter === undefined && !j.b.loose ? 'b' : null;
-      if (j.kind === 'rope' && end) w.joints.loosen(jid, end, add(pose.p, rotate(pose.q, j[end].local)));
-      else w.joints.remove(jid, 'release');
-    }
     const parent = {
       material: e.material,
       credit: [...e.credit],
@@ -160,57 +156,67 @@ export class Breaking {
       sharp: e.sharpPoints.map((s) => ({ local: { ...s.local }, dir: { ...s.dir }, sharpness: s.sharpness })),
       span: shapeSpan(e),
     };
-    const parentShape = e.shape;
-    w.entities.remove(e.id);
     // Each sharp point goes to the first piece holding it, else the nearest.
     const owner = parent.sharp.map((s) => pieceOf(pieces, s.local, parent.span));
     const ids: number[] = [];
     const tick = w.tick;
-    const make = (pc: ShapePiece, sharpPoints: SharpPoint[]): void => {
-      const c = add(pose.p, rotate(pose.q, pc.offset));
-      const lin = add(v, cross(omega, sub(c, com)));
-      // A piece of a stake that was driven in starts inside the ground: lifted out, as a stake knocked loose is
-      // (EntityStore.unanchor's measure).
-      c.y += w.entities.depthBelowGround(pc.shape, { p: c, q: pose.q });
-      const piece = w.entities.create({
-        material: parent.material,
-        shape: pc.shape,
-        p: c,
-        q: pose.q,
-        lin,
-        ang: omega,
-        state: 'free',
-        sharpPoints,
-        look: parent.look,
-        credit: parent.credit,
-        integrity: 1,
-      });
-      piece.moisture = parent.moisture;
-      piece.temperature = parent.temperature;
-      piece.burning = parent.burning;
-      piece.age = parent.age;
-      if (p.breaker) w.entities.setGrace(piece, { from: p.breaker, minUntil: tick + BREAK_TUNING.pieceGraceTicks, maxUntil: tick + BREAK_TUNING.pieceGraceMaxTicks });
-      ids.push(piece.id);
-    };
-    // SIM-fix3: nothing thrown here may escape World.step (phase 12). settlePieces leaves only shapes the store and
-    // Rapier accept, so a throw is a WASM failure: the pieces made so far go, and the parent's whole shape is made in
-    // their place (one piece, its sharp points, the same mass); should even that fail, it is gone, as a crushed piece is.
+    // SIM-fix3: the pieces are made before the parent's joints go and before it is removed, so a piece Rapier fails
+    // to make (settlePieces leaves only shapes the store and Rapier accept: this is a WASM failure) leaves the parent
+    // exactly as it was, joints and all, rather than half-broken or gone with its mass. Their `spawn` events are put back
+    // after the parent's joint and `remove` events, in the order they always had.
+    const mark = w.events.length;
     try {
       pieces.forEach((pc, i) => {
         const sharpPoints: SharpPoint[] = [];
         parent.sharp.forEach((s, k) => {
           if (owner[k] === i) sharpPoints.push({ local: sub(s.local, pc.offset), dir: s.dir, sharpness: s.sharpness });
         });
-        make(pc, sharpPoints);
+        const c = add(pose.p, rotate(pose.q, pc.offset));
+        const lin = add(v, cross(omega, sub(c, com)));
+        // A piece of a stake that was driven in starts inside the ground: lifted out, as a stake knocked loose is
+        // (EntityStore.unanchor's measure).
+        c.y += w.entities.depthBelowGround(pc.shape, { p: c, q: pose.q });
+        const piece = w.entities.create({
+          material: parent.material,
+          shape: pc.shape,
+          p: c,
+          q: pose.q,
+          lin,
+          ang: omega,
+          state: 'free',
+          sharpPoints,
+          look: parent.look,
+          credit: parent.credit,
+          integrity: 1,
+        });
+        piece.moisture = parent.moisture;
+        piece.temperature = parent.temperature;
+        piece.burning = parent.burning;
+        piece.age = parent.age;
+        if (p.breaker) w.entities.setGrace(piece, { from: p.breaker, minUntil: tick + BREAK_TUNING.pieceGraceTicks, maxUntil: tick + BREAK_TUNING.pieceGraceMaxTicks });
+        ids.push(piece.id);
       });
-    } catch {
-      for (const id of ids.splice(0)) if (w.entities.get(id)) w.entities.remove(id);
-      try {
-        make({ shape: parentShape, offset: { x: 0, y: 0, z: 0 } }, parent.sharp);
-      } catch {
-        ids.length = 0;
-      }
+    } catch (err) {
+      if (!isRapierError(err)) throw err;
+      for (const id of ids) if (w.entities.get(id)) w.entities.remove(id);
+      // Their spawn and remove events go: as far as listeners know, nothing was made.
+      w.events.length = mark;
+      // Whole again (at integrity 0 it would fail the same way every tick); the event says what happened.
+      e.integrity = 1;
+      w.events.push({ type: 'breakFailed', entity: e.id, stage: 'pieces', kept: true, error: errorText(err) });
+      return;
     }
+    const spawned = w.events.splice(mark);
+    // Its joints go first: a rope's end on it lies loose where it was; anything else is released.
+    for (const jid of [...e.joints]) {
+      const j = w.joints.get(jid);
+      if (!j) continue;
+      const end = j.a.entity === e.id && j.a.fighter === undefined && !j.a.loose ? 'a' : j.b.entity === e.id && j.b.fighter === undefined && !j.b.loose ? 'b' : null;
+      if (j.kind === 'rope' && end) w.joints.loosen(jid, end, add(pose.p, rotate(pose.q, j[end].local)));
+      else w.joints.remove(jid, 'release');
+    }
+    w.entities.remove(e.id);
+    w.events.push(...spawned);
     w.events.push({ type: 'break', entity: e.id, pieces: ids, point: { ...p.point }, energy: p.energy });
   }
 
@@ -355,12 +361,52 @@ export function settlePieces(parentShape: Shape, cut: readonly ShapePiece[]): Sh
     });
     if (vols[big] + lost > 0) vols[big] += lost;
   }
-  return keep.map((pc, i) => {
-    const now = volOf(pc.shape);
-    if (!(Math.abs(vols[i] - now) > GEOM_EPS * V)) return pc;
-    const shape = scaleShape(pc.shape, Math.cbrt(vols[i] / now));
-    return rapierHullOk(shape) ? { shape, offset: pc.offset } : pc;
-  });
+  // Scaled to hold its volume. A piece Rapier can't build once scaled stays as it was and its gain goes to the next
+  // kept piece, largest first, that can take it; should none (never seen: scaling keeps a hull's proportions), that
+  // gain is lost. TODO(SIM-fix3): conserve it then too (split the gain across several pieces).
+  const out = keep.map((pc) => ({ ...pc }));
+  const now = keep.map((pc) => volOf(pc.shape));
+  const order = vols.map((_, i) => i).sort((a, b) => vols[b] - vols[a] || a - b);
+  const scaled = (i: number, vol: number): boolean => {
+    if (!(Math.abs(vol - now[i]) > GEOM_EPS * V)) return true;
+    if (!(vol > 0)) return false;
+    const shape = scaleShape(keep[i].shape, Math.cbrt(vol / now[i]));
+    if (!rapierHullOk(shape)) return false;
+    out[i] = { shape, offset: keep[i].offset };
+    return true;
+  };
+  let spare = 0;
+  for (let i = 0; i < keep.length; i++) {
+    if (scaled(i, vols[i])) continue;
+    spare += vols[i] - now[i];
+    vols[i] = now[i];
+  }
+  if (Math.abs(spare) > GEOM_EPS * V) {
+    for (const i of order) {
+      if (scaled(i, vols[i] + spare)) {
+        vols[i] += spare;
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Whether an error is Rapier's (its WASM bindings or colliderDesc's hull check), the only kind a break may survive:
+ * wasm-bindgen's argument and ownership checks ("expected instance of …", "null pointer passed to rust", "recursive use
+ * of an object", "attempted to take ownership …") and a WASM fault (WebAssembly.RuntimeError).
+ */
+export function isRapierError(err: unknown): boolean {
+  // (The sim's lib has no WebAssembly typings: the RuntimeError class is looked up on the global.)
+  const wasmFault = (globalThis as { WebAssembly?: { RuntimeError?: abstract new (...a: never[]) => Error } }).WebAssembly?.RuntimeError;
+  if (wasmFault && err instanceof wasmFault) return true;
+  if (!(err instanceof Error)) return false;
+  return /expected instance of|null pointer passed to rust|recursive use of an object|attempted to take ownership|unreachable|could not build a convex hull/i.test(err.message);
+}
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 /** The piece a parent-local point belongs to: the first whose shape holds it, else the one whose centre is nearest. */

@@ -125,7 +125,7 @@ export function colliderDesc(s: Shape, m: Material): RAPIER.ColliderDesc {
     case 'cylinder':
       // A prism too thin for Rapier's hull (rapierHullOk: a needle) is its round cylinder too, as a flat one is.
       d = flatPrism(s) || !rapierHullOk(s)
-        ? RAPIER.ColliderDesc.cylinder(s.halfHeight, s.r * Math.sqrt(prismArea(1, s.sides) / Math.PI))
+        ? RAPIER.ColliderDesc.cylinder(s.halfHeight, roundCylinderR(s))
         : RAPIER.ColliderDesc.convexHull(new Float32Array(cylinderPoints(s)));
       break;
     case 'hull':
@@ -139,6 +139,18 @@ export function colliderDesc(s: Shape, m: Material): RAPIER.ColliderDesc {
 }
 
 /**
+ * The radius of the round cylinder that stands in for an N-gon prism (a flat one, or one too thin for Rapier's hull):
+ * the radius of the circle with the prism's cross-section area, so it has the prism's volume and mass. Every round
+ * stand-in uses it: colliderDesc, the queries' fallback and the client's presentation mirror.
+ */
+export function roundCylinderR(s: { r: number; sides: number }): number {
+  return s.r * Math.sqrt(prismArea(1, s.sides) / Math.PI);
+}
+
+/** rapierHullOk's answers, by shape object (shapes are never mutated in place: a changed shape is a new object). */
+const HULL_OK = new WeakMap<Shape, boolean>();
+
+/**
  * Whether Rapier can build the shape: true for a ball, box or capsule; for a prism or a hull, whether Rapier's own
  * convex hull of its points succeeds. Rapier 0.21 rejects needle-thin and flat point sets by aspect, not by a size we
  * can bound (an 8-gon prism 8 m long builds at r 3 mm but not at 2 mm, and 20 m long not at 5 mm), so only asking it is
@@ -146,12 +158,17 @@ export function colliderDesc(s: Shape, m: Material): RAPIER.ColliderDesc {
  */
 export function rapierHullOk(s: Shape): boolean {
   if (s.kind !== 'cylinder' && s.kind !== 'hull') return true;
+  const known = HULL_OK.get(s);
+  if (known !== undefined) return known;
   const pts = s.kind === 'cylinder' ? cylinderPoints(s) : s.points;
-  if (pts.length < 12 || !pts.every(Number.isFinite)) return false;
-  const raw = new RAPIER.ConvexPolyhedron(new Float32Array(pts), null).intoRaw();
-  if (!raw) return false;
-  raw.free();
-  return true;
+  let ok = pts.length >= 12 && pts.every(Number.isFinite);
+  if (ok) {
+    const raw = new RAPIER.ConvexPolyhedron(new Float32Array(pts), null).intoRaw();
+    ok = !!raw;
+    raw?.free();
+  }
+  HULL_OK.set(s, ok);
+  return ok;
 }
 
 /**

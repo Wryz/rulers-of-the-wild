@@ -122,13 +122,16 @@ export function applyDevOp(w: World, cmd: MetaCommand): void {
       // SIM-fix3: an optional yaw as a 4th argument (with id 0 for the command's player); the 2- and 3-argument
       // encodings are unchanged and leave the yaw alone.
       arity(2, 3, 4);
-      const id = args.length >= 3 ? args[2] : 0;
-      if (id < 0) throw bad('id is a fighter id, or 0 for the command\'s player');
-      const f = id === 0 ? player : fighter(id);
-      if (!f) return;
       const p = at();
-      if (args.length === 4) w.teleport(f, p.x, p.z, yawOfSteps(args[3]));
-      else w.teleport(f, p.x, p.z);
+      if (args.length === 4) {
+        // Only here does id 0 mean the command's player (the 3-argument form takes a fighter id, as it always has).
+        if (args[2] < 0) throw bad("id is a fighter id, or 0 for the command's player");
+        const f = args[2] === 0 ? player : fighter(args[2]);
+        if (f) w.teleport(f, p.x, p.z, yawOfSteps(args[3]));
+        return;
+      }
+      const f = args.length === 3 ? fighter(args[2]) : player;
+      if (f) w.teleport(f, p.x, p.z);
       return;
     }
     case 'pauseMinds': {

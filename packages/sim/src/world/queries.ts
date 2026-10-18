@@ -10,7 +10,7 @@
 import RAPIER from '@dimforge/rapier3d-compat';
 import type { Fighter } from '../sim/fighter';
 import { compareOwners, ownerKey, type PhysicsWorld } from './physics';
-import { cylinderPoints, rapierHullOk } from './shapes';
+import { cylinderPoints, rapierHullOk, roundCylinderR } from './shapes';
 import type { Hit, Owner, Pose3, QueryFilter, Shape, V3 } from './types';
 import { WORLD_TUNING } from './worldTuning';
 
@@ -46,7 +46,7 @@ const VERTICAL_RAY_SLACK_M = 1e-4;
  *
  * SIM-fix3: a prism or hull whose points Rapier can't make a hull of (rapierHullOk: a needle or a sliver, such as the
  * cut piece of a thin stick place.ts casts) made every query with it throw "expected instance of p". Such a prism is
- * queried as Rapier's round cylinder of the same size (as colliderDesc builds it), and such a hull as the box of its
+ * queried as Rapier's round cylinder of the same volume (roundCylinderR, as colliderDesc builds it), and such a hull as the box of its
  * points' local bounds, which holds it: a query with a shape Rapier can't build never throws.
  */
 export function queryShape(s: Shape): { shape: RAPIER.Shape; offset: V3 } {
@@ -61,7 +61,7 @@ export function queryShape(s: Shape): { shape: RAPIER.Shape; offset: V3 } {
     case 'cylinder':
       return rapierHullOk(s)
         ? { shape: new RAPIER.ConvexPolyhedron(new Float32Array(cylinderPoints(s)), null), offset: at0 }
-        : { shape: new RAPIER.Cylinder(s.halfHeight, s.r), offset: at0 };
+        : { shape: new RAPIER.Cylinder(s.halfHeight, roundCylinderR(s)), offset: at0 };
     case 'hull': {
       if (rapierHullOk(s)) return { shape: new RAPIER.ConvexPolyhedron(new Float32Array(s.points), null), offset: at0 };
       const lo = [Infinity, Infinity, Infinity];
