@@ -1,6 +1,7 @@
 // The terrain (docs/M1-DESIGN.md §2.6, §4.13; package P05): exact heights against Rapier's own heightfield, the cone
 // dig and its 3 m floor, the spoil kernel and search with the ever-dug mask and setback (RT-2), the kernel-only pit's
 // strike count, seams, and the save's edits round trip.
+import { yieldToVitest } from './support/yieldToVitest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Rng } from '../src/sim/math';
 import { PhysicsWorld, physicsReady } from '../src/world/physics';
@@ -439,14 +440,18 @@ describe('generate', () => {
     return -1;
   }
 
-  it('fills the 200 m Clearing terrain (64 tiles of 101²) in ≤ 20 ms of its own time (the best of 5; the per-vertex version took 66 ms)', () => {
+  it('fills the 200 m Clearing terrain (64 tiles of 101²) in ≤ 20 ms of its own time (warmed, best of 5; the per-vertex version took 66 ms)', async () => {
     const p = new PhysicsWorld();
     try {
       const t = new Terrain(p, 200);
       expect(t.tileCount).toBe(64);
       const flat = (): number => 0;
+      // Exclude cold JIT/allocation setup, then keep the existing 20 ms budget for a complete generate call.
+      // Independent samples with an I/O turn avoid measuring a backlog of Vitest RPC work as terrain cost.
+      for (let k = 0; k < 3; k++) t.generate(flat);
       let best = Infinity;
       for (let k = 0; k < 5; k++) {
+        await yieldToVitest();
         const a = performance.now();
         t.generate(flat);
         best = Math.min(best, performance.now() - a);
