@@ -559,7 +559,7 @@ export class ContactSystem {
         [sb, sa, neg(g.n), 1],
       ];
       for (const [self, other, n, k] of sides) {
-        if (!fr.leg && self.f?.ruler && other.e && (self.bone === 'shinL' || self.bone === 'shinR') && self.f.state !== 'tripped') {
+        if (!fr.leg && self.f?.ruler && other.e && strikingLeg(self.f, self.bone) && self.f.state !== 'tripped') {
           fr.leg = { f: self.f, e: other.e, point: { ...g.point }, n: { ...n } };
         }
         if (self.kind === 'creature' && self.f && self.bone) {
@@ -874,6 +874,18 @@ export class ContactSystem {
     const body = b ? { p: v3(b.translation()), q: q4(b.rotation()) } : cur;
     return { pose: cur, prev: cur, body, bodyPrev: body, vAt: () => ({ ...ZERO }), vCentre: { ...ZERO } };
   }
+}
+
+/**
+ * A ruler's bone that strikes an obstacle as a leg (RulerBodies.legStrike, SPEC:782 "its legs strike a blocking
+ * obstacle"): a shin; and, in the knuckle charge (posture headLow, P20: both forearms down in front, the knuckles ≈ 1 m
+ * up and ≈ 2.5 m ahead of the root), a forearm, its front leg. P26 (AC-5) found the gap: charging a lashed log at shin
+ * height, the forearms met it ≈ 1.3 m before the shins and their impact snapped its lashings, so when the shins came
+ * the log was no blocker and the charge shoved it aside instead of tripping.
+ */
+function strikingLeg(f: Fighter, bone: BoneName | null | undefined): boolean {
+  if (bone === 'shinL' || bone === 'shinR') return true;
+  return (bone === 'foreArmL' || bone === 'foreArmR') && f.posture?.id === 'headLow';
 }
 
 // ---------------------------------------------------------------------------
