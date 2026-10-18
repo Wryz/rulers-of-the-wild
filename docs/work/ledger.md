@@ -208,3 +208,8 @@
 - [P23] standAt is classified from the terrain (wall: a climb over 45°, drop, other). Planner: wall 752, stuck 39, exit 1 on the 8 × 6 pit (128 / 4 / 1 on 3 × 2); the small recipes make 0; furnishPit makes 0 'other' on 3 × 2 and 11 on 8 × 6 (all standAts there: wall 1,080, drop 8, other 11). The rim lanes run over the spoil's berm (a ridge ≈ 1 m high, steeper than 45°), so most furnish moves are walls.
 - [P23] Pit floor under the stakes: 8 × 6 × 2.5 m -2.98 … -2.36 m; 3 × 2 × 1.5 m -1.91 … -1.68 m (the planner's layer strikes reach up to 0.5 m below the depth). GATE: within 0.15 m of the depth; PIN: at most 0.55 m below it.
 - [SIM-fix3 → P23] Once the dev teleport takes a yaw and giveTool gives the DS axe, switch standAt and give('axe2h') to commands (TODOs in worldHarness.ts).
+
+## AC-5 / AC-6 (P26+P27, verified independently: approve)
+- DEVIATION (contacts.ts strikingLeg): during the knuckle charge (posture headLow) a forearm counts as a leg for legStrike (SPEC:782 "its legs strike"). Needed: forearms reach the log first, so the trip never fired. Band still measured from the shins vs the obstacle's top.
+- Follow-ups (P38): scripted charge without telegraph snaps headLow at weight 1 → forearms 33 m/s for a tick (ramp it); posture ramp 12 frames is human-tuned — 37 m/s forearm and a 23 HP hit when a charge ends untripped; strikingLeg checks posture id not weight (first ~0.12 s of a telegraph after a fast chase); shinBand impact-trip still shins only; split AC-5's it.fails into two (rising 11.87 vs 8.4 pin; still +6.27 vs +5.58); AC-6.1 assert boulder dynamic.
+- AC-6 part 2 press branch is seed-dependent (seed 63: dv 3.06, 93.4 % kept) — §11.8 R8 margin.
