@@ -1,0 +1,1222 @@
+diff --git a/docs/work/ledger.md b/docs/work/ledger.md
+index 815e90f..31ec3f5 100644
+--- a/docs/work/ledger.md
++++ b/docs/work/ledger.md
+@@ -208,8 +208,3 @@
+ - [P23] standAt is classified from the terrain (wall: a climb over 45°, drop, other). Planner: wall 752, stuck 39, exit 1 on the 8 × 6 pit (128 / 4 / 1 on 3 × 2); the small recipes make 0; furnishPit makes 0 'other' on 3 × 2 and 11 on 8 × 6 (all standAts there: wall 1,080, drop 8, other 11). The rim lanes run over the spoil's berm (a ridge ≈ 1 m high, steeper than 45°), so most furnish moves are walls.
+ - [P23] Pit floor under the stakes: 8 × 6 × 2.5 m -2.98 … -2.36 m; 3 × 2 × 1.5 m -1.91 … -1.68 m (the planner's layer strikes reach up to 0.5 m below the depth). GATE: within 0.15 m of the depth; PIN: at most 0.55 m below it.
+ - [SIM-fix3 → P23] Once the dev teleport takes a yaw and giveTool gives the DS axe, switch standAt and give('axe2h') to commands (TODOs in worldHarness.ts).
+-
+-## AC-5 / AC-6 (P26+P27, verified independently: approve)
+-- DEVIATION (contacts.ts strikingLeg): during the knuckle charge (posture headLow) a forearm counts as a leg for legStrike (SPEC:782 "its legs strike"). Needed: forearms reach the log first, so the trip never fired. Band still measured from the shins vs the obstacle's top.
+-- Follow-ups (P38): scripted charge without telegraph snaps headLow at weight 1 → forearms 33 m/s for a tick (ramp it); posture ramp 12 frames is human-tuned — 37 m/s forearm and a 23 HP hit when a charge ends untripped; strikingLeg checks posture id not weight (first ~0.12 s of a telegraph after a fast chase); shinBand impact-trip still shins only; split AC-5's it.fails into two (rising 11.87 vs 8.4 pin; still +6.27 vs +5.58); AC-6.1 assert boulder dynamic.
+-- AC-6 part 2 press branch is seed-dependent (seed 63: dv 3.06, 93.4 % kept) — §11.8 R8 margin.
+diff --git a/packages/sim/src/world/contacts.ts b/packages/sim/src/world/contacts.ts
+index 05bee36..e27f6ec 100644
+--- a/packages/sim/src/world/contacts.ts
++++ b/packages/sim/src/world/contacts.ts
+@@ -559,7 +559,7 @@ export class ContactSystem {
+         [sb, sa, neg(g.n), 1],
+       ];
+       for (const [self, other, n, k] of sides) {
+-        if (!fr.leg && self.f?.ruler && other.e && strikingLeg(self.f, self.bone) && self.f.state !== 'tripped') {
++        if (!fr.leg && self.f?.ruler && other.e && (self.bone === 'shinL' || self.bone === 'shinR') && self.f.state !== 'tripped') {
+           fr.leg = { f: self.f, e: other.e, point: { ...g.point }, n: { ...n } };
+         }
+         if (self.kind === 'creature' && self.f && self.bone) {
+@@ -876,18 +876,6 @@ export class ContactSystem {
+   }
+ }
+ 
+-/**
+- * A ruler's bone that strikes an obstacle as a leg (RulerBodies.legStrike, SPEC:782 "its legs strike a blocking
+- * obstacle"): a shin; and, in the knuckle charge (posture headLow, P20: both forearms down in front, the knuckles ≈ 1 m
+- * up and ≈ 2.5 m ahead of the root), a forearm, its front leg. P26 (AC-5) found the gap: charging a lashed log at shin
+- * height, the forearms met it ≈ 1.3 m before the shins and their impact snapped its lashings, so when the shins came
+- * the log was no blocker and the charge shoved it aside instead of tripping.
+- */
+-function strikingLeg(f: Fighter, bone: BoneName | null | undefined): boolean {
+-  if (bone === 'shinL' || bone === 'shinR') return true;
+-  return (bone === 'foreArmL' || bone === 'foreArmR') && f.posture?.id === 'headLow';
+-}
+-
+ // ---------------------------------------------------------------------------
+ // Owners and groups
+ // ---------------------------------------------------------------------------
+diff --git a/packages/sim/src/world/loads.ts b/packages/sim/src/world/loads.ts
+index c84a28e..48da1e8 100644
+--- a/packages/sim/src/world/loads.ts
++++ b/packages/sim/src/world/loads.ts
+@@ -221,6 +221,8 @@ export class Loads {
+     const rapier = w.physics.rapier;
+     const others: { key: number; o: typeof c; owner: Owner }[] = [];
+     rapier.contactPairsWith(c, (o) => {
++      // Null for a collider removed since the last step (the narrow phase lists the pair until the next step).
++      if (!o) return;
+       const owner = w.physics.ownerOf(o.handle);
+       if (!owner || (owner.kind !== 'terrain' && owner.kind !== 'entity')) return;
+       others.push({ key: owner.kind === 'terrain' ? 0 : owner.id, o, owner });
+diff --git a/packages/sim/src/world/rulerBody.ts b/packages/sim/src/world/rulerBody.ts
+index f946800..e947a7f 100644
+--- a/packages/sim/src/world/rulerBody.ts
++++ b/packages/sim/src/world/rulerBody.ts
+@@ -1237,7 +1237,9 @@ export class RulerBodies {
+       const c1 = frontier[k];
+       const others: RAPIER.Collider[] = [];
+       rapier.contactPairsWith(c1, (c2) => {
+-        others.push(c2);
++        // Null for a collider removed since the last step (a cover piece broken this tick): the narrow phase still
++        // lists the pair until the next step.
++        if (c2) others.push(c2);
+       });
+       others.sort((a, b) => a.handle - b.handle);
+       for (const c2 of others) {
+diff --git a/packages/sim/tests/ac3.soloHunt.test.ts b/packages/sim/tests/ac3.soloHunt.test.ts
+new file mode 100644
+index 0000000..96011e2
+--- /dev/null
++++ b/packages/sim/tests/ac3.soloHunt.test.ts
+@@ -0,0 +1,393 @@
++// AC-3: the solo hunt (SPEC:900; docs/M1-DESIGN.md §11.3; package P29).
++//
++// "Solo hunting works: a scripted player lures the giant ape along a path into a weight-triggered spike pit, then pulls a
++// rope from at least 15 m away to drop a log on it. The player is never within 10 m when either trap springs."
++//
++// The scene (entities and verbs only, rule 1):
++// - the cached pit (tests/support/scenes.ts buildPit through cachedScene('pit')): 8 × 6 × 2.5 m at (0, 0), 108 stakes
++//   on 0.6 m, the verb-built cover of rotten bearers and grass;
++// - step 1: a 30 cm × 15 m tree at (0, −9) with a hanging vine anchored 10 m up, 20.2 m long (the generator's longest,
++//   §6.7);
++// - step 2: the player chops it from its −z side with the stone axe to remaining ≤ 0.14, so it would fall along +z
++//   across the pit; it stands on its hinge (no pull);
++// - step 3: the player takes the vine's end, splices an 8 m vine coil from his belt to it (27.7 m, §5.8), walks to
++//   P = (18, 1) and reels in until 0.3 m of slack is left;
++// - step 4: the giant (brain on) starts at (−40, z0) in `patrol` on a two-waypoint route (−40, z0) → (30, z0) through
++//   the pit ("along a path", RT-9); the player paces ±1 m at P across the line to the tie, so it sees him moving and
++//   chases, telegraphs and charges at him (the lure is being seen, SPEC:468);
++// - step 5: the player starts pulling on the first tick the giant is `tripped` ("then pulls a rope").
++// The tests script the player (commands) and the creature (its route; in the second `it` its charge), never a trap.
++//
++// DEVIATION (§11.3 step 1 is silent on the vine's side): the vine hangs on the side facing P (yaw toward P), so its
++// slack lies out on the ground toward P, beside the pit, and the player takes its end without stepping on the cover. On
++// the fall side (+z) its end would lie on the cover in the middle of the pit.
++// DEVIATION (§11.3 step 3 "the starter cache's 8 m coil"): scene 'empty' has no starter cache; the 8 m vine coil is
++// factory-spawned next to the player (a spawn of what the Clearing generates), taken and stowed on the belt by verbs.
++//
++// STATUS (P29, at d5b0f2b): every `it` FAILS, and is left failing (never weakened, §11). The cached pit's spoil ring
++// (§4.13: spoil raised up to spoilMaxRiseM 1 m above original, never within spoilSetbackM 1.5 m of dug ground) is a
++// flat 1 m ridge with sheer edges all round the pit, the ends included (x −8 … −6 and +6 … +8 on z = 0). The ruler's
++// mover blocks any move onto ground steeper than RULER_BODY_TUNING.maxSlopeDeg 40° (§4.7 step 2, rulerBody.ts
++// slopeLimit), so the scripted 7 m/s charge stops dead at the ridge's foot (−8.75, 0.48) and never reaches the cover;
++// the ruler nav layer (climb 1.0 m, slope 40°) paths round the pit, so the brain-on chase detours by its −z side, never
++// charges across it, and blunders into the notched tree there (felling it itself, and the player's tie with it). A
++// player can't clear a way with M1's verbs: digging the ridge away throws a new 1 m ridge of spoil ≥ 1.5 m further out
++// (P29 lab: a 3.6 × 4 m cut through the −x end, 780 strikes, raised a new sheer ridge at x −12 … −10.5). In the lab,
++// with the slope limits raised (mover 85°, nav 85°, climb 1.3 m), the brain-on lure works (it charges at P from
++// (−9, 0 … 1.3) across the pit), but it trips 'ledge' stepping off the ridge's inner edge at x −7.5, before any cover
++// load break (the cover breaks 1-2 s later as it falls in), and the trunk, felled 0.3 s after the pull, never hits it.
++// See the P29 report.
++//
++// Gates and pins (§11): every assertion below is a GATE (the criterion's meaning). No PIN is frozen yet: §11.3's
++// lab-first step could not measure a completed hunt (STATUS above); the numbers to pin (stake and trunk wound HP, the
++// trunk's arrival after the trip) are printed by the `console.info` lines `AC-3 …` once it completes.
++import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
++import { moveCommand } from '../src/sim/commands';
++import type { Fighter } from '../src/sim/fighter';
++import { rulerDown, rulerHp } from '../src/sim/ruler';
++import type { RulerMind } from '../src/world/creatures/rulerMind';
++import type { Owner, WorldEvent, WoundRecord } from '../src/world/types';
++import { cachedScene, type Harness, loadHarness, SCENE_BUILD_TIMEOUT_MS, type XZ } from './support/worldHarness';
++
++/** Rapier, a navmesh and minutes of ticks per run (§11: 120 s and up for anything with Rapier). */
++vi.setConfig({ testTimeout: 900_000 });
++
++// ---------------------------------------------------------------------------
++// The recipe (§11.3; recipe constants, never tuning)
++// ---------------------------------------------------------------------------
++
++const PIT = { centre: { x: 0, z: 0 }, lengthX: 8, widthZ: 6 } as const;
++const TREE = { at: { x: 0, z: -9 }, diameter: 0.3, height: 15, remaining: 0.14, vine: { anchorH: 10, lengthM: 20.2 } } as const;
++/** The 8 m coil spliced to the vine (§5.8: 20.2 + 8 − 0.5 = 27.7 m). */
++const COIL = { lengthM: 8, at: { x: -3, z: -13 } } as const;
++/** Where the player waits at the end of the pull rope, and the slack he leaves. */
++const P: XZ = { x: 18, z: 1 };
++const SLACK_M = 0.3;
++const PACE_HALF_M = 1;
++/** The giant's start and the far end of its patrol route. */
++const START_X = -40;
++const ROUTE_END_X = 30;
++/** Ticks budgets: the lure (from the giant's spawn to its trip), the pull (from the first pulling tick to the fall). */
++const LURE_MAX_TICKS = 60 * 90;
++const PULL_MAX_TICKS = 60 * 15;
++/** After the fall: the trunk's landing and the wounds it makes. */
++const AFTER_FELL_TICKS = 60 * 6;
++
++/** The criterion's distances (SPEC:900). */
++const MIN_SPRING_DIST_M = 10;
++const MIN_PULL_DIST_M = 15;
++/** SPEC:502: a wound is a hit above 2 % of the ruler's 12,000 HP. */
++const WOUND_MIN_HP = 240;
++
++// ---------------------------------------------------------------------------
++// Scene helpers (observation only)
++// ---------------------------------------------------------------------------
++
++const flat = (a: XZ, b: XZ): number => Math.hypot(a.x - b.x, a.z - b.z);
++
++interface Scene {
++  tree: number;
++  joint: number;
++  /** The cover: the bearers and grass bundles lying over the pit (and, as they break, their pieces). */
++  cover: Set<number>;
++  stakes: Set<number>;
++}
++
++/** The pit's cover and stakes in the loaded scene: rotten bearers and grass over the footprint; the anchored points in it. */
++function pitParts(h: Harness): { cover: Set<number>; stakes: Set<number> } {
++  const cover = new Set<number>();
++  const stakes = new Set<number>();
++  for (const e of h.w.entities.all()) {
++    const { x, z } = e.pose.p;
++    const over = Math.abs(x - PIT.centre.x) <= PIT.lengthX / 2 + 0.5 && Math.abs(z - PIT.centre.z) <= PIT.widthZ / 2 + 1.5;
++    if (!over) continue;
++    if (e.material === 'rottenWood' || e.look === 'grass') cover.add(e.id);
++    else if (e.state === 'anchored' && e.sharpPoints.length > 0) stakes.add(e.id);
++  }
++  return { cover, stakes };
++}
++
++/** The horizontal distance from (x, z) to the nearest terrain vertex dug below its original height (the pit's footprint). */
++function distToDug(h: Harness, from: XZ): number {
++  const t = h.w.terrain;
++  const sp = t.spacing;
++  let best = Infinity;
++  for (let x = PIT.centre.x - PIT.lengthX; x <= PIT.centre.x + PIT.lengthX; x += sp) {
++    for (let z = PIT.centre.z - PIT.widthZ; z <= PIT.centre.z + PIT.widthZ; z += sp) {
++      if (t.heightAt(x, z) < t.originalHeightAt(x, z) - 0.05) best = Math.min(best, flat(from, { x, z }));
++    }
++  }
++  return best;
++}
++
++const giantOwners = (g: Fighter): Owner[] => (['kcc', 'zone', 'slab', 'ruler'] as const).map((part) => ({ kind: 'fighter', id: g.id, part }));
++const entityOwners = (ids: Iterable<number>): Owner[] => [...ids].map((id) => ({ kind: 'entity', id }));
++
++/** Every distance the criterion bounds, from the player's root, now. */
++interface Distances {
++  tick: number;
++  player: XZ;
++  cover: number;
++  pit: number;
++  giant: number;
++  trunk: number;
++  /** The tie (the vine's anchor on the trunk), horizontally. */
++  tie: number;
++}
++
++function distances(h: Harness, s: Scene, g: Fighter): Distances {
++  const at = { x: h.p.pos.x, z: h.p.pos.z };
++  const plant = h.w.entities.get(s.tree)?.plant;
++  const trunkIds = [s.tree, ...(plant?.stump ? [plant.stump] : [])].filter((id) => h.w.entities.get(id));
++  const j = h.w.joints.get(s.joint);
++  const pts = j ? h.w.joints.endPoints(j) : null;
++  return {
++    tick: h.w.tick,
++    player: at,
++    cover: h.nearestDistH(at, entityOwners([...s.cover].filter((id) => h.w.entities.get(id)))),
++    pit: distToDug(h, at),
++    giant: h.nearestDistH(at, giantOwners(g)),
++    trunk: h.nearestDistH(at, entityOwners(trunkIds)),
++    tie: pts ? flat(at, pts.a) : NaN,
++  };
++}
++
++const fmt = (d: Distances): string =>
++  `tick ${d.tick} player (${d.player.x.toFixed(2)}, ${d.player.z.toFixed(2)}): cover ${d.cover.toFixed(2)} m, pit ${d.pit.toFixed(2)} m, giant ${d.giant.toFixed(2)} m, trunk/stump ${d.trunk.toFixed(2)} m, tie ${d.tie.toFixed(2)} m`;
++
++/** What happened to the rope, the tree and the player so far (for a failure's message). */
++function story(h: Harness, s: Scene, g: Fighter): string {
++  const ev = h.history.world.filter(
++    (e) =>
++      (e.type === 'joint' && e.joint === s.joint) ||
++      (e.type === 'fell' && e.tree === s.tree) ||
++      (e.type === 'tripwire' && e.joint === s.joint) ||
++      (e.type === 'impact' && e.defender === h.p) ||
++      (e.type === 'trip' && e.f === g) ||
++      (e.type === 'launch' && e.f === h.p),
++  );
++  // The ground the giant crosses toward the pit (the dig's spoil ring, §4.13): metres above the original surface every
++  // 0.5 m along its row from x −14 to the pit's end.
++  const t = h.w.terrain;
++  const row: string[] = [];
++  for (let x = -14; x <= PIT.centre.x - PIT.lengthX / 2; x += 0.5) row.push((t.heightAt(x, g.pos.z) - t.originalHeightAt(x, g.pos.z)).toFixed(1));
++  return `giant ${g.state} at (${g.pos.x.toFixed(2)}, ${g.pos.y.toFixed(2)}, ${g.pos.z.toFixed(2)}), the ground along z ${g.pos.z.toFixed(1)} from x −14 to −4 (m above original): ${row.join(' ')}; hands ${JSON.stringify(h.p.inventory?.hands ?? null)}, player ${h.p.state} at (${h.p.pos.x.toFixed(2)}, ${h.p.pos.z.toFixed(2)}); events: ${ev
++    .map((e) => (e.type === 'impact' ? `impact on player ${e.damage.toFixed(1)} HP by ${e.cause.kind} ${e.cause.entityId ?? e.cause.fighterId}` : e.type === 'tripwire' ? `tripwire by ${JSON.stringify(e.by)} ${e.loadN.toFixed(0)} N snapped ${e.snapped}` : e.type === 'joint' ? `joint ${e.what}` : e.type === 'trip' ? `trip ${e.why}` : e.type))
++    .join(', ')}`;
++}
++
++// ---------------------------------------------------------------------------
++// Steps 1-3: the tree, the chop, the rope (verbs only)
++// ---------------------------------------------------------------------------
++
++function rigTheTree(h: Harness): Scene {
++  const { cover, stakes } = pitParts(h);
++  const toP = Math.atan2(P.x - TREE.at.x, P.z - TREE.at.z);
++  // Off the −z rim, clear of where the trunk will stand.
++  h.walk({ x: -2, z: -12 });
++  // Step 1.
++  const t = h.tree({ at: TREE.at, diameter: TREE.diameter, height: TREE.height, vine: { anchorH: TREE.vine.anchorH, lengthM: TREE.vine.lengthM, yaw: toP } });
++  if (!t.vine) throw new Error('AC-3: the tree has no vine');
++  const coil = h.coil({ material: 'vine', lengthM: COIL.lengthM, at: { x: COIL.at.x, y: h.w.terrain.heightAt(COIL.at.x, COIL.at.z), z: COIL.at.z } });
++  h.ticks(2);
++  h.approach(coil);
++  h.must({ verb: 'take', target: coil }, 'take the 8 m coil');
++  h.must({ verb: 'stow', target: 0, slot: 0 }, 'the coil to the belt');
++  // Step 2: chopped from the −z side (it falls away from the cut, along +z).
++  h.give('stoneAxe');
++  h.walk({ x: TREE.at.x, z: TREE.at.z - TREE.diameter / 2 - 1.3 });
++  const chop = h.chopTo(t.tree, TREE.remaining);
++  h.ticks(120);
++  const plant = h.ent(t.tree).plant!;
++  console.info(`AC-3 chop: ${chop.chops} chops (${chop.swings} swings), remaining ${plant.cut?.remaining.toFixed(3)}, fromDir (${plant.cut?.fromDir.x.toFixed(3)}, ${plant.cut?.fromDir.z.toFixed(3)}), ${plant.phase} 2 s on`);
++  // Step 3: the vine end, the splice, the walk to P, the reel-in.
++  // (The back holds the digging stick the pit was dug with: the axe is put down.)
++  h.must({ verb: 'drop', target: 0 }, 'put the axe down');
++  h.approach(t.vine.rope);
++  h.must({ verb: 'take', target: t.vine.rope }, 'take the vine end');
++  h.must({ verb: 'tie', target: h.p.inventory!.belt[0]! }, 'splice the coil to the vine');
++  h.walk(P);
++  const slack = h.reelIn(t.vine.joint, SLACK_M);
++  const rope = h.w.joints.get(t.vine.joint)!.rope!;
++  console.info(`AC-3 rope: ${rope.lengthM.toFixed(2)} m spliced, ${slack.toFixed(3)} m slack left at (${h.p.pos.x.toFixed(2)}, ${h.p.pos.z.toFixed(2)}), the tree ${h.ent(t.tree).plant!.phase}, tick ${h.w.tick}`);
++  return { tree: t.tree, joint: t.vine.joint, cover, stakes };
++}
++
++// ---------------------------------------------------------------------------
++// Steps 4-5: the lure and the pull
++// ---------------------------------------------------------------------------
++
++interface HuntResult {
++  trip: Extract<WorldEvent, { type: 'trip' }>;
++  tripTick: number;
++  /** The first break of a cover entity: the pit springs. */
++  pitSpring: Distances;
++  coverBreak: Extract<WorldEvent, { type: 'break' }>;
++  pullStart: Distances;
++  fellSpring: Distances;
++  fell: Extract<WorldEvent, { type: 'fell' }>;
++  aliveAfterPit: boolean;
++  stakeWounds: WoundRecord[];
++  trunkWounds: WoundRecord[];
++  states: string[];
++}
++
++/** Runs the hunt from the giant's spawn: `lure` drives it (brain on: patrol; brain off: a scripted charge). */
++function hunt(h: Harness, s: Scene, g: Fighter, what: string): HuntResult {
++  const m = h.mind(g) as RulerMind;
++  const along = { x: -(TREE.at.z - P.z), z: TREE.at.x - P.x }; // across the line from P to the tie
++  h.pace(P, along, PACE_HALF_M, h.w.tick + LURE_MAX_TICKS + 60);
++  const states: string[] = [];
++  let last = '';
++  const note = (): void => {
++    const st = `${m.state}/${g.state}`;
++    if (st === last) return;
++    last = st;
++    states.push(`${h.w.tick} ${st} (${g.pos.x.toFixed(1)}, ${g.pos.z.toFixed(1)})`);
++  };
++  let pitSpring: Distances | null = null;
++  let coverBreak: Extract<WorldEvent, { type: 'break' }> | null = null;
++  let trip: Extract<WorldEvent, { type: 'trip' }> | null = null;
++  let tripTick = -1;
++  const watch = (r: { world: WorldEvent[] }): void => {
++    for (const e of r.world) {
++      if (e.type === 'break' && s.cover.has(e.entity)) {
++        for (const q of e.pieces) s.cover.add(q);
++        if (!coverBreak) {
++          coverBreak = e;
++          pitSpring = distances(h, s, g);
++        }
++      }
++      if (e.type === 'trip' && e.f === g && !trip) {
++        trip = e;
++        tripTick = h.w.tick;
++      }
++    }
++  };
++  // Step 4: the lure, until the giant is tripped.
++  for (let t = 0; g.state !== 'tripped'; t++) {
++    if (t >= LURE_MAX_TICKS) throw new Error(`${what}: the giant did not trip in ${LURE_MAX_TICKS} ticks; its states: ${states.join(', ')}; ${story(h, s, g)}`);
++    watch(h.step());
++    note();
++  }
++  // Step 5: on the first tick it is tripped, the player stops pacing and pulls (one command tick: a zero move and the
++  // pull on). (reelIn with no slack limit only ends the pace; the pull is the verb command below.)
++  h.reelIn(s.joint, Number.POSITIVE_INFINITY);
++  h.w.commands.push(moveCommand(h.w.tick + 1, 1, 0, 0));
++  const on = h.verb({ verb: 'pull', target: 0, charge: 255 });
++  if (!on.ok) throw new Error(`${what}: the pull was refused (${on.reason}); ${story(h, s, g)}; states ${states.join(', ')}`);
++  watch({ world: on.events });
++  note();
++  const pullStart = distances(h, s, g);
++  let fell: Extract<WorldEvent, { type: 'fell' }> | null = null;
++  let fellSpring: Distances | null = null;
++  let aliveAfterPit = g.alive;
++  for (const e of on.events) if (e.type === 'fell' && e.tree === s.tree) fell = e;
++  if (fell) fellSpring = pullStart;
++  for (let t = 0; !fell; t++) {
++    if (t >= PULL_MAX_TICKS) throw new Error(`${what}: the tree did not fall in ${PULL_MAX_TICKS} ticks of pulling`);
++    const r = h.step();
++    watch(r);
++    note();
++    for (const e of r.world) {
++      if (e.type === 'fell' && e.tree === s.tree) {
++        fell = e;
++        fellSpring = distances(h, s, g);
++        aliveAfterPit = g.alive;
++      }
++    }
++  }
++  h.verb({ verb: 'pull', target: 0, charge: 0 });
++  const fellTick = h.w.tick;
++  h.ticks(AFTER_FELL_TICKS, (r) => {
++    watch(r);
++    note();
++  });
++  const ws = h.wounds(g);
++  const stakeWounds = ws.filter((wd) => wd.cause.kind === 'entity' && wd.cause.entityId !== null && s.stakes.has(wd.cause.entityId));
++  const trunkWounds = ws.filter((wd) => wd.cause.kind === 'entity' && wd.cause.entityId === s.tree);
++  // The giant's state where the trunk met it.
++  const trunkHit = h.history.world.find((e) => e.type === 'impact' && e.defender === g && e.cause.entityId === s.tree && e.tick >= fellTick - 1);
++  const tripT = trip as Extract<WorldEvent, { type: 'trip' }> | null;
++  console.info(
++    `AC-3 ${what}: states ${states.join(' → ')}\n` +
++      `  trip tick ${tripTick} why ${tripT?.why} cause ${JSON.stringify(tripT?.cause ?? null)}\n` +
++      `  pit springs (first cover break, entity ${coverBreak ? (coverBreak as { entity: number }).entity : '?'}): ${pitSpring ? fmt(pitSpring) : 'never'}\n` +
++      `  pull starts: ${fmt(pullStart)}\n` +
++      `  the tree falls ${(fellTick - pullStart.tick) / 60} s after the pull starts: ${fellSpring ? fmt(fellSpring) : 'never'}\n` +
++      `  trunk on the giant: ${trunkHit && trunkHit.type === 'impact' ? `tick ${trunkHit.tick} (${((trunkHit.tick - tripTick) / 60).toFixed(2)} s after the trip) ${trunkHit.rulerZone ?? trunkHit.zone} ${trunkHit.energy.toFixed(0)} J ${trunkHit.damage.toFixed(0)} HP; giant ${g.state}, inPit ${g.ruler?.inPit}, down ${rulerDown(g)}` : 'no impact'}\n` +
++      `  wounds: ${ws.map((wd) => `${wd.zone} ${wd.hp.toFixed(0)} HP${wd.severe ? ` severe ${wd.effect}` : ''} by ${wd.cause.kind} ${wd.cause.entityId} [${wd.cause.credit.join(',')}]`).join('; ')}\n` +
++      `  stake wounds ${stakeWounds.length} (${stakeWounds.reduce((a, wd) => a + wd.hp, 0).toFixed(0)} HP), trunk wounds ${trunkWounds.length} (${trunkWounds.reduce((a, wd) => a + wd.hp, 0).toFixed(0)} HP); giant alive ${g.alive}, HP ${g.ruler ? rulerHp(g.ruler).toFixed(0) : '?'}\n` +
++      `  fixtures after the giant: ${h.fixtures.filter((f) => f.op === 'spawn' || f.op === 'stage' || f.op === 'unstage').map((f) => `${f.op} ${f.what}`).join(', ') || 'none'}`,
++  );
++  if (!pitSpring || !coverBreak || !trip || !fellSpring || !fell) throw new Error(`${what}: a spring is missing`);
++  return { trip, tripTick, pitSpring, coverBreak, pullStart, fellSpring, fell, aliveAfterPit, stakeWounds, trunkWounds, states };
++}
++
++/** The criterion's gates on one hunt. */
++function gate(r: HuntResult, s: Scene): void {
++  // GATE: the pit springs (a cover entity breaks) before the pull, the tree falls after it.
++  expect(r.pitSpring.tick).toBeLessThanOrEqual(r.tripTick);
++  expect(r.fellSpring.tick).toBeGreaterThanOrEqual(r.pullStart.tick);
++  // GATE: the player is never within 10 m of either trap, or of the giant, when it springs; the tie ≥ 15 m away.
++  for (const d of [r.pitSpring, r.fellSpring]) {
++    expect(d.cover).toBeGreaterThanOrEqual(MIN_SPRING_DIST_M);
++    expect(d.pit).toBeGreaterThanOrEqual(MIN_SPRING_DIST_M);
++    expect(d.giant).toBeGreaterThanOrEqual(MIN_SPRING_DIST_M);
++    expect(d.trunk).toBeGreaterThanOrEqual(MIN_SPRING_DIST_M);
++  }
++  expect(r.pullStart.tie).toBeGreaterThanOrEqual(MIN_PULL_DIST_M);
++  expect(r.fellSpring.tie).toBeGreaterThanOrEqual(MIN_PULL_DIST_M);
++  // GATE: the giant is alive after the pit (the second trap has something to fall on).
++  expect(r.aliveAfterPit).toBe(true);
++  // GATE: both traps wound, credited to the player.
++  expect(r.stakeWounds.length).toBeGreaterThan(0);
++  expect(r.trunkWounds.length).toBeGreaterThan(0);
++  for (const wd of [...r.stakeWounds, ...r.trunkWounds]) {
++    expect(wd.hp).toBeGreaterThan(WOUND_MIN_HP);
++    expect(wd.cause.credit).toContain('p1');
++  }
++  void s;
++}
++
++// ---------------------------------------------------------------------------
++// The tests
++// ---------------------------------------------------------------------------
++
++describe('AC-3: the solo hunt (SPEC:900, §11.3)', () => {
++  let scene: Uint8Array;
++  let h: Harness | null = null;
++
++  beforeAll(async () => {
++    scene = await cachedScene('pit');
++  }, SCENE_BUILD_TIMEOUT_MS);
++
++  afterEach(async () => {
++    h?.w.dispose();
++    h = null;
++    await new Promise<void>((resolve) => setImmediate(resolve));
++  });
++
++  it.each([-1.5, 0, 1.5])('brain on: lured along its patrol route into the pit (z0 %s), then the felled tree pulled onto it from P', async (z0) => {
++    h = await loadHarness(scene, { nav: 'full' });
++    const s = rigTheTree(h);
++    const g = h.creature('giantApe', { x: START_X, z: z0 }, Math.PI / 2);
++    h.patrol(g, [
++      { x: START_X, z: z0 },
++      { x: ROUTE_END_X, z: z0 },
++    ]);
++    const r = hunt(h, s, g, `brain on, z0 ${z0}`);
++    gate(r, s);
++  });
++
++  it('brain off: the same physics with a scripted 7 m/s charge from (−30, 0) at P (tells a mind failure from a physics one)', async () => {
++    h = await loadHarness(scene, { nav: 'full' });
++    const s = rigTheTree(h);
++    const from = { x: -30, z: 0 };
++    const heading = Math.atan2(P.x - from.x, P.z - from.z);
++    const g = h.creature('giantApe', from, heading, { brain: 'off' });
++    h.script(g, { kind: 'charge', heading, speed: 7 });
++    const r = hunt(h, s, g, 'brain off, scripted charge');
++    gate(r, s);
++  });
++});
+diff --git a/packages/sim/tests/ac5.rulerTrip.test.ts b/packages/sim/tests/ac5.rulerTrip.test.ts
+deleted file mode 100644
+index edc61d7..0000000
+--- a/packages/sim/tests/ac5.rulerTrip.test.ts
++++ /dev/null
+@@ -1,353 +0,0 @@
+-// AC-5: trip, settle, get up (SPEC:902; docs/M1-DESIGN.md §11.5, package P26).
+-//
+-// "A test charges the 14-ton ruler at 6 m/s into a staked 300 kg log at shin height: it trips and gets up after 4
+-// seconds. With its AI paused once it's up, it stays stable: no NaN, no body part faster than 30 m/s, and every body
+-// below 0.05 m/s within 10 seconds of the impact."
+-//
+-// The scene (rule 1: entities and verbs only, P23's buildStakedLog): a 300 kg dry hex log (4.4 m, circumradius 0.23 m)
+-// across the path, its centre 1.0 m up (inside the 0.39-2.75 m shin band), lashed with vine to two stakes the player
+-// placed driven point-up at its ends; staged while the player works (D-25) and unstaged once lashed, so anchored by its
+-// lashings (a blocker, §2.3). The player is then moved 30 m off (a logged standAt) and paused (no input, idle life
+-// paused, RF-16, RT-18). Only the creature is scripted: the giant, brain off, `charge`s +x at 6 m/s from x = −20,
+-// telegraph skipped; at its `rise` event it is paused (mind paused and idle paused: §12's reading of "its AI paused
+-// once it's up"). P22's pauseMinds pauses only the minds that exist, so every pause here is per fighter, after spawns.
+-//
+-// What happens: the charge script shows the knuckle charge (posture headLow, P20), whose forearms reach the log
+-// ≈ 1.3 m before the shins. Their strike snaps both 600 J lashings; the strike trips the giant 'obstacle' first
+-// (RulerBodies.legStrike, which, from P26, takes a knuckle-charging forearm for a leg: see strikingLeg in contacts.ts),
+-// so the trip is decided by a limb striking an anchored blocker across the path (§4.7 steps 4-6; SPEC:782, 344), not
+-// by the log surviving. The freed log and anything the strike broke must come to rest too.
+-//
+-// The body set ("every body", "body part", §11.5, §12): every Rapier body that isn't fixed. A dynamic body's parts are
+-// its colliders at their point velocity v + ω × r (the tripped ruler included); a kinematic body's (the paused player's
+-// KCC and zone bodies, the standing or rising ruler) is each collider's displacement over the tick / DT (for the ruler,
+-// its rig delta / DT, what RulerBodies.partSpeeds reports).
+-//
+-// Interpretations (§12 and here): "gets up after 4 s" = the rise starts at +4.00 s after the trip; "the impact" = the
+-// first tick the giant touches the log (the strike; the trip switches the body the next tick), and "within 10 s" is
+-// held from there, with every body still kept to +11 s; "it stays stable … no body part faster than 30 m/s" is held
+-// from the impact on (the stability of the trip, the settle and the rise; the existing P11 test reads it the same
+-// way), while "no NaN" is held at every tick from the spawn. The run before the impact is logged (the knuckle charge's
+-// ramp-in moves the forearms at ≈ 33 m/s: reported, see the report of P26).
+-//
+-// Variants (§11.5): the lashed log (SPEC's "staked"; the gate), an anchored log and the log as two 150 kg anchored
+-// halves end to end (factory logs spawned in state 'anchored', spawnLog's driven state: no verb lifts them, D-25). The
+-// lab's capsule-log variant (failed at +10.83 s) has no factory shape in M1 (logs are hex prisms), so it is not run.
+-//
+-// GATE / PIN marks as §11 asks. Every world is disposed (RF-24).
+-import { afterAll, describe, expect, it } from 'vitest';
+-import type { Fighter } from '../src/sim/fighter';
+-import { DT } from '../src/sim/math';
+-import { rulerHp } from '../src/sim/ruler';
+-import { RULER_BODY_TUNING } from '../src/world/rulerBody';
+-import type { WorldEvent } from '../src/world/types';
+-import { buildStakedLog, lyingAlong } from './support/scenes';
+-import { type Harness, makeHarness } from './support/worldHarness';
+-
+-const live: Harness[] = [];
+-afterAll(() => {
+-  for (const h of live.splice(0)) h.w.dispose();
+-});
+-
+-const EAST = Math.PI / 2;
+-/** A macrotask turn, so long synchronous stepping never starves Vitest's worker RPC (ledger: onTaskUpdate timeouts). */
+-const yieldToVitest = (): Promise<void> => new Promise((r) => setImmediate(r));
+-/** §11.5's recipe constants (test constants, never tuning). */
+-const AC5 = {
+-  seed: 26,
+-  size: 80,
+-  log: { centre: { x: 0, y: 1.0, z: 0 }, yaw: 0, massKg: 300 as const, lengthM: 4.4 as const, r: 0.23 },
+-  giantFrom: { x: -20, z: 0 },
+-  chargeMps: 6,
+-  playerAway: { x: 0, z: 30 },
+-  /** SPEC:902's limits. */
+-  maxPartMps: 30,
+-  stillMps: 0.05,
+-  stillWithinS: 10,
+-  getUpAfterS: 4,
+-  /** Every body kept still this long past the 10 s mark. */
+-  holdS: 1,
+-  /** No impact within this long of the charge's start: the scene failed. */
+-  maxRunS: 20,
+-} as const;
+-
+-/** §11.5's pins [C lab: e5_trip]. */
+-const PINS = { trippedMps: 13.0, risingMps: 8.4, logFlungMps: 15.4, riseEndS: 5.57, stillFromS: 5.58 } as const;
+-
+-/** Every body part's speed after each step, and the first non-finite number read. */
+-class BodySampler {
+-  private prev = new Map<number, { body: number; x: number; y: number; z: number }>();
+-  /** This tick: the fastest part overall, the giant's fastest, and the fastest non-stake entity's. */
+-  fastest = 0;
+-  fastestWhat = '';
+-  ruler = 0;
+-  logs = 0;
+-  nan = '';
+-
+-  constructor(
+-    private readonly h: Harness,
+-    private readonly g: Fighter,
+-    private readonly stakes: ReadonlySet<number>,
+-  ) {}
+-
+-  sample(): void {
+-    const phys = this.h.w.physics;
+-    const next = new Map<number, { body: number; x: number; y: number; z: number }>();
+-    this.fastest = 0;
+-    this.ruler = 0;
+-    this.logs = 0;
+-    phys.rapier.forEachRigidBody((b) => {
+-      if (b.isFixed()) return;
+-      const v = b.linvel();
+-      const om = b.angvel();
+-      const com = b.worldCom();
+-      const t0 = b.translation();
+-      const q = b.rotation();
+-      for (const n of [v.x, v.y, v.z, om.x, om.y, om.z, t0.x, t0.y, t0.z, q.x, q.y, q.z, q.w]) {
+-        if (!Number.isFinite(n) && !this.nan) this.nan = `body ${b.handle} at tick ${this.h.w.tick}`;
+-      }
+-      for (let i = 0; i < b.numColliders(); i++) {
+-        const c = b.collider(i);
+-        const t = c.translation();
+-        next.set(c.handle, { body: b.handle, x: t.x, y: t.y, z: t.z });
+-        let s: number;
+-        if (b.isDynamic()) {
+-          const rx = t.x - com.x;
+-          const ry = t.y - com.y;
+-          const rz = t.z - com.z;
+-          s = Math.hypot(v.x + om.y * rz - om.z * ry, v.y + om.z * rx - om.x * rz, v.z + om.x * ry - om.y * rx);
+-        } else {
+-          const p = this.prev.get(c.handle);
+-          s = p && p.body === b.handle ? Math.hypot(t.x - p.x, t.y - p.y, t.z - p.z) / DT : 0;
+-        }
+-        if (!Number.isFinite(s)) {
+-          if (!this.nan) this.nan = `collider ${c.handle} speed at tick ${this.h.w.tick}`;
+-          continue;
+-        }
+-        const o = phys.ownerOf(c.handle);
+-        if (o?.kind === 'fighter' && o.id === this.g.id && o.part === 'ruler') this.ruler = Math.max(this.ruler, s);
+-        if (o?.kind === 'entity' && !this.stakes.has(o.id)) this.logs = Math.max(this.logs, s);
+-        if (s > this.fastest) {
+-          this.fastest = s;
+-          this.fastestWhat = o ? JSON.stringify(o) : `collider ${c.handle}`;
+-        }
+-      }
+-    });
+-    this.prev = next;
+-  }
+-}
+-
+-/** Any non-finite number in a fighter's state (position, yaw, walk velocity, rig, the ruler's HP). */
+-function fighterNaN(f: Fighter): boolean {
+-  const nums = [f.pos.x, f.pos.y, f.pos.z, f.yaw, f.walkVel.x, f.walkVel.y, f.walkVel.z];
+-  for (const b of Object.values(f.rig)) nums.push(b.pos.x, b.pos.y, b.pos.z, b.rot.x, b.rot.y, b.rot.z, b.rot.w);
+-  if (f.ruler) nums.push(rulerHp(f.ruler));
+-  return nums.some((n) => !Number.isFinite(n));
+-}
+-
+-type Variant = 'lashed' | 'anchored' | 'halves';
+-
+-interface Run {
+-  variant: Variant;
+-  trip: Extract<WorldEvent, { type: 'trip' }> | null;
+-  /** Ticks: the first touch (the impact), the trip, the rise, the get-up's end, the last tick any part moved ≥ 0.05. */
+-  impact: number;
+-  tripTick: number;
+-  rise: number;
+-  up: number;
+-  lastMoving: number;
+-  end: number;
+-  rootAtTrip: number;
+-  /** Fastest part from the impact on; and before it (logged only). */
+-  maxPart: number;
+-  maxPartWhat: string;
+-  maxBefore: number;
+-  maxBeforeWhat: string;
+-  /** The giant's parts while tripped and while rising; the log (and its pieces) from the impact on. */
+-  maxTripped: number;
+-  maxRising: number;
+-  maxLog: number;
+-  nan: string;
+-  snapped: number;
+-  lashes: number;
+-  logBroke: boolean;
+-  finalState: string;
+-  hpLost: number;
+-}
+-
+-/** Builds the variant's obstacle, charges the giant into it, and measures to +11 s after the impact. */
+-async function runAC5(variant: Variant): Promise<Run> {
+-  await yieldToVitest();
+-  const h = await makeHarness({ seed: AC5.seed, size: AC5.size });
+-  live.push(h);
+-  const L = AC5.log;
+-  let logs: number[];
+-  let stakes: number[] = [];
+-  if (variant === 'lashed') {
+-    const r = buildStakedLog(h, { centre: L.centre, yaw: L.yaw, massKg: L.massKg, lengthM: L.lengthM });
+-    logs = [r.log];
+-    stakes = r.stakes;
+-    // Precondition: unstaged, anchored by its lashings (a blocker), at its pose.
+-    expect(h.ent(r.log).state).toBe('free');
+-    expect(h.w.entities.isAnchored(h.ent(r.log))).toBe(true);
+-    expect(h.ent(r.log).pose.p.y).toBeCloseTo(L.centre.y, 2);
+-  } else if (variant === 'anchored') {
+-    logs = [h.log({ mass: L.massKg, length: L.lengthM, r: L.r, p: L.centre, q: lyingAlong(L.yaw), state: 'anchored' })];
+-  } else {
+-    const half = L.lengthM / 2;
+-    logs = [-1, 1].map((s) =>
+-      h.log({ mass: L.massKg / 2, length: half, r: L.r, p: { x: L.centre.x, y: L.centre.y, z: L.centre.z + s * (half / 2 + 0.005) }, q: lyingAlong(L.yaw), state: 'anchored' }),
+-    );
+-  }
+-  const lashes = h.w.joints.all().filter((j) => j.kind === 'lash' && logs.some((id) => j.a.entity === id || j.b.entity === id)).map((j) => j.id);
+-  if (variant === 'lashed') expect(lashes).toHaveLength(2);
+-  for (const id of logs) expect(h.w.entities.isAnchored(h.ent(id))).toBe(true);
+-  // The player 30 m off, paused.
+-  h.standAt(AC5.playerAway);
+-  h.pause(h.p);
+-  h.ticks(30);
+-  await yieldToVitest();
+-
+-  const g = h.creature('giantApe', AC5.giantFrom, EAST, { brain: 'off' });
+-  // The 14-ton ruler.
+-  expect(g.massKg).toBe(14_000);
+-  const hp0 = g.ruler ? rulerHp(g.ruler) : 0;
+-  const s = new BodySampler(h, g, new Set(stakes));
+-  const touching = (): boolean => logs.some((id) => h.w.entities.get(id) && h.w.contacts.touching({ kind: 'fighter', id: g.id, part: 'ruler' }, { kind: 'entity', id }) > 0);
+-  const run: Run = {
+-    variant,
+-    trip: null,
+-    impact: -1,
+-    tripTick: -1,
+-    rise: -1,
+-    up: -1,
+-    lastMoving: -1,
+-    end: -1,
+-    rootAtTrip: 0,
+-    maxPart: 0,
+-    maxPartWhat: '',
+-    maxBefore: 0,
+-    maxBeforeWhat: '',
+-    maxTripped: 0,
+-    maxRising: 0,
+-    maxLog: 0,
+-    nan: '',
+-    snapped: 0,
+-    lashes: lashes.length,
+-    logBroke: false,
+-    finalState: '',
+-    hpLost: 0,
+-  };
+-  h.ticks(2);
+-  h.script(g, { kind: 'charge', heading: EAST, speed: AC5.chargeMps });
+-  const maxTicks = Math.round(AC5.maxRunS / DT);
+-  for (let t = 0; t < maxTicks || run.impact > 0; t++) {
+-    if (t % 300 === 299) await yieldToVitest();
+-    const root = Math.hypot(g.walkVel.x, g.walkVel.z);
+-    const r = h.step();
+-    for (const e of r.world) {
+-      if (e.type === 'trip' && e.f === g && !run.trip) {
+-        run.trip = e;
+-        run.tripTick = h.w.tick;
+-        run.rootAtTrip = root;
+-      }
+-      if (e.type === 'rise' && e.f === g && run.rise < 0) {
+-        run.rise = h.w.tick;
+-        // "With its AI paused once it's up" (§11.5: at the rise event).
+-        h.pause(g);
+-      }
+-      if (e.type === 'joint' && e.what === 'snap' && lashes.includes(e.joint)) run.snapped++;
+-      if (e.type === 'break' && logs.includes(e.entity)) run.logBroke = true;
+-    }
+-    if (run.impact < 0 && touching()) run.impact = h.w.tick;
+-    if (run.rise > 0 && run.up < 0 && g.state !== 'getup') run.up = h.w.tick;
+-    s.sample();
+-    if (!run.nan) run.nan = s.nan;
+-    for (const f of h.w.combat.fighters) if (!run.nan && fighterNaN(f)) run.nan = `fighter ${f.id} at tick ${h.w.tick}`;
+-    if (run.impact < 0) {
+-      if (s.fastest > run.maxBefore) {
+-        run.maxBefore = s.fastest;
+-        run.maxBeforeWhat = `${s.fastestWhat} at tick ${h.w.tick} (${g.state})`;
+-      }
+-      continue;
+-    }
+-    if (s.fastest > run.maxPart) {
+-      run.maxPart = s.fastest;
+-      run.maxPartWhat = `${s.fastestWhat} at +${((h.w.tick - run.impact) * DT).toFixed(2)} s (${g.state})`;
+-    }
+-    if (s.fastest >= AC5.stillMps) run.lastMoving = h.w.tick;
+-    if (g.state === 'tripped') run.maxTripped = Math.max(run.maxTripped, s.ruler);
+-    if (g.state === 'getup') run.maxRising = Math.max(run.maxRising, s.ruler);
+-    run.maxLog = Math.max(run.maxLog, s.logs);
+-    if (h.w.tick >= run.impact + Math.round((AC5.stillWithinS + AC5.holdS) / DT)) break;
+-  }
+-  run.end = h.w.tick;
+-  run.finalState = g.state;
+-  run.hpLost = g.ruler ? hp0 - rulerHp(g.ruler) : 0;
+-  const at = (tick: number): string => (tick < 0 ? 'never' : `+${((tick - run.impact) * DT).toFixed(2)} s`);
+-  console.info(
+-    `[AC-5 ${variant}] impact at tick ${run.impact}; trip ${run.trip?.why ?? 'none'} ${at(run.tripTick)} (root ${run.rootAtTrip.toFixed(2)} m/s); ` +
+-      `rise ${at(run.rise)} (trip +${((run.rise - run.tripTick) * DT).toFixed(2)} s); up ${at(run.up)}; last part ≥ ${AC5.stillMps} m/s ${at(run.lastMoving)}; ` +
+-      `fastest part ${run.maxPart.toFixed(2)} m/s (${run.maxPartWhat}); giant tripped ≤ ${run.maxTripped.toFixed(2)}, rising ≤ ${run.maxRising.toFixed(2)} m/s; ` +
+-      `log ≤ ${run.maxLog.toFixed(2)} m/s; before the impact ≤ ${run.maxBefore.toFixed(2)} m/s (${run.maxBeforeWhat}); ` +
+-      `lashings snapped ${run.snapped}/${run.lashes}; log broke ${run.logBroke}; HP lost ${run.hpLost.toFixed(1)}; final ${run.finalState}; NaN ${run.nan || 'none'}`,
+-  );
+-  return run;
+-}
+-
+-/** GATES (§11.5): the criterion, for any variant. */
+-function gates(r: Run): void {
+-  // GATE: a trip 'obstacle', on the strike, at a root speed above tripSpeed (the charge's 6 m/s).
+-  expect(r.trip, 'no trip').not.toBeNull();
+-  expect(r.trip!.why).toBe('obstacle');
+-  expect(r.tripTick - r.impact).toBeLessThanOrEqual(1);
+-  expect(r.rootAtTrip).toBeGreaterThan(RULER_BODY_TUNING.tripSpeed);
+-  expect(r.rootAtTrip).toBeCloseTo(AC5.chargeMps, 1);
+-  // GATE: the rise starts at +4.00 s after the trip, and it gets up.
+-  expect((r.rise - r.tripTick) * DT).toBeCloseTo(AC5.getUpAfterS, 6);
+-  expect(r.up).toBeGreaterThan(r.rise);
+-  expect(r.finalState).not.toBe('tripped');
+-  expect(r.finalState).not.toBe('getup');
+-  // GATE: no NaN in any body or fighter field at any tick.
+-  expect(r.nan).toBe('');
+-  // GATE: no body part faster than 30 m/s.
+-  expect(r.maxPart).toBeLessThan(AC5.maxPartMps);
+-  // GATE: every body below 0.05 m/s within 10 s of the impact, and still at +11 s.
+-  expect(r.lastMoving, 'still moving at the end of the run').toBeLessThan(r.end);
+-  expect((r.lastMoving - r.impact) * DT).toBeLessThan(AC5.stillWithinS);
+-}
+-
+-describe('AC-5: the 14 t ruler charging a staked 300 kg log at shin height (§11.5)', () => {
+-  let lashed: Run | null = null;
+-  const lashedRun = async (): Promise<Run> => (lashed ??= await runAC5('lashed'));
+-
+-  it('the lashed log (buildStakedLog): trips at 6 m/s, rises at +4.00 s; paused once up: no NaN, no part over 30 m/s, every body under 0.05 m/s within 10 s', async () => {
+-    const r = await lashedRun();
+-    gates(r);
+-    // The lashings go (each 600 J): the trip does not depend on the log surviving (legStrike).
+-    expect(r.snapped).toBe(2);
+-  }, 600_000);
+-
+-  it('PINS [C lab: e5_trip] that hold: the giant ≤ 13.0 m/s tripped, the log ≤ 15.4 m/s, the rise ends at +5.57 s (94 frames)', async () => {
+-    const r = await lashedRun();
+-    expect(r.maxTripped).toBeLessThanOrEqual(PINS.trippedMps);
+-    expect(r.maxLog).toBeLessThanOrEqual(PINS.logFlungMps);
+-    // The get-up's end, within a tick of the lab's (getupFrames of RULER_BODY_TUNING after the rise).
+-    expect(Math.abs((r.up - r.tripTick) * DT - PINS.riseEndS)).toBeLessThanOrEqual(2 * DT + 1e-9);
+-  }, 600_000);
+-
+-  // KNOWN DIVERGENCE (P26, reported): measured 11.87 m/s rising (the head, +4.4 s after the trip) and every body still
+-  // only from +6.25 s after the impact (the left forearm sweeps at up to 18.2 m/s for 0.65 s after the get-up ends, with
+-  // per-tick jumps). The lab measured the upright giant before P20's knuckle charge (it gets up from a different lying
+-  // pose now). The pins stay at the lab's values (§11: a first run doesn't rewrite pins); this turns red when they hold
+-  // again, and then becomes a plain `it`.
+-  it.fails('PINS [C lab: e5_trip] that do not hold now: the giant ≤ 8.4 m/s rising; every body < 0.05 m/s from +5.58 s', async () => {
+-    const r = await lashedRun();
+-    expect(r.maxRising).toBeLessThanOrEqual(PINS.risingMps);
+-    expect((r.lastMoving - r.impact) * DT).toBeLessThan(PINS.stillFromS);
+-  }, 600_000);
+-
+-  it.each(['anchored', 'halves'] as const)('variant: the %s log, the same gates', async (v) => {
+-    gates(await runAC5(v));
+-  }, 600_000);
+-});
+diff --git a/packages/sim/tests/ac6.bodies.test.ts b/packages/sim/tests/ac6.bodies.test.ts
+deleted file mode 100644
+index d850fa4..0000000
+--- a/packages/sim/tests/ac6.bodies.test.ts
++++ /dev/null
+@@ -1,385 +0,0 @@
+-// AC-6: push, pass-through, deflection (SPEC:903; docs/M1-DESIGN.md §11.6, package P27).
+-//
+-// "A walking player can't shove an 800 kg boulder but can slide a 40 kg log; a log falling onto the player doesn't
+-// stop dead as if it hit a wall; a charging ruler is deflected by a staked log wall."
+-//
+-// Rule 1: the scenes are factory entities (the factory world generation uses, §6.7) and, for the wall, P23's
+-// buildStakedWall (entities and verbs). Only the player (move commands) and the giant (a `charge` script) are scripted.
+-// Terrain: the empty scene's dirt (friction 0.7) [C lab: e6_kcc].
+-//
+-// 1. The player walks 3 s (move commands) into an 800 kg stone hull and, in a fresh world, into a 40 kg dry hex log
+-//    (2.2 m), at walk (half input) and run (full input: DS's run, 3.77 m/s). The boulder comes from the factory's
+-//    spawnStone: the harness has no stone call (DEVIATION from §11.0's "uses only the harness": the stone is the same
+-//    factory entity generation scatters; §11.6's "icosahedral hull r 0.47 m" is the design's lab shape, the factory's
+-//    is prototype 0 scaled to 800 kg, its radius logged).
+-// 2. A 300 kg hex log dropped with its centre 4 m up onto the standing player (the masses test constants: the player's
+-//    SPECIES_BODY.human 73.3 kg, the log 300 kg; P09's log, 3 m long, as contacts.test). The measured tick (RT-16): N =
+-//    the tick whose phase 9 scores the first episode between the log and the player's zones; before = the log's phase-5
+-//    stored velocity at N; after = its phase-8 snapshot at N + 1. Control in the same `it`: with the capsule and the log
+-//    solving against each other (the solver groups including each other), the log stops dead on the player.
+-// 3. buildStakedWall: a 16 m wall of two stacked anchored (lashed) hex logs, 1.0 m high; the giant charges at 6 m/s from
+-//    15 m before the wall. At 20°: it slides along the wall and leaves past its end. At 45°: it trips 'obstacle'.
+-//
+-// GATE / PIN marks as §11 asks. Every world is disposed (RF-24).
+-import RAPIER from '@dimforge/rapier3d-compat';
+-import { afterEach, describe, expect, it } from 'vitest';
+-import { BODY_RADIUS } from '../src/sim/combat';
+-import { moveCommand } from '../src/sim/commands';
+-import type { Fighter } from '../src/sim/fighter';
+-import { freeDv, IMPACT_TUNING } from '../src/sim/impact';
+-import { DT } from '../src/sim/math';
+-import { SPECIES_BODY } from '../src/sim/species';
+-import { spawnStone } from '../src/world/factory';
+-import { G, GROUP } from '../src/world/groups';
+-import { RULER_BODY_TUNING } from '../src/world/rulerBody';
+-import type { V3, WorldEvent } from '../src/world/types';
+-import { buildStakedWall } from './support/scenes';
+-import { type Harness, makeHarness } from './support/worldHarness';
+-
+-const live: Harness[] = [];
+-afterEach(() => {
+-  for (const h of live.splice(0)) h.w.dispose();
+-});
+-/** A macrotask turn, so long synchronous stepping never starves Vitest's worker RPC (ledger: onTaskUpdate timeouts). */
+-const yieldToVitest = (): Promise<void> => new Promise((r) => setImmediate(r));
+-async function make(seed: number, size: number): Promise<Harness> {
+-  await yieldToVitest();
+-  const h = await makeHarness({ seed, size });
+-  live.push(h);
+-  return h;
+-}
+-
+-const DEG = Math.PI / 180;
+-const speedOf = (v: V3 | null | undefined): number => (v ? Math.hypot(v.x, v.y, v.z) : 0);
+-const flat = (a: { x: number; z: number }, b: { x: number; z: number }): number => Math.hypot(a.x - b.x, a.z - b.z);
+-
+-/** §11.6's recipe constants (test constants, never tuning). */
+-const AC6 = {
+-  pushS: 3,
+-  /** Move input: walk (half) and run (full, DS's 3.77 m/s). */
+-  gaits: { walk: 0.5, run: 1 } as const,
+-  boulderKg: 800,
+-  lightLog: { massKg: 40, lengthM: 2.2 },
+-  /** The player starts this far from the obstacle's near surface. */
+-  startGapM: 0.5,
+-  dropLog: { massKg: 300, lengthM: 3, centreY: 4 },
+-  playerKg: 73.3,
+-  wall: { start: { x: -8, z: 0 }, dir: { x: 1, z: 0 }, lengthM: 16 as const, height: 1.0 as const },
+-  charge: { mps: 6, fromM: 15, meetX: -4 },
+-} as const;
+-
+-// ---------------------------------------------------------------------------
+-// Part 1: the player's push
+-// ---------------------------------------------------------------------------
+-
+-interface PushRun {
+-  moved: number;
+-  collided: number;
+-  pushedOnCollided: number;
+-  ticks: number;
+-}
+-
+-/**
+- * The player stands `startGapM` west of the entity's near side, facing it, and is given move commands east at `mag`
+- * of full input for 3 s. Counts the ticks the KCC's sweep reported a computed collision with it and, of those, the
+- * ticks it queued a push on it.
+- */
+-function pushFor(h: Harness, id: number, halfWidthX: number, mag: number): PushRun {
+-  const e0 = { ...h.ent(id).pose.p };
+-  h.standAt({ x: e0.x - halfWidthX - BODY_RADIUS - AC6.startGapM, z: e0.z }, Math.PI / 2);
+-  h.ticks(30);
+-  const p = h.p;
+-  const n = Math.round(AC6.pushS / DT);
+-  let collided = 0;
+-  let pushedOnCollided = 0;
+-  for (let t = 0; t < n; t++) {
+-    h.w.commands.push(moveCommand(h.w.tick + 1, 1, mag, 0));
+-    h.step();
+-    if (h.w.kcc.collidedEntities(p).includes(id)) {
+-      collided++;
+-      if (h.w.kcc.pushedEntities(p).includes(id)) pushedOnCollided++;
+-    }
+-  }
+-  h.w.commands.push(moveCommand(h.w.tick + 1, 1, 0, 0));
+-  h.ticks(60);
+-  const e1 = h.w.entities.get(id)!.pose.p;
+-  return { moved: flat(e1, e0), collided, pushedOnCollided, ticks: n };
+-}
+-
+-describe('AC-6 part 1: the player push (§11.6.1, §4.2)', () => {
+-  it.each(Object.entries(AC6.gaits))("can't shove an 800 kg boulder (%s): it moves < 0.01 m though the KCC meets it and pushes on ≥ 120 of 180 ticks", async (gait, mag) => {
+-    const h = await make(61, 30);
+-    const id = spawnStone(h.w, { p: { x: 0, y: 1, z: 0 }, mass: AC6.boulderKg });
+-    h.ticks(120);
+-    const e = h.ent(id);
+-    expect(e.mass).toBeCloseTo(AC6.boulderKg, 3);
+-    expect(speedOf(e.vel.lin)).toBeLessThan(0.01);
+-    const pts = (e.shape as Extract<typeof e.shape, { kind: 'hull' }>).points;
+-    let rMax = 0;
+-    let xMax = 0;
+-    for (let i = 0; i < pts.length; i += 3) {
+-      rMax = Math.max(rMax, Math.hypot(pts[i], pts[i + 1], pts[i + 2]));
+-      xMax = Math.max(xMax, Math.abs(pts[i]));
+-    }
+-    const r = pushFor(h, id, xMax, mag);
+-    console.info(`[AC-6.1 boulder ${gait}] hull radius ${rMax.toFixed(3)} m; moved ${r.moved.toFixed(4)} m; KCC collided on ${r.collided}/${r.ticks} ticks, pushed on ${r.pushedOnCollided} of them`);
+-    // GATE: it doesn't move.
+-    expect(r.moved).toBeLessThan(0.01);
+-    // GATE: not "never touched": the KCC met it on ≥ 120 of the 180 ticks and queued a push on each of them (RT-15).
+-    expect(r.collided).toBeGreaterThanOrEqual(120);
+-    expect(r.pushedOnCollided).toBe(r.collided);
+-    // PIN [C lab: e6_kcc]: 0.000 m.
+-    expect(r.moved).toBeCloseTo(0, 3);
+-  }, 120_000);
+-
+-  it.each(Object.entries(AC6.gaits))('slides a 40 kg dry hex log (%s): it moves > 1 m', async (gait, mag) => {
+-    const h = await make(62, 30);
+-    // The log lies along z, across the push (east): its side faces the player. (spawnLog: the mass sets r.)
+-    const q = { x: Math.SQRT1_2, y: 0, z: 0, w: Math.SQRT1_2 };
+-    const id = h.log({ mass: AC6.lightLog.massKg, length: AC6.lightLog.lengthM, r: 0.1, q, p: { x: 0, y: 0.3, z: 0 } });
+-    h.ticks(120);
+-    const e = h.ent(id);
+-    expect(e.mass).toBeCloseTo(AC6.lightLog.massKg, 3);
+-    expect(e.material).toBe('dryWood');
+-    const rLog = (e.shape as Extract<typeof e.shape, { kind: 'cylinder' }>).r;
+-    const r = pushFor(h, id, rLog, mag);
+-    console.info(`[AC-6.1 log ${gait}] r ${rLog.toFixed(3)} m; moved ${r.moved.toFixed(3)} m; KCC collided on ${r.collided}/${r.ticks} ticks, pushed on ${r.pushedOnCollided}`);
+-    // GATE: it slides.
+-    expect(r.moved).toBeGreaterThan(1);
+-  }, 120_000);
+-});
+-
+-// ---------------------------------------------------------------------------
+-// Part 2: a log falling onto the player
+-// ---------------------------------------------------------------------------
+-
+-type ImpactEv = Extract<WorldEvent, { type: 'impact' }>;
+-
+-/** Per tick, around phase 9: the log's phase-5 and phase-8 velocities and the impact scored on `f` by it (P09's watch). */
+-function watchLog(h: Harness, id: number, f: Fighter): { tick: number; pre: V3 | null; post: V3 | null; hit: ImpactEv | null }[] {
+-  const w = h.w;
+-  const rows: { tick: number; pre: V3 | null; post: V3 | null; hit: ImpactEv | null }[] = [];
+-  const key = `entity:${id}`;
+-  const orig = w.contacts.process.bind(w.contacts);
+-  w.contacts.process = (ww, pairs) => {
+-    const pre = w.physics.pre(key)?.v ?? null;
+-    const post = w.physics.post(key)?.v ?? null;
+-    const n = w.events.length;
+-    orig(ww, pairs);
+-    const hit = w.events.slice(n).find((e): e is ImpactEv => e.type === 'impact' && e.defender === f && e.cause.entityId === id) ?? null;
+-    rows.push({ tick: w.tick, pre: pre && { ...pre }, post: post && { ...post }, hit });
+-  };
+-  return rows;
+-}
+-
+-/** The player's KCC capsule collider. */
+-function capsuleOf(h: Harness, f: Fighter): RAPIER.Collider {
+-  let out: RAPIER.Collider | null = null;
+-  h.w.physics.rapier.forEachCollider((c) => {
+-    const o = h.w.physics.ownerOf(c.handle);
+-    if (o?.kind === 'fighter' && o.id === f.id && o.part === 'kcc') out = c;
+-  });
+-  if (!out) throw new Error('no capsule');
+-  return out;
+-}
+-
+-async function dropLog(control: boolean) {
+-  // P09's world (seed 3, 50 m), where the real-rig pins below were measured. The branch depends on the standing
+-  // player's idle pose at the impact, which the seed sets: on seed 63 the same drop meets the head at the same 6.38 m/s
+-  // and scores Δv 3.06 m/s down (2.2 HP, hitstun, 93.4 % kept). Reported (§11.8 R8: the margin).
+-  const h = await make(3, 50);
+-  const p = h.p;
+-  h.ticks(10);
+-  // The masses are test constants (§11.6): a tuning change can't move the margin silently.
+-  expect(p.mass).toBeCloseTo(AC6.playerKg, 1);
+-  expect(SPECIES_BODY.human.massKg).toBeCloseTo(AC6.playerKg, 1);
+-  const id = h.log({ mass: AC6.dropLog.massKg, length: AC6.dropLog.lengthM, r: 0.1, p: { x: p.pos.x, y: AC6.dropLog.centreY, z: p.pos.z } });
+-  expect(h.ent(id).mass).toBeCloseTo(AC6.dropLog.massKg, 3);
+-  if (control) {
+-    // The control (C lab F4): the capsule and the log solve against each other, as a body whose solver membership is
+-    // "all bits" would. A test write of two colliders' solver groups, never a scene.
+-    capsuleOf(h, p).setSolverGroups(G(GROUP.CHAR, GROUP.TERRAIN | GROUP.ENTITY));
+-    const lc = h.ent(id).body!.collider(0);
+-    lc.setSolverGroups(G(GROUP.ENTITY, 0xffff));
+-  }
+-  const rows = watchLog(h, id, p);
+-  for (let t = 0; t < 120 && !(rows.length > 1 && rows[rows.length - 2].hit); t++) h.step();
+-  const i = rows.findIndex((r) => r.hit);
+-  // It falls on: rest height (the lowest height it is still at < 0.1 m/s from then on).
+-  let restY = -Infinity;
+-  let restV = Infinity;
+-  let highestRest = -Infinity;
+-  for (let t = 0; t < 300; t++) {
+-    h.step();
+-    const e = h.ent(id);
+-    const v = speedOf(e.vel.lin);
+-    if (v < 0.1) highestRest = Math.max(highestRest, e.pose.p.y);
+-    restY = e.pose.p.y;
+-    restV = v;
+-  }
+-  return { h, p, id, rows, i, restY, restV, highestRest };
+-}
+-
+-describe('AC-6 part 2: a log falling onto the player (§11.6.2)', () => {
+-  it("300 kg from 4 m doesn't stop dead on the player: ≥ 80 % of its speed kept over the measured tick, rests on the terrain, hurts; control: solving against the capsule, it stops dead", async () => {
+-    const r = await dropLog(false);
+-    expect(r.i, 'no impact on the player').toBeGreaterThanOrEqual(0);
+-    const hit = r.rows[r.i].hit!;
+-    const before = speedOf(r.rows[r.i].pre);
+-    const after = speedOf(r.rows[r.i + 1].post);
+-    const dvFree = freeDv(hit.dv);
+-    console.info(
+-      `[AC-6.2] N = tick ${r.rows[r.i].tick}: before ${before.toFixed(3)} m/s, after ${after.toFixed(3)} m/s (${((100 * after) / before).toFixed(1)} %); ` +
+-        `impact ${hit.damage.toFixed(2)} HP on ${hit.bone ?? '?'}, dv (${hit.dv.x.toFixed(2)}, ${hit.dv.y.toFixed(2)}, ${hit.dv.z.toFixed(2)}) |dv| ${speedOf(hit.dv).toFixed(2)}, dv_free ${dvFree.toFixed(2)}; ` +
+-        `knockdown ${hit.knockdown}, launched ${hit.launched}; player ${r.p.state}; log rests at y ${r.restY.toFixed(3)} (${r.restV.toFixed(3)} m/s), highest rest ${r.highestRest.toFixed(3)}`,
+-    );
+-    // GATE (D-23, binding): after ≥ 80 % of before; still falling.
+-    expect(r.rows[r.i + 1].post!.y).toBeLessThan(0);
+-    expect(after).toBeGreaterThanOrEqual(0.8 * before);
+-    // GATE: it comes to rest on the terrain, not on the capsule (never at rest above 0.5 m on the way).
+-    expect(r.restV).toBeLessThan(0.1);
+-    expect(r.restY).toBeLessThan(0.5);
+-    expect(r.highestRest).toBeLessThan(0.5);
+-    // GATE: an impact on the player with damage > 0, by the log.
+-    expect(hit.damage).toBeGreaterThan(0);
+-    expect(hit.cause).toMatchObject({ kind: 'entity', entityId: r.id, held: false });
+-    // GATE: the branch matches §4.4 for its dv: launched === (dv_free ≥ launchDv); and by name (RF-27). At 4 m with the
+-    // real rig (its head ball tops out at 1.72 m, the lab's zone at 1.81 m) the log arrives faster than the lab's
+-    // 6.21 m/s and Δv is 5.09 m/s straight down (ledger §4.3, P09's contacts.test): ≥ launchDv down is the press, a
+-    // knockdown, not a launch (all of it into the ground: dv_free 0).
+-    expect(hit.launched).toBe(dvFree >= IMPACT_TUNING.launchDv);
+-    expect(hit.launched).toBe(false);
+-    expect(hit.dv.y).toBeLessThanOrEqual(-IMPACT_TUNING.launchDv);
+-    expect(hit.knockdown).toBe(true);
+-    // PINS (re-measured on the real rig by P09, contacts.test 'AC-6 part 2 from 4 m in the press branch'; §11.6's lab
+-    // rig pins were 6.21 / 5.32 m/s, 85.7 %, Δv 4.99 [C lab: F14; RT lab: numbers.out]): 6.38 m/s, Δv 5.09 down, 85.6 %.
+-    expect(before).toBeCloseTo(6.38, 1);
+-    expect(hit.dv.y).toBeCloseTo(-5.09, 1);
+-    expect(after / before).toBeCloseTo(0.856, 2);
+-
+-    // Control: solving against the capsule, the log stops dead on the player (C lab F4: 0.00 m/s, resting at y 1.98).
+-    const c = await dropLog(true);
+-    const cBefore = c.i >= 0 ? speedOf(c.rows[c.i].pre) : NaN;
+-    const cAfter = c.i >= 0 && c.rows[c.i + 1] ? speedOf(c.rows[c.i + 1].post) : NaN;
+-    console.info(`[AC-6.2 control] impact row ${c.i}; before ${cBefore.toFixed(3)}, after ${cAfter.toFixed(3)} m/s; rests at y ${c.restY.toFixed(3)} (${c.restV.toFixed(3)} m/s), highest rest ${c.highestRest.toFixed(3)}`);
+-    // The control shows the gate is not vacuous: the log stops dead and rests on the player, well above the terrain
+-    // (lab: y 1.98).
+-    expect(c.restV).toBeLessThan(0.1);
+-    expect(c.restY).toBeGreaterThan(1.5);
+-  }, 120_000);
+-});
+-
+-// ---------------------------------------------------------------------------
+-// Part 3: the staked wall deflects a charging ruler
+-// ---------------------------------------------------------------------------
+-
+-interface WallRun {
+-  trip: Extract<WorldEvent, { type: 'trip' }> | null;
+-  deflects: number;
+-  closest: number;
+-  minSpeedAlong: number;
+-  slideSpeed: number;
+-  adopted: number;
+-  slideHeadingDeg: number;
+-  endX: number;
+-  minAnchored: boolean;
+-  snapped: number;
+-  stopped: boolean;
+-}
+-
+-async function chargeWall(deg: number): Promise<{ h: Harness; g: Fighter; r: WallRun; capR: number; wallEnd: number }> {
+-  const h = await make(64, 80);
+-  const W = AC6.wall;
+-  const ids = buildStakedWall(h, { start: W.start, dir: W.dir, lengthM: W.lengthM, height: W.height });
+-  const [lower, upper] = ids;
+-  h.ticks(60);
+-  for (const id of [lower, upper]) expect(h.w.entities.isAnchored(h.ent(id))).toBe(true);
+-  const lashes = h.w.joints.all().filter((j) => j.kind === 'lash').map((j) => j.id);
+-  expect(lashes).toHaveLength(4);
+-  // The player out of the way, paused.
+-  h.standAt({ x: 0, z: 30 });
+-  h.pause(h.p);
+-  h.ticks(30);
+-  await yieldToVitest();
+-  // The wall's face toward the giant (−z side): the logs' horizontal extent (a flat-down hex: its circumradius).
+-  const wallR = (h.ent(lower).shape as Extract<ReturnType<Harness['ent']>['shape'], { kind: 'cylinder' }>).r;
+-  const capR = BODY_RADIUS * SPECIES_BODY.giantApe.scale;
+-  const a = deg * DEG;
+-  const d = { x: Math.cos(a), z: Math.sin(a) };
+-  // It meets the face at meetX, from 15 m before the wall (along its heading).
+-  const meet = { x: AC6.charge.meetX, z: -wallR - capR };
+-  const from = { x: meet.x - AC6.charge.fromM * d.x, z: meet.z - AC6.charge.fromM * d.z };
+-  const yaw = Math.atan2(d.x, d.z);
+-  const g = h.creature('giantApe', from, yaw, { brain: 'off' });
+-  h.ticks(2);
+-  h.script(g, { kind: 'charge', heading: yaw, speed: AC6.charge.mps });
+-  const wallEnd = W.start.x + W.lengthM;
+-  const owners = [lower, upper].map((id) => ({ kind: 'entity' as const, id }));
+-  const r: WallRun = { trip: null, deflects: 0, closest: Infinity, minSpeedAlong: Infinity, slideSpeed: 0, adopted: 0, slideHeadingDeg: NaN, endX: 0, minAnchored: true, snapped: 0, stopped: false };
+-  let firstDeflect = -1;
+-  for (let t = 0; t < Math.round(12 / DT); t++) {
+-    if (t % 300 === 299) await yieldToVitest();
+-    const x0 = g.pos.x;
+-    const z0 = g.pos.z;
+-    const ev = h.step().world;
+-    for (const e of ev) {
+-      if (e.type === 'trip' && e.f === g && !r.trip) r.trip = e;
+-      if (e.type === 'deflect' && e.ruler === g) {
+-        r.deflects++;
+-        if (firstDeflect < 0) firstDeflect = h.w.tick;
+-      }
+-      if (e.type === 'joint' && e.what === 'snap' && lashes.includes(e.joint)) r.snapped++;
+-    }
+-    for (const id of [lower, upper]) if (!h.w.entities.get(id) || !h.w.entities.isAnchored(h.ent(id))) r.minAnchored = false;
+-    if (r.trip) break;
+-    if (g.pos.x > W.start.x && g.pos.x < wallEnd) r.closest = Math.min(r.closest, h.nearestDistH(g.pos, owners) - capR);
+-    const vx = (g.pos.x - x0) / DT;
+-    const vz = (g.pos.z - z0) / DT;
+-    if (firstDeflect > 0 && g.pos.x < wallEnd) {
+-      r.minSpeedAlong = Math.min(r.minSpeedAlong, Math.hypot(vx, vz));
+-      // The step the mover deflected: the rest of the step projected on the wall.
+-      if (h.w.tick === firstDeflect) {
+-        r.slideSpeed = Math.hypot(vx, vz);
+-        r.slideHeadingDeg = (Math.atan2(vz, vx) * 180) / Math.PI;
+-      }
+-      // Then the charge adopts the wall's heading (§6.4, adoptDeflection) and runs along it at its speed.
+-      if (h.w.tick === firstDeflect + 30) r.adopted = Math.hypot(vx, vz);
+-    }
+-    if (g.pos.x > wallEnd + capR + 1) break;
+-  }
+-  r.endX = g.pos.x;
+-  r.stopped = r.minSpeedAlong < 1;
+-  console.info(
+-    `[AC-6.3 ${deg}°] trip ${r.trip?.why ?? 'none'}; deflects ${r.deflects}; closest ${Number.isFinite(r.closest) ? r.closest.toFixed(3) : '-'} m (capsule face to the wall); ` +
+-      `slide ${r.slideSpeed.toFixed(2)} m/s at ${r.slideHeadingDeg.toFixed(2)}° (+0.5 s: ${r.adopted.toFixed(2)} m/s; min ${Number.isFinite(r.minSpeedAlong) ? r.minSpeedAlong.toFixed(2) : '-'}); ` +
+-      `end x ${r.endX.toFixed(2)} (wall end ${wallEnd}); lashings snapped ${r.snapped}; wall anchored throughout ${r.minAnchored}; giant ${g.state}`,
+-  );
+-  return { h, g, r, capR, wallEnd };
+-}
+-
+-describe('AC-6 part 3: a charging ruler and a staked log wall (§11.6.3)', () => {
+-  it('met 20° off, the charge is deflected: it slides along the wall (no trip, no stop), never into it, and leaves past its end', async () => {
+-    const { r, capR, wallEnd } = await chargeWall(20);
+-    // GATE: no trip; deflected; no stop.
+-    expect(r.trip).toBeNull();
+-    expect(r.deflects).toBeGreaterThan(0);
+-    expect(r.stopped).toBe(false);
+-    // GATE: never closer than its radius + the face distance − 0.05 m (the capsule face never 5 cm into the wall).
+-    expect(r.closest).toBeGreaterThanOrEqual(-RULER_BODY_TUNING.sweepSkinM);
+-    // GATE: it leaves past the wall's end.
+-    expect(r.endX).toBeGreaterThan(wallEnd + capR);
+-    // The wall stood: a staked wall, still anchored.
+-    expect(r.minAnchored).toBe(true);
+-    // PINS [C lab]: 5.64 m/s along the wall (6 cos 20°) on the deflecting step, the heading within 0.2° of it.
+-    expect(r.slideSpeed).toBeCloseTo(AC6.charge.mps * Math.cos(20 * DEG), 1);
+-    expect(Math.abs(r.slideHeadingDeg)).toBeLessThan(0.2);
+-  }, 120_000);
+-
+-  it("met 45° off (over deflectMaxDeg), it trips 'obstacle' on the wall (its 1.0 m top is inside the shin band)", async () => {
+-    const { r, g } = await chargeWall(45);
+-    // GATE: a trip, why 'obstacle' (no "or a stop").
+-    expect(r.trip).not.toBeNull();
+-    expect(r.trip!.why).toBe('obstacle');
+-    expect(g.state).toBe('tripped');
+-  }, 120_000);
+-});

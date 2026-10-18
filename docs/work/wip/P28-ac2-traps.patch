@@ -1,0 +1,1719 @@
+diff --git a/docs/work/ledger.md b/docs/work/ledger.md
+index 3cea2f3..602c0e7 100644
+--- a/docs/work/ledger.md
++++ b/docs/work/ledger.md
+@@ -238,3 +238,17 @@
+ - [tests] spoilRepose.test.ts's cached-pit charge runs only with ROTW_SCENES=pit (as harness.test's own pit check), so a plain run never builds the pit (≈ 12 min, synchronous in a worker). P29's ac3.soloHunt.test.ts awaits cachedScene('pit') in a plain run.
+ - [tests, intermittent] "Timeout calling onTaskUpdate" (an unhandled Vitest RPC error: a worker's event loop blocked > 60 s, which fails the run with every test passed) in 3 of 5 full `--maxWorkers=2` runs on this branch (0 of 1 at 1c93088; 2 of the 3 ran alongside other CPU load). Long synchronous files (harness.test: its planner now takes 28,286 ticks for the small pit, was 26,137; spawner, rulerMind) are the likely blockers; more yieldToVitest points would fix it.
+ - Also in: P29's null-collider guards (5dcec9e, src only: rulerBody.ts restingLoad, loads.ts supportsOf).
++## P28 (AC-2) continued, after SIM-fix4
++- DEPARTURE (§11.0/§11.2(b) buildPit "20 rotten-wood bearers … 0.4 m apart", 8 m long): furnishPit `coverDugRim` (buildPit only) lays bearers over the hole as dug — x from dug edge to dug edge (planner cones dig to ≈ ±4.3 m at the ends), ≤ 0.4 m apart, each 1.0 m (overM) onto undug ground beyond the widest dug |z|; count and length printed by buildPit. The 3 × 2 pit (harness.test) keeps the planned layout. harness.test's cached-pit check and AC-2 now expect ≥ 20 bearers.
++- DEPARTURE (§1.5.3 posture ramp "ramped out to nothing first"): between two low postures (pose root ≤ CHARACTER_TUNING.lowPostureRootM, NEW 0.7 m: crouch, workLow, workKnap, digScoop, headLow) the asked posture cross-fades in over the shown one, kept as `postureShown.from` (saved, optional) until in full; the body no longer rises to standing between them.
++- DEPARTURE (§6.6 tug "back off along dirYaw"): the tugging creature now backs off facing what it hauls (Fighter.faceAt, a one-tick face point written by the mind in think, cleared at the start of each stepBody, not saved; backpedal speed as a lock-on) and holds the grip where it took it (tug.holdM = min(dragHandOffsetM × scale, grip distance), saved in VerbStateRecV1.tug — a new required key). Before, it turned its back and walked away, and the fixed 0.8 m hold shoved a bait gripped 0.45 m away into the deadfall's prop.
++- Earlier in P28: dragImpulse gains held to the load's deadbeat limit (< 5 kg loads were unstable); MOVE_CROUCH shows the `crouch` posture (§5.5).
++- [report] §11.2(a)'s bait-tug recipes still fail with these fixes (inherent geometry: tugging toward its own body walks the ape inward under the lowering log): verb-only, back in the log (−0.075 m), the pull never springs it; staged, springs at 0.83 s but v_n 1.83 m/s < 2, and the 700 N control springs too (this sim's prop gives way below 762 N). The walked deadfall (route into the prop) passes both scenes; kept as extra tests.
++- [report, for P11/rulerBody + design] AC-2(b) after SIM-fix4 and the full-rim cover: the giant reaches the cover; its first footfall breaks a rotten bearer by impact (7-700 J), not by load, and the trip is `ledge` (frontFootDrop probes one ray at the stepping foot's landing point, which falls between bearers 0.4 m apart; the planted foot's vanished bearer isn't among rb.supports) or `impact`/`obstacle` at 6 m/s — never `cover`. Stake wounds in 7/9 runs (139-5,508 HP). A sole-disc probe in frontFootDrop (tried in P28's lab, not kept) changes the 6 m/s trips but not the outcome. Bridge control: 539 kg green logs (not 651), the giant falls in among them (29 breaks, 2 trips).
++## P28 third pass
++- DEPARTURE (§4.7 steps 1, 7; D-39): a ruler's root and feet stand on the highest support under the whole sole (RulerBodies.soleGround: a flat box, half-side RULER_BODY_TUNING.footProbeFrac × footRadiusM × scale, cast down onto entities; terrain still read at the centre), not one ray at a point; its footwork plants with the same sole (Fighter.soleM getter, GroundQuery.supportAt's new optional soleM, World.supportAt box cast), so its foot load reaches a cover of thin bearers. NEW RULER_BODY_TUNING footProbeFrac 0.8, soleProbeHalfM 0.02, coverHoldTicks 30.
++- DEPARTURE (§4.7 "resting" supports): an entity that held a ruler up within coverHoldTicks stays its support though the ruler's step woke it (RulerBodies.heldUp/holdsUp), until it breaks (then vanishedSupports → 'cover' trip, any break kind) or is gone.
++- DEPARTURE (scenes.ts furnishPit coverDugRim): the end bearers lie PIT.bearer.endOutM (0.25 m, NEW) beyond the dug ends on undug ground (one on the dug edge's slope rolled in under the first step); 25 bearers × 10.5 m on the rebuilt pit.
++- DEPARTURE (§11.2(b) bridge control "8 green logs r 0.18 × 8 m (651 kg)"): 651 kg each, as long as the hole as dug needs (9.5 m) and ≤ 1 m apart over it (12 logs); the player removes the bearers from a lane beyond their ends.
++- [report] AC-2(b) now: stake wounds 9/9 runs (89-5,265 HP). 6 m/s: load break → cover trip → wounds in 3/3; fails only "every broken stake had its impact first" (stakes snapped side-on by the shins; the creature side is a self-motion brush, so no impact event — a blunt shaft contact delivers no blow, SPEC:344 holds in substance). 3/4.5 m/s: a bearer breaks by the foot's impact before the 0.2 s load window → no load break first, trip 'ledge'. Bridge: log tops 0.34-0.56 m on the uneven rims (ankle 0.39 m) → the giant trips.
++- [report] AC-2(a) bait-tug: the free prop springs at 200 N applied at the lash (holds at 150; 266 N 0.7 s; 907 N 0.13 s) — the 200 N control can't hold; the tug's PD reaches 907 N only ≈ 0.3 m past the taut rope, so the ape backs under the lower log first. Taller props (2.6-2.9 m) or a steeper log topple the 7 cm prop. Left failing.
+diff --git a/packages/sim/src/body/footwork.ts b/packages/sim/src/body/footwork.ts
+index 4bb4005..14cc634 100644
+--- a/packages/sim/src/body/footwork.ts
++++ b/packages/sim/src/body/footwork.ts
+@@ -47,11 +47,13 @@ interface Body {
+   scale?: number;
+   /** The ground the feet plant on (terrain, or what rests on it); absent or null: a flat floor at y = 0. */
+   ground?: GroundQuery | null;
++  /** P28: the half-side of a foot's sole a big foot plants with (its whole footprint is looked under); 0: a point. */
++  readonly soleM?: number;
+ }
+ 
+ /** Height of the ground a foot plants on at (x, z): what supports it below the body, else the terrain, else 0. */
+ function groundY(body: Body, x: number, z: number): number {
+-  return body.ground?.supportAt?.(x, z, body.pos.y) ?? body.ground?.heightAt(x, z) ?? 0;
++  return body.ground?.supportAt?.(x, z, body.pos.y, body.soleM) ?? body.ground?.heightAt(x, z) ?? 0;
+ }
+ 
+ /** Puts a foot target on the ground under it (only on uneven ground: a flat floor already has y = 0). */
+diff --git a/packages/sim/src/save/load.ts b/packages/sim/src/save/load.ts
+index f0b0359..92173bd 100644
+--- a/packages/sim/src/save/load.ts
++++ b/packages/sim/src/save/load.ts
+@@ -1167,8 +1167,8 @@ function verbState(v: unknown, p: string): VerbStateRecord {
+       return { verb, cmd, ticks: nat(c.ticks, `${q}.ticks`), data };
+     }),
+     tug: nullable(o.tug, `${p}.tug`, (x, q) => {
+-      const t = exactKeys(obj(x, q), ['entity', 'grip'], q);
+-      return { entity: nat(t.entity, `${q}.entity`), grip: v3(t.grip, `${q}.grip`) };
++      const t = exactKeys(obj(x, q), ['entity', 'grip', 'holdM'], q);
++      return { entity: nat(t.entity, `${q}.entity`), grip: v3(t.grip, `${q}.grip`), holdM: num(t.holdM, `${q}.holdM`) };
+     }),
+   };
+ }
+diff --git a/packages/sim/src/sim/combat.ts b/packages/sim/src/sim/combat.ts
+index 8af3101..7060d1b 100644
+--- a/packages/sim/src/sim/combat.ts
++++ b/packages/sim/src/sim/combat.ts
+@@ -574,6 +574,8 @@ export class CombatSim {
+     for (const f of fs) this.retarget(f);
+     for (const f of fs) this.tickTimers(f);
+     for (const f of fs) this.advance(f);
++    // P28: a mind's face point lasts one tick (written in think, read by updateFacing): never state between ticks.
++    for (const f of fs) f.faceAt = null;
+     for (const f of fs) this.ais.get(f)?.think(f, f.target, this.walkable);
+     for (const f of fs) this.manualDefense(f);
+     for (const f of fs) this.autoDefend(f);
+@@ -1020,7 +1022,8 @@ export class CombatSim {
+         const dot = (mi.x * fwd.x + mi.z * fwd.z) / raw;
+         // Speed comes from the contextual motion profile (stance footwork in range,
+         // full walking stride far away, slower when hurt...).
+-        const locked = f.lockedOn;
++        // (A mind's face point walks like a lock-on: backing off is a backpedal, not a turn first, P28.)
++        const locked = f.lockedOn || f.faceAt !== null;
+         // Locked on: backpedalling is slower. Free walking: turn first, then go.
+         const turnFirst = locked ? 1 : Math.max(0.3, (1 + dot) / 2);
+         const sp =
+@@ -1119,6 +1122,10 @@ export class CombatSim {
+       } else if (f.free) {
+         deadzone = FACING.idleDeadzone;
+       }
++    } else if (f.faceAt && f.free) {
++      // P28: a mind's face point (a creature backing off with what it hauls, §6.6 tug): it walks, facing that.
++      desired = Math.atan2(f.faceAt.x - f.pos.x, f.faceAt.z - f.pos.z);
++      rate = FACING.freeTurnRate;
+     } else if (moving) {
+       // Not in a fight: turn to face where you're going and walk there.
+       desired = Math.atan2(mi.x, mi.z);
+diff --git a/packages/sim/src/sim/fighter.ts b/packages/sim/src/sim/fighter.ts
+index 015f515..4680850 100644
+--- a/packages/sim/src/sim/fighter.ts
++++ b/packages/sim/src/sim/fighter.ts
+@@ -61,8 +61,9 @@ import type {
+ import { bladeFrame, gripSlide, heft, sampleOffsets, SECOND_HAND, WEAPON_MOVES, WEAPONS, type WeaponDef, type WeaponId, weaponTempo, type Wound } from './weapons';
+ import { bodyCapsules, type Capsule, closestOnSegment } from './bodyShapes';
+ import type { Drop, HurtZone } from './combat';
+-import { cloneCommand, type VerbCommand, type VerbId } from './commands';
++import { cloneCommand, MOVE_CROUCH, type VerbCommand, type VerbId } from './commands';
+ import { getTuningValue } from '../tuning/registry';
++import { SPECIES_BODY } from './species';
+ 
+ export interface FighterStyle {
+   footwork: FootworkStyle;
+@@ -365,9 +366,17 @@ export class Fighter {
+    * ramped out first, by 1/CHARACTER_TUNING.postureRampFrames of full weight a tick, so a posture set or cleared at once
+    * (the hands' carry and drag, a mind's sniff) never jumps the pose: a jump moves the head up to 0.2 m in one tick, a
+    * 12 m/s self-motion contact (§4.3). Saved (FighterRecord.postureShown). DEVIATION (§1.5.3 and §8.3's FighterRecV1
+-   * list no such field): the ramp has to survive a load.
++   * list no such field): the ramp has to survive a load. P28: between two low postures (root height ≤
++   * CHARACTER_TUNING.lowPostureRootM, e.g. the crouch and workLow) the asked one is cross-faded in over the one shown,
++   * which is kept in `from` until the new one is in full: the body never rises to standing height on the way.
+    */
+-  private postureShown: Posture | null = null;
++  private postureShown: ShownPosture | null = null;
++  /**
++   * P28: a world point a free walker faces while it walks (a creature backing off with what it hauls, §6.6 `tug`):
++   * written by its mind in phase 3 (think) and cleared at the start of every stepBody, so it is never state between
++   * ticks (not saved).
++   */
++  faceAt: { x: number; z: number } | null = null;
+   /**
+    * A world point the near hand reaches for over the posture, as far as the arm allows: the grip of a dragged load.
+    * Written by the world in every phase 3 before updatePose (CharacterControllers.resolve); null without one. Not
+@@ -450,6 +459,17 @@ export class Fighter {
+     return new Vector3(Math.sin(this.yaw), 0, Math.cos(this.yaw));
+   }
+ 
++  /**
++   * P28: the half-side of the sole a ruler's feet plant with (its footwork looks under the whole footprint: a giant's
++   * foot across a pit cover's bearers stands on them, and its foot load reaches them, §4.11): the D-39 footprint ×
++   * RULER_BODY_TUNING.footProbeFrac. 0 for anyone else (a point, as before).
++   */
++  get soleM(): number {
++    if (!this.ruler) return 0;
++    const frac = getTuningValue('RULER_BODY_TUNING', 'footProbeFrac');
++    return (SPECIES_BODY[this.species ?? 'giantApe']?.footRadiusM ?? 0) * this.scale * (typeof frac === 'number' ? frac : 0);
++  }
++
+   /** Frames remaining until the current attack becomes active (negative once active). */
+   get framesToActive(): number {
+     return this.move ? this.move.startup - this.stateFrame : Infinity;
+@@ -1061,18 +1081,29 @@ export class Fighter {
+    * setters' to replace).
+    */
+   private rampPosture(): void {
+-    const want = this.posture && this.posture.weight > 0 ? this.posture : null;
+-    const shown = this.postureShown;
++    // P28 fix (§5.5 "Crouch: … posture `crouch`"): crouch held (MOVE_CROUCH) with no other posture asked shows the
++    // `crouch` posture. Before, crouching lowered only the controller (§4.2) and the body stood at full height above
++    // it: a crouched ape's head was 1.93 m up in a 1.39 m capsule, and touched the deadfall log it was routed under.
++    const want = this.posture && this.posture.weight > 0 ? this.posture : (this.moveFlags & MOVE_CROUCH) !== 0 ? CROUCHED : null;
++    let shown = this.postureShown;
+     if (!want && !shown) return;
+     const step = 1 / Math.max(1, characterTuning('postureRampFrames'));
++    // P28: low to low (the crouch to workLow, a stoop to a crouch) is a cross-fade, never a rise through standing:
++    // the shown posture is kept as `from` while the asked one ramps in over it.
++    if (shown && want && shown.id !== want.id && !shown.from && want.weight >= 1 && isLowPosture(shown.id) && isLowPosture(want.id)) {
++      shown = { id: want.id, weight: 0, from: { id: shown.id, weight: shown.weight } };
++    }
+     if (shown && shown.id !== want?.id) {
+       const w = shown.weight - step;
+-      this.postureShown = w > 0 ? { id: shown.id, weight: w } : null;
++      // Ramped out over a cross-fade's `from`: that one is shown again, as it was, and goes on from there.
++      this.postureShown = w > 0 ? { ...shown, weight: w } : (shown.from ?? null);
+       return;
+     }
+     const cur = shown?.weight ?? 0;
+     const to = want!.weight;
+-    this.postureShown = { id: want!.id, weight: to > cur ? Math.min(to, cur + step) : Math.max(to, cur - step) };
++    const weight = to > cur ? Math.min(to, cur + step) : Math.max(to, cur - step);
++    // The cross-fade ends once the asked posture is in full.
++    this.postureShown = shown?.from && weight < 1 ? { id: want!.id, weight, from: shown.from } : { id: want!.id, weight };
+   }
+ 
+   /**
+@@ -1083,25 +1114,19 @@ export class Fighter {
+    */
+   private applyPosture(spec: PoseSpec): void {
+     const shown = this.postureShown;
+-    if (!shown || !(shown.weight > 0)) return;
+-    const k = Math.min(1, shown.weight);
+-    const P: PoseSpec = POSE_SPECS[shown.id];
+-    const mix = (a: V3, b: V3): V3 => [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k];
+-    const r = spec.root ?? [0, GUARD.root![1], 0];
+-    const pr = P.root ?? GUARD.root!;
+-    const gr = GUARD.root!;
+-    spec.root = [r[0] + (pr[0] - gr[0]) * k, r[1] + (pr[1] - gr[1]) * k, r[2] + (pr[2] - gr[2]) * k];
+-    for (const b of ['pelvis', 'abdomen', 'chest', 'head'] as const) spec[b] = mix(spec[b] ?? [0, 0, 0], P[b] ?? [0, 0, 0]);
+-    for (const h of ['handL', 'handR'] as const) {
+-      const a = spec[h];
+-      const t = P[h];
+-      if (!a || !t) continue;
+-      const side = h === 'handL' ? 1 : -1;
+-      const hint: V3 = [side * 0.35, -1, 0];
+-      spec[h] = { at: mix(a.at, t.at), hint: mix(a.hint ?? hint, t.hint ?? hint) };
++    if (!shown) return;
++    const k = Math.min(1, Math.max(0, shown.weight));
++    // A cross-fade (P28): the posture fading out at its weight, then the one fading in over it by k (its hips' offset
++    // shared out between the two, so they sum to a straight blend and never pass the guard's height).
++    if (shown.from) {
++      const f = Math.min(1, Math.max(0, shown.from.weight));
++      blendPosture(spec, shown.from.id, f, f * (1 - k));
+     }
++    if (k > 0) blendPosture(spec, shown.id, k, k);
+     const reach = this.reachAt;
+-    if (reach) {
++    const kr = Math.max(k, shown.from ? Math.min(1, shown.from.weight) : 0);
++    if (reach && kr > 0) {
++      const mix = (a: V3, b: V3): V3 => [a[0] + (b[0] - a[0]) * kr, a[1] + (b[1] - a[1]) * kr, a[2] + (b[2] - a[2]) * kr];
+       // Fighter-local, unscaled: (reach − pos) turned by −yaw, ÷ scale (+x is the left).
+       const dx = reach.x - this.pos.x;
+       const dz = reach.z - this.pos.z;
+@@ -1517,7 +1542,7 @@ export class Fighter {
+       load: this.load ? { massKg: this.load.massKg, mode: this.load.mode } : null,
+       drive: this.drive ? { heading: this.drive.heading, speed: this.drive.speed, accel: this.drive.accel, climb: this.drive.climb } : null,
+       posture: this.posture ? { id: this.posture.id, weight: this.posture.weight } : null,
+-      postureShown: this.postureShown ? { id: this.postureShown.id, weight: this.postureShown.weight } : null,
++      postureShown: this.postureShown ? shownRecord(this.postureShown) : null,
+       work: w
+         ? { kind: w.kind, frames: w.frames, actAt: w.actAt, faceAt: v3Record(w.faceAt), keys: w.keys.map(trackKeyToRecord), cmd: w.cmd ? cloneCommand(w.cmd) : null }
+         : null,
+@@ -1665,8 +1690,13 @@ export class Fighter {
+     const dr = r.drive;
+     this.drive = dr ? { heading: n(dr.heading, 'drive.heading'), speed: n(dr.speed, 'drive.speed'), accel: n(dr.accel, 'drive.accel'), climb: b(dr.climb, 'drive.climb') } : null;
+     this.posture = r.posture ? { id: enumFromRecord(r.posture.id, POSTURES, 'posture.id'), weight: n(r.posture.weight, 'posture.weight') } : null;
+-    this.postureShown = r.postureShown
+-      ? { id: enumFromRecord(r.postureShown.id, POSTURES, 'postureShown.id'), weight: n(r.postureShown.weight, 'postureShown.weight') }
++    const ps = r.postureShown;
++    this.postureShown = ps
++      ? {
++          id: enumFromRecord(ps.id, POSTURES, 'postureShown.id'),
++          weight: n(ps.weight, 'postureShown.weight'),
++          ...(ps.from ? { from: { id: enumFromRecord(ps.from.id, POSTURES, 'postureShown.from.id'), weight: n(ps.from.weight, 'postureShown.from.weight') } } : {}),
++        }
+       : null;
+     this.work = r.work ? workFromRecord(r.work) : null;
+     // (A command is checked by the verb system when it is used, as every command is: §5.0.)
+@@ -1786,11 +1816,50 @@ const _com = new Vector3();
+ /** m/s². */
+ export const GRAVITY = 9.81;
+ 
++/** A shown posture; `from` is a low posture being cross-faded out under it (rampPosture, P28). */
++export type ShownPosture = Posture & { from?: Posture };
++
++function shownRecord(p: ShownPosture): ShownPosture {
++  return p.from ? { id: p.id, weight: p.weight, from: { id: p.from.id, weight: p.from.weight } } : { id: p.id, weight: p.weight };
++}
++
++/** A low posture (its root at most CHARACTER_TUNING.lowPostureRootM up, unscaled): low to low is a cross-fade (P28). */
++function isLowPosture(id: Posture['id']): boolean {
++  const root = POSE_SPECS[id].root ?? GUARD.root!;
++  return root[1] <= characterTuning('lowPostureRootM');
++}
++
++/**
++ * Posture `id` over the spec by k (§1.5.3): the spine's angles and the hands' targets toward the posture's by k, the
++ * hips raised or lowered (and shifted) by the posture's root against the guard's by `rootK`, the feet left to the
++ * footwork (so the legs keep walking under it).
++ */
++function blendPosture(spec: PoseSpec, id: Posture['id'], k: number, rootK: number): void {
++  const P: PoseSpec = POSE_SPECS[id];
++  const mix = (a: V3, b: V3): V3 => [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k];
++  const r = spec.root ?? [0, GUARD.root![1], 0];
++  const pr = P.root ?? GUARD.root!;
++  const gr = GUARD.root!;
++  spec.root = [r[0] + (pr[0] - gr[0]) * rootK, r[1] + (pr[1] - gr[1]) * rootK, r[2] + (pr[2] - gr[2]) * rootK];
++  for (const b of ['pelvis', 'abdomen', 'chest', 'head'] as const) spec[b] = mix(spec[b] ?? [0, 0, 0], P[b] ?? [0, 0, 0]);
++  for (const h of ['handL', 'handR'] as const) {
++    const a = spec[h];
++    const t = P[h];
++    if (!a || !t) continue;
++    const side = h === 'handL' ? 1 : -1;
++    const hint: V3 = [side * 0.35, -1, 0];
++    spec[h] = { at: mix(a.at, t.at), hint: mix(a.hint ?? hint, t.hint ?? hint) };
++  }
++}
++
++/** The posture crouch shows when nothing else is asked (rampPosture, §5.5). */
++const CROUCHED: Readonly<Posture> = Object.freeze({ id: 'crouch', weight: 1 });
++
+ /**
+  * A CHARACTER_TUNING value (world/characters.ts, P08), read through the registry by name at use time: the body's
+  * posture ramp and work-bend limit are world mode's (a fighter on a world's ground), and the sim imports no world module.
+  */
+-function characterTuning(key: 'postureRampFrames' | 'workHeadSpeedMps' | 'workRiseMargin'): number {
++function characterTuning(key: 'postureRampFrames' | 'workHeadSpeedMps' | 'workRiseMargin' | 'lowPostureRootM'): number {
+   const v = getTuningValue('CHARACTER_TUNING', key);
+   if (typeof v !== 'number') throw new Error(`CHARACTER_TUNING.${key} is not a number`);
+   return v;
+@@ -2101,8 +2170,8 @@ export type FighterRecord = {
+   load: { massKg: number; mode: 'carry' | 'drag' | 'rope' } | null;
+   drive: Drive | null;
+   posture: Posture | null;
+-  /** The posture as shown (ramped toward `posture`, §1.5.3). */
+-  postureShown: Posture | null;
++  /** The posture as shown (ramped toward `posture`, §1.5.3); `from` while a low posture is cross-faded out (P28). */
++  postureShown: ShownPosture | null;
+   work: { kind: Work['kind']; frames: number; actAt: number; faceAt: WorldV3; keys: TrackKeyRecord[]; cmd: VerbCommand | null } | null;
+   verbRequest: { cmd: VerbCommand; frames: number } | null;
+   verbAim: WorldV3 | null;
+diff --git a/packages/sim/src/world/characters.ts b/packages/sim/src/world/characters.ts
+index 946b64e..8ac97aa 100644
+--- a/packages/sim/src/world/characters.ts
++++ b/packages/sim/src/world/characters.ts
+@@ -62,6 +62,9 @@ export const CHARACTER_TUNING = defineTuning(
+     // Not §9.1 rows (core-fix): how the body shows a posture and bends in a work action (sim/fighter.ts, world mode).
+     // A posture set or cleared at once ramps in or out over this many frames (no jump of the pose).
+     postureRampFrames: 12,
++    // P28: a posture whose hips stand at most this high (its pose root, unscaled) is low: from one low posture to another
++    // the body cross-fades directly (the crouch to workLow), never rising through standing height on the way.
++    lowPostureRootM: 0.7,
+     // A work action's bend moves the head (relative to the feet) at most this fast (× scale): DS's 9-frame pickup squat
+     // swung it at up to 4.7 m/s, which with the step-in was a self-motion hit on anything in front.
+     workHeadSpeedMps: 3,
+@@ -106,6 +109,7 @@ export const CHARACTER_TUNING = defineTuning(
+     landingKnockdownSpeed: { unit: 'm/s', source: 'NEW' },
+     crouchHeightFrac: { unit: '× capsule height', source: 'NEW: a crouched ape is 1.39 m, so it fits under a deadfall log (RT-4)' },
+     postureRampFrames: { unit: 'frames for a full posture', source: 'NEW: core-fix (a posture never jumps the pose; head ≤ ~1.5 m/s)', min: 1 },
++    lowPostureRootM: { unit: 'm (pose root height, unscaled)', source: 'NEW: P28 (crouch 0.6, workLow 0.6, guard 0.86: low to low cross-fades)', min: 0 },
+     workHeadSpeedMps: { unit: 'm/s (world; the head, relative to the feet)', source: 'NEW: core-fix (a bend at ≤ 2-3 m/s, under v_safe with the step-in)', min: 0 },
+     workRiseMargin: { unit: "× the head's way to the guard", source: 'NEW: core-fix (the rise after a work action at ≤ workHeadSpeedMps)', min: 1 },
+     maxHipDropM: { unit: 'm × scale', source: 'NEW: core-fix (rule 3 on slopes: a planted ankle on its plant)', min: 0 },
+diff --git a/packages/sim/src/world/creatures/mind.ts b/packages/sim/src/world/creatures/mind.ts
+index f1eb574..73b9722 100644
+--- a/packages/sim/src/world/creatures/mind.ts
++++ b/packages/sim/src/world/creatures/mind.ts
+@@ -384,6 +384,9 @@ export abstract class CreatureMind implements Brain {
+       if (w.tick - this.mark < s.ticks) {
+         if (w.verbs.workTarget(self) !== s.entity) w.verbs.tug(self, s.entity);
+         self.posture = { id: 'workLow', weight: 1 };
++        // P28 fix: it backs off along dirYaw facing what it hauls (before, it turned its back on it and walked away
++        // forward, stooped head first); the face point lasts this tick (Fighter.faceAt).
++        self.faceAt = { x: e!.pose.p.x, z: e!.pose.p.z };
+         this.walk(self, Math.sin(s.dirYaw), Math.cos(s.dirYaw), this.gaitFor(self, VERB_TUNING.creatureHandSpeedMps, true), true);
+         return;
+       }
+diff --git a/packages/sim/src/world/rulerBody.ts b/packages/sim/src/world/rulerBody.ts
+index e947a7f..6b0d5e3 100644
+--- a/packages/sim/src/world/rulerBody.ts
++++ b/packages/sim/src/world/rulerBody.ts
+@@ -57,11 +57,15 @@ import type { Fighter } from '../sim/fighter';
+ import { DT } from '../sim/math';
+ import { RULER_TUNING } from '../sim/ruler';
+ import { DAMAGE_TUNING } from '../sim/rules';
++import { SPECIES_BODY } from '../sim/species';
+ import { defineTuning } from '../tuning/registry';
+ import { collisionGroups, solverGroups } from './groups';
+ import { compareOwners, ownerKey, PHYSICS_TUNING } from './physics';
+ import { cylinderPoints, principalAxis } from './shapes';
+-import type { Entity, FighterMover, ImpactCause, Pose3, Quat, RulerState, TripWhy, V3 } from './types';
++import type { Entity, FighterMover, ImpactCause, Pose3, Quat, RulerState, Shape, TripWhy, V3 } from './types';
++
++/** The sole cast's direction (P28, soleGround). */
++const SOLE_DOWN: V3 = Object.freeze({ x: 0, y: -1, z: 0 });
+ import type { World } from './world';
+ import { WORLD_TUNING } from './worldTuning';
+ import { boneZoneDesc, boneZoneShape } from './zones';
+@@ -99,6 +103,12 @@ export const RULER_BODY_TUNING = defineTuning(
+     getupShoveMps: 2,
+     riseBlendFrames: 40,
+     slideGrazeDeg: 2,
++    // P28: the ground under a foot's sole (or the body's root) is the highest support under the sole's footprint, probed
++    // at its centre and at footProbeRing points footProbeFrac × the D-39 load footprint out: one ray at a point fell
++    // between a pit cover's bearers (0.4 m apart under a 0.66 m sole) and read the hole below as a ledge.
++    footProbeFrac: 0.8,
++    soleProbeHalfM: 0.02,
++    coverHoldTicks: 30,
+   },
+   {
+     tripSpeed: { unit: 'm/s (root horizontal)', source: 'SPEC:782, 879; D-10' },
+@@ -137,6 +147,9 @@ export const RULER_BODY_TUNING = defineTuning(
+       unit: 'm/s',
+       source: "NEW: §4.7 get-up: light bodies resting on the ruler are shoved off at this speed before its colliders turn to sensors (MAP gap-3 §3.5)",
+     },
++    coverHoldTicks: { unit: 'ticks', source: 'NEW: P28 (a support woken by the ruler\'s own step keeps holding it this long, until it breaks)', min: 0, step: 1 },
++    soleProbeHalfM: { unit: 'm', source: 'NEW: P28 (the sole cast as a flat box this half-thick)', min: 0.001 },
++    footProbeFrac: { unit: '× footRadiusM × scale', source: 'NEW: P28 (the sole cast: its half-side inside the D-39 load footprint)', min: 0, max: 1 },
+     slideGrazeDeg: {
+       unit: '°',
+       source:
+@@ -663,7 +676,7 @@ export class RulerBodies {
+     let x = end.x;
+     let z = end.z;
+     let y: number;
+-    const g = this.groundAt(f, x, z, prev.y + T.stepUpMaxM, prev.y, rb);
++    const g = this.soleGround(f, x, z, prev.y + T.stepUpMaxM, prev.y, rb);
+     if (climbing) {
+       if (g.y <= prev.y + T.climbRateMps * DT) y = g.y;
+       else {
+@@ -907,7 +920,7 @@ export class RulerBodies {
+         const e = w.entities.get(id);
+         const resting =
+           !!e &&
+-          (e.state === 'fixed' || e.state === 'anchored' || e.restTicks >= PHYSICS_TUNING.restTicks || (e.body?.isSleeping() ?? false));
++          (e.state === 'fixed' || e.state === 'anchored' || e.restTicks >= PHYSICS_TUNING.restTicks || (e.body?.isSleeping() ?? false) || this.heldUp(rb, id));
+         if (e && resting && hit.point.y <= cap) {
+           if (rb) rb.supports.set(id, { tick: w.tick, credit: [...e.credit] });
+           return { y: Math.max(terrain, hit.point.y), entity: id };
+@@ -917,6 +930,60 @@ export class RulerBodies {
+     }
+   }
+ 
++  /**
++   * P28: an entity that held this ruler up within the last coverHoldTicks is still a support while it exists, though
++   * the ruler's own step has woken it (a bearer jostled under the foot is not at rest, and was dropped as ground the
++   * tick it took the weight: the foot read the hole under it as a ledge). It stops holding when it breaks (a 'cover'
++   * trip, vanishedSupports) or is gone, or after the window.
++   */
++  /** Does entity `id` hold up any ruler now (heldUp)? World.supportAt asks for a ruler's sole (its footwork, P28). */
++  holdsUp(id: number): boolean {
++    for (const rb of this.byId.values()) if (this.heldUp(rb, id)) return true;
++    return false;
++  }
++
++  private heldUp(rb: RulerBody | null, id: number): boolean {
++    const s = rb?.supports.get(id);
++    return !!s && this.world.tick - s.tick <= RULER_BODY_TUNING.coverHoldTicks;
++  }
++
++  /**
++   * P28: the ground under a sole at (x, z): the higher of groundAt at the centre and a flat box sole (half-side
++   * footProbeFrac × the species' D-39 footprint, footRadiusM × scale) cast down onto entities. Every support it meets is
++   * remembered (rb.supports), so a cover piece that held the sole and then broke, by its load or by an impact, makes the
++   * drop that follows a 'cover' trip (requestTrip, vanishedSupports). A gap narrower than the sole is no ledge.
++   */
++  private soleGround(f: Fighter, x: number, z: number, fromY: number, refY: number, rb: RulerBody | null): { y: number; entity: number | null } {
++    const T = RULER_BODY_TUNING;
++    const w = this.world;
++    const best = this.groundAt(f, x, z, fromY, refY, rb);
++    const r = (SPECIES_BODY[f.species ?? 'giantApe']?.footRadiusM ?? SPECIES_BODY.human.footRadiusM) * f.scale * T.footProbeFrac;
++    if (!(r > 0)) return best;
++    // The sole (a flat square box, half-side r, half-height soleProbeHalfM) cast straight down onto the entities under
++    // it: the first resting support it meets within the ankle's reach (as groundAt's ray), off-centre included. The
++    // terrain stays the centre's (slopes are walked as before).
++    const terrain = w.terrain.heightAt(x, z);
++    const cap = Math.max(terrain, refY) + rulerAnkleM(f);
++    const top = fromY + WORLD_TUNING.supportReachM;
++    if (!(top > terrain)) return best;
++    const sole: Shape = { kind: 'box', hx: r, hy: T.soleProbeHalfM, hz: r };
++    const ex: number[] = [];
++    for (let k = 0; k < 64; k++) {
++      const hit = w.queries.castShape(sole, { p: { x, y: top, z }, q: { x: 0, y: 0, z: 0, w: 1 } }, SOLE_DOWN, top - terrain, { terrain: false, entities: 'all', exclude: { entities: ex } });
++      if (!hit || hit.owner.kind !== 'entity') break;
++      const id = hit.owner.id;
++      const e = w.entities.get(id);
++      const resting = !!e && (e.state === 'fixed' || e.state === 'anchored' || e.restTicks >= PHYSICS_TUNING.restTicks || (e.body?.isSleeping() ?? false) || this.heldUp(rb, id));
++      const y = top - hit.toi - T.soleProbeHalfM;
++      if (hit.toi > 0 && e && resting && y <= cap) {
++        if (rb) rb.supports.set(id, { tick: w.tick, credit: [...e.credit] });
++        return y > best.y ? { y, entity: id } : best;
++      }
++      ex.push(id);
++    }
++    return best;
++  }
++
+   /**
+    * §4.7 step 7: how far the front foot's ground lies below the planted foot's (0 when it isn't lower). The front foot is
+    * the one further along the motion (or the facing); a stepping foot counts where it will land. Their supports are
+@@ -937,7 +1004,7 @@ export class RulerBodies {
+     const feet = SIDES.map((side) => {
+       const foot = f.footwork.foot(side);
+       const pt = foot.stepping ? foot.to : foot.pos;
+-      const g = this.groundAt(f, pt.x, pt.z, prev.y + T.stepUpMaxM, prev.y, rb);
++      const g = this.soleGround(f, pt.x, pt.z, prev.y + T.stepUpMaxM, prev.y, rb);
+       return { along: (pt.x - x) * ux + (pt.z - z) * uz, y: g.y };
+     });
+     const [front, back] = feet[0].along >= feet[1].along ? [feet[0], feet[1]] : [feet[1], feet[0]];
+diff --git a/packages/sim/src/world/types.ts b/packages/sim/src/world/types.ts
+index 8290e3d..2131ca5 100644
+--- a/packages/sim/src/world/types.ts
++++ b/packages/sim/src/world/types.ts
+@@ -460,8 +460,11 @@ export interface Finish {
+ export interface GroundQuery {
+   /** Terrain only. */
+   heightAt(x: number, z: number): number;
+-  /** Terrain or a fixed/anchored/resting entity below fromY + 0.5. */
+-  supportAt?(x: number, z: number, fromY: number): number;
++  /**
++   * Terrain or a fixed/anchored/resting entity below fromY + 0.5. `soleM` (P28): the half-side of a foot's sole, whose
++   * whole footprint is looked under (a giant's foot across a cover's thin bearers stands on them).
++   */
++  supportAt?(x: number, z: number, fromY: number, soleM?: number): number;
+ }
+ 
+ export interface FighterMover {
+diff --git a/packages/sim/src/world/verbs/hands.ts b/packages/sim/src/world/verbs/hands.ts
+index d5a79b9..53d07e2 100644
+--- a/packages/sim/src/world/verbs/hands.ts
++++ b/packages/sim/src/world/verbs/hands.ts
+@@ -325,7 +325,7 @@ export function putInHands(w: World, f: Fighter, entity: number): boolean {
+  * velocity, capped at `capN`; vertically a lift toward liftHandM above the feet, capped at dragLiftFrac of the held
+  * object's weight. Null when the entity has no awake-able dynamic body.
+  */
+-export function dragImpulse(w: World, f: Fighter, entity: number, grip: V3, capN: number): { j: V3; at: V3 } | null {
++export function dragImpulse(w: World, f: Fighter, entity: number, grip: V3, capN: number, offsetM?: number): { j: V3; at: V3 } | null {
+   const e = w.entities.get(entity);
+   const b = e?.body;
+   if (!e || !b || !b.isEnabled() || !b.isDynamic()) return null;
+@@ -345,16 +345,25 @@ export function dragImpulse(w: World, f: Fighter, entity: number, grip: V3, capN
+     ux = Math.sin(f.yaw);
+     uz = Math.cos(f.yaw);
+   }
+-  const tx = hand.x - ux * t.dragHandOffsetM * s;
+-  const tz = hand.z - uz * t.dragHandOffsetM * s;
+-  let fx = t.dragKp * (tx - g.x) - t.dragKd * (gv.x - f.walkVel.x / 2);
+-  let fz = t.dragKp * (tz - g.z) - t.dragKd * (gv.z - f.walkVel.z / 2);
++  // The point the grip is drawn to: dragHandOffsetM × scale in front of the hand, or a creature tug's own hold (P28).
++  const off = offsetM ?? t.dragHandOffsetM * s;
++  const tx = hand.x - ux * off;
++  const tz = hand.z - uz * off;
++  // P28 fix: the PD is applied as an explicit impulse, so it is stable only while kd·DT < 2m (and kp·DT² < m): with
++  // dragKd 300 a load under 5 kg (a creature's tug on a 1 kg bait, §11.2(a)) flipped its velocity every tick and grew
++  // until the cap, flinging the bait. The gains are held to the deadbeat limit of the load's mass (kd = m/DT kills the
++  // grip's relative velocity in one tick, kp = m/DT² closes its offset in one), which leaves every load ≥ 5 kg as it was.
++  const m = heldShape(w, entity).massKg;
++  const kp = Math.min(t.dragKp, m / (DT * DT));
++  const kd = Math.min(t.dragKd, m / DT);
++  let fx = kp * (tx - g.x) - kd * (gv.x - f.walkVel.x / 2);
++  let fz = kp * (tz - g.z) - kd * (gv.z - f.walkVel.z / 2);
+   const fh = Math.hypot(fx, fz);
+   if (fh > capN) {
+     fx *= capN / fh;
+     fz *= capN / fh;
+   }
+-  const weight = heldShape(w, entity).massKg * -WORLD_TUNING.gravityY;
++  const weight = m * -WORLD_TUNING.gravityY;
+   const fy = Math.max(0, Math.min(t.dragLiftFrac * weight, t.liftKp * (hand.y - g.y) - t.liftKd * gv.y));
+   return { j: { x: fx * DT, y: fy * DT, z: fz * DT }, at: g };
+ }
+diff --git a/packages/sim/src/world/verbs/index.ts b/packages/sim/src/world/verbs/index.ts
+index 682b4ba..8c255f8 100644
+--- a/packages/sim/src/world/verbs/index.ts
++++ b/packages/sim/src/world/verbs/index.ts
+@@ -46,8 +46,11 @@ interface FighterVerbs {
+   focus: { target: number; at: V3 | null } | null;
+   /** A continuous verb that is on (pull, shape, hand-dig). */
+   cont: ContinuousState | null;
+-  /** A creature's tug (§6.6): the entity it hauls with the drag code at creature strength, and its grip (entity frame). */
+-  tug: { entity: number; grip: V3 } | null;
++  /**
++   * A creature's tug (§6.6): the entity it hauls with the drag code at creature strength, its grip (entity frame), and
++   * how far in front of the hand it holds it (P28: the grip's distance when taken, at most dragHandOffsetM × scale).
++   */
++  tug: { entity: number; grip: V3; holdM: number } | null;
+ }
+ 
+ /** The verb system's save record, one per fighter with state (§8.3: `verbs`, by fighter id). */
+@@ -56,7 +59,7 @@ export interface VerbStateRecord extends VerbStateRecV1 {
+   focus: { target: number; at: V3 | null } | null;
+   /** `data` as [key, value] pairs sorted by key. */
+   cont: { verb: VerbId; cmd: VerbCommand; ticks: number; data: [string, number][] } | null;
+-  tug: { entity: number; grip: V3 } | null;
++  tug: { entity: number; grip: V3; holdM: number } | null;
+ }
+ 
+ const isDown = (f: Fighter): boolean => f.state === 'knockdown' || f.state === 'ko' || f.state === 'tripped';
+@@ -198,7 +201,7 @@ export class VerbSystem {
+         if (imp) w.entities.queueImpulse(h.entity, imp.j, imp.at);
+       }
+       if (s?.tug) {
+-        const imp = dragImpulse(w, f, s.tug.entity, s.tug.grip, t.pullForceN * t.creaturePullMul * f.scale * f.scale);
++        const imp = dragImpulse(w, f, s.tug.entity, s.tug.grip, t.pullForceN * t.creaturePullMul * f.scale * f.scale, s.tug.holdM);
+         if (imp) w.entities.queueImpulse(s.tug.entity, imp.j, imp.at);
+       }
+       const c = s?.cont;
+@@ -287,7 +290,12 @@ export class VerbSystem {
+       return;
+     }
+     const near = e.collider ? this.world.queries.projectPoint(entity, chestPoint(f)).point : null;
+-    s.tug = { entity, grip: near ? verbGeom.pointToLocal(e.pose, near) : dragGrip(this.world, f, entity) };
++    const grip = near ? verbGeom.pointToLocal(e.pose, near) : dragGrip(this.world, f, entity);
++    // P28 fix: held where it was gripped (never further than the drag's hand offset). With the drag's fixed 0.8 m, a
++    // bait gripped 0.45 m from the ape was first shoved 0.35 m away from it, into the deadfall's prop.
++    const gw = verbGeom.pointToWorld(e.pose, grip);
++    const holdM = Math.min(VERB_TUNING.dragHandOffsetM * f.scale, Math.hypot(gw.x - f.pos.x, gw.z - f.pos.z));
++    s.tug = { entity, grip, holdM };
+   }
+ 
+   // -------------------------------------------------------------------------
+@@ -315,7 +323,7 @@ export class VerbSystem {
+                 .map((k): [string, number] => [k, s.cont!.data[k]]),
+             }
+           : null,
+-        tug: s.tug ? { entity: s.tug.entity, grip: copy3(s.tug.grip) } : null,
++        tug: s.tug ? { entity: s.tug.entity, grip: copy3(s.tug.grip), holdM: s.tug.holdM } : null,
+       });
+     }
+     return out;
+@@ -338,7 +346,7 @@ export class VerbSystem {
+       this.byFighter.set(fighter, {
+         focus: focus ? { target: focus.target, at: focus.at ? copy3(focus.at) : null } : null,
+         cont: cont ? { verb: cont.verb, cmd: cloneCommand(cont.cmd), ticks: cont.ticks, data: Object.fromEntries(cont.data.map(([k, v]) => [k, v])) } : null,
+-        tug: tug ? { entity: tug.entity, grip: copy3(tug.grip) } : null,
++        tug: tug ? { entity: tug.entity, grip: copy3(tug.grip), holdM: tug.holdM } : null,
+       });
+     }
+   }
+diff --git a/packages/sim/src/world/world.ts b/packages/sim/src/world/world.ts
+index 0e4a0be..00adb8c 100644
+--- a/packages/sim/src/world/world.ts
++++ b/packages/sim/src/world/world.ts
+@@ -42,7 +42,7 @@ import { Loads } from './loads';
+ import { NavSystem, NavWalkable } from './nav';
+ import { isPhysicsReady, PHYSICS_TUNING, PhysicsWorld, physicsReady } from './physics';
+ import { WorldQueries } from './queries';
+-import { RulerBodies } from './rulerBody';
++import { RULER_BODY_TUNING, RulerBodies } from './rulerBody';
+ import { WorldRngs } from './rngs';
+ import { Terrain } from './terrain';
+ import type { Finish, FighterMover, GroundQuery, ProjectileWorldHit, WorldEvent, WorldPort, WorldStrike } from './types';
+@@ -210,7 +210,7 @@ export class World implements WorldPort {
+     const terrain = this.terrain;
+     this.ground = {
+       heightAt: (x, z) => terrain.heightAt(x, z),
+-      supportAt: (x, z, fromY) => this.supportAt(x, z, fromY),
++      supportAt: (x, z, fromY, soleM) => this.supportAt(x, z, fromY, soleM ? { soleM } : undefined),
+     };
+ 
+     // The seams (§1.5.2): set before any fighter is added, so every fighter gets the ground.
+@@ -416,12 +416,32 @@ export class World implements WorldPort {
+    * taller entities are obstacles, never ground); `excludeEntities` leaves entities out (a cover that just broke and its
+    * pieces, §4.7 step 8). Like every query it sees entities as of the last physics step.
+    */
+-  supportAt(x: number, z: number, fromY: number, o?: { maxAboveTerrainM?: number; excludeEntities?: readonly number[] }): number {
++  supportAt(x: number, z: number, fromY: number, o?: { maxAboveTerrainM?: number; excludeEntities?: readonly number[]; soleM?: number }): number {
+     const ground = this.terrain.heightAt(x, z);
+     const top = fromY + WORLD_TUNING.supportReachM;
+     if (!(top > ground)) return ground;
+     const exclude = [...(o?.excludeEntities ?? [])];
+     const maxAbove = o?.maxAboveTerrainM ?? Infinity;
++    // P28: a sole (half-side soleM) looks under its whole footprint: a flat box cast down onto the entities, the first
++    // support it meets (resting, or holding up a ruler now, RulerBodies.holdsUp); the terrain stays the centre's.
++    const sole = o?.soleM ?? 0;
++    if (sole > 0) {
++      const ex = [...exclude];
++      for (let k = 0; k < 64; k++) {
++        const hit = this.queries.castShape({ kind: 'box', hx: sole, hy: RULER_BODY_TUNING.soleProbeHalfM, hz: sole }, { p: { x, y: top, z }, q: { x: 0, y: 0, z: 0, w: 1 } }, { x: 0, y: -1, z: 0 }, top - ground, {
++          terrain: false,
++          entities: 'all',
++          exclude: { entities: ex },
++        });
++        if (!hit || hit.owner.kind !== 'entity') break;
++        const id = hit.owner.id;
++        const e = this.entities.get(id);
++        const y = top - hit.toi - RULER_BODY_TUNING.soleProbeHalfM;
++        const resting = !!e && (e.state === 'fixed' || e.state === 'anchored' || e.restTicks >= PHYSICS_TUNING.restTicks || (e.body?.isSleeping() ?? false) || this.rulers.holdsUp(id));
++        if (hit.toi > 0 && resting && y - ground <= maxAbove) return Math.max(ground, y);
++        ex.push(id);
++      }
++    }
+     for (;;) {
+       const hit = this.queries.castRay({ x, y: top, z }, { x: 0, y: -1, z: 0 }, top - ground, {
+         terrain: false,
+diff --git a/packages/sim/tests/ac2.traps.test.ts b/packages/sim/tests/ac2.traps.test.ts
+new file mode 100644
+index 0000000..347db71
+--- /dev/null
++++ b/packages/sim/tests/ac2.traps.test.ts
+@@ -0,0 +1,903 @@
++// AC-2: four traps from entities and verbs (SPEC Milestone 1, SPEC:899; docs/M1-DESIGN.md §11.2; package P28).
++//
++// "Headless test scenes built only from entities and verbs show a deadfall, a spike pit, a swinging log and a felled
++// tree each wounding or killing a creature. Tests may script a creature's route and actions (walking a path, pulling
++// bait), never the trap."
++//
++// Rule 1: nothing here is a trap type. Every scene is the harness's factory entities and the scripted player's verbs
++// (scenes.ts, P23, where the recipe is shared; the few steps written here use only `h.verb`/`h.must`, walks and the
++// factory), plus the harness's logged fixtures where §11.0 allows them: `standAt`, `keepAwake`, and for the ruler-scale
++// logs no M1 verb lifts (D-25) `stage`/`unstage` before any creature exists (the staging fence refuses them after).
++// Creatures are scripted (`route`, `tug`, `hold`, `charge`, §6.6); nothing here moves, pins, frees or breaks anything
++// that does the harm. Tuning is touched only by the negative controls (a weaker tug), and put back.
++//
++// "Wounding" (§11.2): for an ape, an `impact` event whose cause is an entity of the scene, not held, with damage > 0;
++// for the giant, a WoundRecord (> 240 HP) with that cause. v_n is measured here (the event carries no v_n): the struck
++// entity's velocity at the contact point, from the tick before the impact, along the impact normal (out of the
++// target). Each assertion is marked GATE (the criterion's meaning; never moves) or PIN (a measured number with its
++// source and tolerance), §11 RT-21. Every number printed with `console.info` is a measurement.
++//
++// Lab-first step (§11.2, RT-21), run with the real pipeline in this package (P28's lab runs, reported in the P28 report):
++// the pins below that differ from §11.2's are the lab's numbers, each with its own note.
++
++import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
++import { toCm } from '../src/sim/commands';
++import type { Fighter } from '../src/sim/fighter';
++import { getTuningValue, setTuningValue } from '../src/tuning/registry';
++import { RULER_BODY_TUNING } from '../src/world/rulerBody';
++import type { Quat, V3, WorldEvent } from '../src/world/types';
++import { buildHauledLog, buildLeaningLog, buildNotchedTree, lyingAlong } from './support/scenes';
++import { BACK_SLOT, cachedScene, type Harness, loadHarness, makeHarness, SCENE_BUILD_TIMEOUT_MS, type XZ } from './support/worldHarness';
++
++/** §11: anything with Rapier gets 120 s. */
++const RAPIER_IT_MS = 120_000;
++/** The pit runs and the 120 s holds take longer than one ordinary `it`. */
++const LONG_IT_MS = 600_000;
++
++const live: Harness[] = [];
++async function make(seed: number, size: number): Promise<Harness> {
++  const h = await makeHarness({ seed, size });
++  live.push(h);
++  return h;
++}
++async function load(bytes: Uint8Array): Promise<Harness> {
++  const h = await loadHarness(bytes);
++  live.push(h);
++  return h;
++}
++afterEach(() => {
++  for (const h of live.splice(0)) h.w.dispose();
++});
++
++// ---------------------------------------------------------------------------
++// Small helpers (observation and geometry only)
++// ---------------------------------------------------------------------------
++
++type Impact = Extract<WorldEvent, { type: 'impact' }>;
++const of = <T extends WorldEvent['type']>(evs: readonly WorldEvent[], type: T): Extract<WorldEvent, { type: T }>[] =>
++  evs.filter((e): e is Extract<WorldEvent, { type: T }> => e.type === type);
++const deg = (r: number): number => (r * 180) / Math.PI;
++const flat = (a: XZ, b: XZ): number => Math.hypot(a.x - b.x, a.z - b.z);
++
++function mulQ(a: Quat, b: Quat): Quat {
++  return {
++    w: a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
++    x: a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
++    y: a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
++    z: a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
++  };
++}
++function rotQ(q: Quat, v: V3): V3 {
++  const tx = 2 * (q.y * v.z - q.z * v.y);
++  const ty = 2 * (q.z * v.x - q.x * v.z);
++  const tz = 2 * (q.x * v.y - q.y * v.x);
++  return { x: v.x + q.w * tx + (q.y * tz - q.z * ty), y: v.y + q.w * ty + (q.z * tx - q.x * tz), z: v.z + q.w * tz + (q.x * ty - q.y * tx) };
++}
++/** A turn of `a` rad about world z. */
++const aboutZ = (a: number): Quat => ({ x: 0, y: 0, z: Math.sin(a / 2), w: Math.cos(a / 2) });
++/** An entity's long axis (local y) in the world. */
++const axisOf = (h: Harness, id: number): V3 => rotQ(h.ent(id).pose.q, { x: 0, y: 1, z: 0 });
++/** Tilt of a prism's long axis from vertical, degrees. */
++const tiltDeg = (h: Harness, id: number): number => deg(Math.acos(Math.min(1, Math.abs(axisOf(h, id).y))));
++
++/**
++ * The velocity of every watched entity at the start of each tick (the previous tick's end), so an impact scored in a
++ * tick can be given its approach speed v_n: (v + ω × (point − com))·(−normal), the normal pointing out of the target.
++ */
++function watchVelocities(h: Harness, ids: readonly number[]): (i: Impact) => number {
++  const before = new Map<number, Map<number, { v: V3; w: V3; c: V3 }>>();
++  const step = h.step.bind(h);
++  h.step = () => {
++    const tick = h.w.tick + 1;
++    const m = new Map<number, { v: V3; w: V3; c: V3 }>();
++    for (const id of ids) {
++      const e = h.w.entities.get(id);
++      if (!e) continue;
++      const c = e.body?.isEnabled() ? e.body.worldCom() : e.pose.p;
++      m.set(id, { v: { ...e.vel.lin }, w: { ...e.vel.ang }, c: { x: c.x, y: c.y, z: c.z } });
++    }
++    before.set(tick, m);
++    before.delete(tick - 600);
++    return step();
++  };
++  return (i: Impact): number => {
++    const s = i.cause.entityId === null ? undefined : before.get(i.tick)?.get(i.cause.entityId);
++    if (!s) return Number.NaN;
++    const r = { x: i.point.x - s.c.x, y: i.point.y - s.c.y, z: i.point.z - s.c.z };
++    const vp = { x: s.v.x + (s.w.y * r.z - s.w.z * r.y), y: s.v.y + (s.w.z * r.x - s.w.x * r.z), z: s.v.z + (s.w.x * r.y - s.w.y * r.x) };
++    return -(vp.x * i.normal.x + vp.y * i.normal.y + vp.z * i.normal.z);
++  };
++}
++
++/** The least distance between any collider of the fighter (its controller capsule included) and the entity's (m; < 0 overlapping). */
++function clearance(h: Harness, f: Fighter, entity: number): number {
++  const phys = h.w.physics;
++  const ec = h.ent(entity).collider;
++  if (!ec) return Number.POSITIVE_INFINITY;
++  let best = Number.POSITIVE_INFINITY;
++  phys.rapier.forEachCollider((c) => {
++    const o = phys.ownerOf(c.handle);
++    if (!o || o.kind !== 'fighter' || o.id !== f.id) return;
++    if (c.isEnabled && !c.isEnabled()) return;
++    const ct = c.contactCollider(ec, 5);
++    if (ct && ct.distance < best) best = ct.distance;
++  });
++  return best;
++}
++
++/** Walk there, or (the way is shut: a berm, a pile, a pit wall) a logged standAt (as scenes.ts's goTo). */
++function goTo(h: Harness, q: XZ, yaw?: number): void {
++  if (!h.walk(q, { tolM: 0.15, tryOnly: true }) || flat(h.p.pos, q) > 0.3) h.standAt(q, yaw);
++}
++
++/** Walk up to the entity and take it (a logged standAt beside it when it is out of reach, as scenes.ts's take). */
++function take(h: Harness, id: number, what: string): void {
++  h.approach(id);
++  const r = h.verb({ verb: 'take', target: id });
++  if (r.ok) return;
++  if (r.reason !== 'outOfReach' && r.reason !== 'outOfRange') throw new Error(`${what} refused (${r.reason})`);
++  const e = h.ent(id).pose.p;
++  const p = h.p.pos;
++  const d = Math.max(1e-6, flat(p, e));
++  h.standAt({ x: e.x + ((p.x - e.x) / d) * 0.8, z: e.z + ((p.z - e.z) / d) * 0.8 });
++  h.ticks(2);
++  h.must({ verb: 'take', target: id }, what);
++}
++
++/** Temporarily sets a live tuning value (a negative control), restoring it after `f`. */
++function withTuning<T>(table: string, key: string, value: number, f: () => T): T {
++  const was = getTuningValue(table, key);
++  setTuningValue(table, key, value);
++  try {
++    return f();
++  } finally {
++    setTuningValue(table, key, was as number);
++  }
++}
++
++/** The creature tug's force (VERB_TUNING.pullForceN × creaturePullMul × scale², §5.12) set to `n` newtons for `f`. */
++function withTugN<T>(scale: number, n: number, f: () => T): T {
++  const pullN = getTuningValue('VERB_TUNING', 'pullForceN') as number;
++  return withTuning('VERB_TUNING', 'creaturePullMul', n / (pullN * scale * scale), f);
++}
++
++function noNaN(h: Harness, fighters: readonly Fighter[]): boolean {
++  for (const f of fighters) if (![f.pos.x, f.pos.y, f.pos.z].every(Number.isFinite)) return false;
++  for (const e of h.w.entities.all()) {
++    const p = e.pose.p;
++    const v = e.vel.lin;
++    if (![p.x, p.y, p.z, v.x, v.y, v.z].every(Number.isFinite)) return false;
++  }
++  return true;
++}
++
++// ---------------------------------------------------------------------------
++// (a) Deadfall: the ape at the bait
++// ---------------------------------------------------------------------------
++
++/**
++ * The deadfall's ape run: an ape (brain off) walks a crouched route in under the log from the side to `stand`, waits,
++ * then either tugs the bait for 120 ticks along `act.tugYaw` (§6.6 `tug`) or walks on, crouched, to `act.walkTo` (a
++ * `route`). Measures the spring (the log's centre 5 cm below where it was set), the ape's clearance to the log until
++ * then (every collider of it, its controller capsule included), and the log's impacts on it.
++ */
++function apeAtBait(h: Harness, o: { log: number; bait: number; stand: XZ; act: { tugYaw: number } | { walkTo: XZ }; vnOf: (i: Impact) => number }) {
++  const ape = h.creature('ape', { x: o.stand.x, z: o.stand.z - 3.5 }, 0, { brain: 'off' });
++  h.ticks(10);
++  // The ape's arrival radius (CREATURE_TUNING.ape.arriveM 0.6) ends the route that far short of its last point.
++  h.script(ape, { kind: 'route', points: [{ x: o.stand.x, z: o.stand.z - 1.5 }, { x: o.stand.x, z: o.stand.z + 0.56 }], crouch: true });
++  let fit = Number.POSITIVE_INFINITY;
++  h.until(() => {
++    fit = Math.min(fit, clearance(h, ape, o.log));
++    return h.mind(ape).scriptDone;
++  }, 900, 'the ape under the log');
++  h.ticks(20);
++  fit = Math.min(fit, clearance(h, ape, o.log));
++  const y0 = h.ent(o.log).pose.p.y;
++  if ('tugYaw' in o.act) h.script(ape, { kind: 'tug', entity: o.bait, dirYaw: o.act.tugYaw, ticks: 120 });
++  else h.script(ape, { kind: 'route', points: [o.act.walkTo], crouch: true });
++  const actTick = h.w.tick;
++  let spring = -1;
++  h.ticks(360, (_, t) => {
++    if (spring < 0 && h.ent(o.log).pose.p.y < y0 - 0.05) spring = t;
++    if (spring < 0) fit = Math.min(fit, clearance(h, ape, o.log));
++  });
++  // The tug's grip tick (`mark`); a route has none: its start.
++  const grip = 'tugYaw' in o.act ? h.mind(ape).mark : actTick;
++  const hits = h.impacts(ape).filter((i) => i.cause.entityId === o.log);
++  return { ape, fit, grip, actTick, spring, hits, vn: hits.map(o.vnOf) };
++}
++
++function report(tag: string, r: ReturnType<typeof apeAtBait>): void {
++  console.info(
++    `${tag}: clearance before the spring ${r.fit.toFixed(3)} m; grip at +${r.grip - r.actTick} ticks, spring ${r.spring < 0 ? 'none' : `${((r.spring - r.grip) / 60).toFixed(2)} s after it`}; ` +
++      `log hits ${r.hits.map((i, k) => `${i.bone} v_n ${r.vn[k].toFixed(2)} m/s ${i.energy.toFixed(1)} J ${i.damage.toFixed(2)} HP${i.knockdown ? ' knockdown' : ''}`).join('; ') || 'none'}`,
++  );
++}
++
++/** The 120 s hold (RT-4): the log and the prop kept awake for 7,200 ticks; the prop's largest tilt from vertical. */
++function holdTilt(h: Harness, r: { prop: number; log: number }): number {
++  h.keepAwake(r.log);
++  h.keepAwake(r.prop);
++  let tilt = 0;
++  h.ticks(7200, (_, t) => {
++    if (t % 30 === 0) tilt = Math.max(tilt, tiltDeg(h, r.prop));
++  });
++  return tilt;
++}
++
++describe('AC-2(a): a deadfall wounds the ape that disturbs it', () => {
++  /** §11.2(a): the log rises along +x (yaw π/2) from its lower end at the origin: "toward its own body" is −x. */
++  const TOWARD_BODY = -Math.PI / 2;
++
++  /*
++   * §11.2(a)'s own recipes (the bait tug) are kept as written. They FAIL and stay failing; the recipe that works from
++   * the rules is the walked one further down, without the tug (see the P28 report).
++   *
++   * With P28's sim fixes (the crouch shows its posture; low postures cross-fade; the tugging ape backs off facing the
++   * bait and holds it where it gripped it) the ape tugging toward its own body backs inward, under the lowering log:
++   * verb-only (0.45 m inward) its back meets the log (clearance −0.075 m) and the 907.5 N pull never springs it (the
++   * pull on the prop's foot at the lash's height only walks the foot in); staged (0.8 m inward) it springs in 0.83 s
++   * but the log arrives at v_n 1.83 m/s (gate ≥ 2) for 0.85 HP, and the 700 N control springs it too (0.88 s): this
++   * sim's prop gives way below the C lab's 762 N. Before those fixes the tugging ape turned and walked inward head
++   * first, into the log, and the drag's fixed 0.8 m hold shoved the bait into the prop's foot (which sprang every run,
++   * 200 N and 700 N included).
++   * Third pass (P28 lab): the prop itself is right — a force applied at the lash's point on the free prop springs it at
++   * 200 N (in 1.2 s; 266 N 0.7 s, 907 N 0.13 s) and holds at 150 N, near the C lab's 266 N — so the 200 N control can't
++   * hold whoever pulls. The tug doesn't deliver its 907.5 N: the drag PD reaches its cap only ≈ 0.3 m past the taut
++   * rope, so the ape backs off that far and the spring comes 1.2-2.3 s after the grip, by then under the lower log
++   * (moving the bait 0.2-0.3 m toward the prop: clearance −0.18 … +0.07 m, no hit at v_n ≥ 1 m/s). A taller prop (2.6-2.9
++   * m) or a steeper log topples the free 7 cm prop before the bait is lashed. No scene that keeps the free prop and the
++   * lash met all four gates; left failing.
++   */
++  it('verb-only gate (§11.2(a) as written): the 40 kg log leaned on a free prop holds 120 s awake, springs when the ape tugs the bait toward itself, and hits it', async () => {
++    const h = await make(44, 40);
++    const r = buildLeaningLog(h, { at: { x: 0, z: 0 }, yaw: Math.PI / 2 });
++    const vnOf = watchVelocities(h, [r.log]);
++    h.walk({ x: -4, z: -6 });
++    const tilt = holdTilt(h, r);
++    console.info(`deadfall gate: prop tilt over 120 s awake ≤ ${tilt.toFixed(3)}°`);
++    // GATE: the log stays set 120 s awake (keepAwake, RT-4): the prop's tilt < 1°.
++    expect(tilt).toBeLessThan(1);
++    const b = h.ent(r.bait).pose.p;
++    // Step 4: the ape routed crouched to 0.45 m behind the bait; a tug toward its own body.
++    const res = apeAtBait(h, { log: r.log, bait: r.bait, stand: { x: b.x - 0.45, z: b.z }, act: { tugYaw: TOWARD_BODY }, vnOf });
++    report('deadfall gate', res);
++    // GATE: springs within 1.0 s of the tug's grip.
++    expect(res.spring).toBeGreaterThan(0);
++    expect((res.spring - res.grip) / 60).toBeLessThanOrEqual(1.0);
++    // GATE: an impact on the ape from the log, not held, v_n ≥ 1 m/s, damage > 0, credited to the player.
++    const hit = res.hits.find((i, k) => !i.cause.held && i.damage > 0 && res.vn[k] >= 1);
++    expect(hit, 'a log hit with v_n ≥ 1 m/s and damage > 0').toBeDefined();
++    expect(hit!.cause.credit).toContain('p1');
++    // GATE: no tripwire event (RT-5): the bait's rope is the ape's work target.
++    expect(h.tripwires()).toEqual([]);
++    // GATE: the ape fits (no collider of it, the controller capsule included, touches the log before the spring).
++    expect(res.fit).toBeGreaterThan(0);
++  }, LONG_IT_MS);
++
++  it('verb-only negative control: a 200 N tug does not spring it', async () => {
++    const h = await make(44, 40);
++    const r = buildLeaningLog(h, { at: { x: 0, z: 0 }, yaw: Math.PI / 2 });
++    const vnOf = watchVelocities(h, [r.log]);
++    h.walk({ x: -4, z: -6 });
++    h.ticks(60);
++    const b = h.ent(r.bait).pose.p;
++    const res = withTugN(1.1, 200, () => apeAtBait(h, { log: r.log, bait: r.bait, stand: { x: b.x - 0.45, z: b.z }, act: { tugYaw: TOWARD_BODY }, vnOf }));
++    report('deadfall gate, 200 N control', res);
++    // GATE: no spring, no hit.
++    expect(res.spring).toBe(-1);
++    expect(res.hits.filter((i) => i.damage > 0)).toEqual([]);
++  }, RAPIER_IT_MS);
++
++  /*
++   * The deadfall that works from the rules (P28 lab: 9 of 9 placements 0.2-0.6 m inward of the bait and ±0.1 m aside
++   * scored a head hit of 0.7-2.8 HP, the spring 0.6-1.1 s after the ape set off): the ape walks its route crouched under
++   * the log toward the prop and blunders into the bait and the prop's foot; the prop is knocked out and the log drops on
++   * it. Only the creature's route is scripted (SPEC: "walking a path"); the arrangement is §11.2(a)'s, built by
++   * buildLeaningLog. (Crossing the bait's lash is a tripwire crossing here, not a work target: logged, not gated.)
++   */
++  it('verb-only: the same deadfall springs on an ape that walks its route under the log into the prop, and hits it', async () => {
++    const h = await make(44, 40);
++    const r = buildLeaningLog(h, { at: { x: 0, z: 0 }, yaw: Math.PI / 2 });
++    const vnOf = watchVelocities(h, [r.log]);
++    h.walk({ x: -4, z: -6 });
++    const tilt = holdTilt(h, r);
++    expect(tilt).toBeLessThan(1);
++    const b = h.ent(r.bait).pose.p;
++    const res = apeAtBait(h, { log: r.log, bait: r.bait, stand: { x: b.x - 0.4, z: b.z }, act: { walkTo: { x: b.x + 1.2, z: b.z } }, vnOf });
++    report('deadfall walked', res);
++    console.info(`deadfall walked: tripwire events ${h.tripwires().length} (LOGGED)`);
++    // GATE: the ape fits under the log until it springs; it springs; a hit from the log, not held, v_n ≥ 1 m/s,
++    // damage > 0, credited to the player (who built it).
++    expect(res.fit).toBeGreaterThan(0);
++    expect(res.spring).toBeGreaterThan(0);
++    const hit = res.hits.find((i, k) => !i.cause.held && i.damage > 0 && res.vn[k] >= 1);
++    expect(hit, 'a log hit with v_n ≥ 1 m/s and damage > 0').toBeDefined();
++    expect(hit!.cause.credit).toContain('p1');
++    // PIN (P28 lab: 0.7-2.8 HP on the head, 12-50 J): 0.5-4 HP.
++    expect(hit!.damage).toBeGreaterThan(0.5);
++    expect(hit!.damage).toBeLessThan(4);
++  }, LONG_IT_MS);
++
++  /**
++   * §11.2(a)'s staged scene: a dry stick r 0.07 × 2.38 m carried and placed upright, not driven, at x 5.07; a dry hex
++   * log 6.0 m, circumradius 0.17 m spawned free at its pose (D-25), its lower end on the ground at x 0 and its
++   * underside on the stick's top (25°); a 1 kg hide bait placed 0.55 m inward of the stick and lashed to it (a 0.65 m
++   * vine). DEVIATION (§11.2(a) "≈ 170 kg"): the factory's dry wood makes that log 248 kg; the recipe's dimensions are
++   * kept (they set the underside's height over the ape).
++   */
++  function buildStagedDeadfall(h: Harness): { prop: number; log: number; bait: number } {
++    const PROP = { x: 5.07, z: 0.013, lengthM: 2.38, r: 0.07 };
++    const g = h.w.terrain.heightAt(PROP.x, PROP.z);
++    const prop = h.stick({ length: PROP.lengthM, r: PROP.r, p: { x: 5, y: g + PROP.r + 0.03, z: 3 }, q: lyingAlong(Math.PI / 2) });
++    h.ticks(20);
++    take(h, prop, 'take the prop');
++    goTo(h, { x: PROP.x, z: -1.2 });
++    h.must({ verb: 'place', target: 0, at: toCm({ x: PROP.x, y: g + PROP.lengthM / 2, z: PROP.z }), yaw: 0, pitch: 64, drive: 0 }, 'place the prop upright');
++    h.ticks(60);
++    const sp = h.ent(prop).pose.p;
++    const top = sp.y + PROP.lengthM / 2 - g;
++    // The log: its underside on the line from (0, ground) to the prop's top; a flat face down.
++    const th = Math.atan2(top, sp.x);
++    const ri = 0.17 * Math.cos(Math.PI / 6);
++    const c = { x: -ri * Math.sin(th) + 3 * Math.cos(th), y: g + ri * Math.cos(th) + 3 * Math.sin(th) + 0.01 };
++    goTo(h, { x: 3, z: -4 });
++    const log = h.log({ length: 6, r: 0.17, p: { x: c.x, y: c.y, z: 0 }, q: mulQ(aboutZ(th), lyingAlong(Math.PI / 2)) });
++    h.ticks(120);
++    // The bait, placed lying 0.55 m inward of the prop, lashed to the prop's side facing it by a 0.65 m vine.
++    const bx = sp.x - 0.55;
++    const bait = h.box({ p: { x: bx, y: g + 0.03, z: -2.5 }, size: [0.25, 0.04, 1 / 1100 / (0.25 * 0.04)], material: 'hide', state: 'free', look: 'hide' });
++    h.ticks(10);
++    take(h, bait, 'take the bait');
++    goTo(h, { x: bx, z: -1.0 });
++    h.must({ verb: 'place', target: 0, at: toCm({ x: bx, y: g + 0.04, z: PROP.z }), yaw: 64, pitch: 0 }, 'place the bait');
++    h.ticks(20);
++    const coil = h.coil({ material: 'vine', lengthM: 3, at: { x: 2, y: g, z: -2 } });
++    h.ticks(5);
++    take(h, coil, 'take the vine coil');
++    h.must({ verb: 'stow', target: 0, slot: 0 }, 'the coil to the belt');
++    goTo(h, { x: bx + 0.2, z: -0.9 });
++    const bp = h.ent(bait).pose.p;
++    const btop = { x: bp.x, y: bp.y + 0.02, z: bp.z };
++    const face = { x: sp.x - PROP.r * Math.cos(Math.PI / 8), z: sp.z };
++    const dh = flat(face, btop);
++    h.must({ verb: 'lash', target: bait, second: prop, at: toCm(btop), at2: toCm({ x: face.x, y: btop.y + Math.sqrt(0.65 * 0.65 - dh * dh), z: face.z }) }, 'lash the bait to the prop');
++    h.ticks(30);
++    goTo(h, { x: -3, z: -6 });
++    return { prop, log, bait };
++  }
++
++  function stagedHold(h: Harness, r: { prop: number; log: number; bait: number }): void {
++    // The log was only spawned (D-25): its credit is [] (RT-19); the prop and the bait were placed by the player.
++    expect(h.ent(r.log).credit).toEqual([]);
++    expect(h.ent(r.prop).credit).toEqual(['p1']);
++    expect(h.ent(r.bait).credit).toEqual(['p1']);
++    const tilt = holdTilt(h, r);
++    console.info(`deadfall staged: ${h.ent(r.log).mass.toFixed(1)} kg log; prop tilt over 120 s awake ≤ ${tilt.toFixed(3)}°`);
++    // GATE: set 120 s awake, tilt < 1°.
++    expect(tilt).toBeLessThan(1);
++  }
++
++  it('staged physics (§11.2(a) as written): the 6 m log on a 2.38 m stick holds 120 s awake, springs when the ape tugs the bait toward itself, and hits it at v_n ≥ 2 m/s', async () => {
++    const h = await make(48, 40);
++    const r = buildStagedDeadfall(h);
++    const vnOf = watchVelocities(h, [r.log]);
++    stagedHold(h, r);
++    const z0 = h.ent(r.log).pose.p.z;
++    const b = h.ent(r.bait).pose.p;
++    // Step 4: routed crouched to 0.8 m inward of the bait, then a tug toward its own body.
++    const res = apeAtBait(h, { log: r.log, bait: r.bait, stand: { x: b.x - 0.8, z: b.z }, act: { tugYaw: TOWARD_BODY }, vnOf });
++    report('deadfall staged', res);
++    h.ticks(240);
++    const zEnd = h.ent(r.log).pose.p.z;
++    console.info(`deadfall staged: the log came to rest ${Math.abs(zEnd - z0).toFixed(3)} m from its vertical plane`);
++    // GATE: springs within 1.0 s of the grip.
++    expect(res.spring).toBeGreaterThan(0);
++    expect((res.spring - res.grip) / 60).toBeLessThanOrEqual(1.0);
++    // GATE: an impact on the ape from the log, not held, v_n ≥ 2 m/s, damage > 0.
++    const k = res.hits.findIndex((i, j) => !i.cause.held && i.damage > 0 && res.vn[j] >= 2);
++    expect(k, 'a log hit with v_n ≥ 2 m/s and damage > 0').toBeGreaterThanOrEqual(0);
++    // GATE: no tripwire event; the log lands within 0.35 m of its own vertical plane; the ape fitted.
++    expect(h.tripwires()).toEqual([]);
++    expect(Math.abs(zEnd - z0)).toBeLessThan(0.35);
++    expect(res.fit).toBeGreaterThan(0);
++  }, LONG_IT_MS);
++
++  it('staged negative control: a 700 N tug does not spring it', async () => {
++    const h = await make(48, 40);
++    const r = buildStagedDeadfall(h);
++    const vnOf = watchVelocities(h, [r.log]);
++    h.ticks(60);
++    const b = h.ent(r.bait).pose.p;
++    const res = withTugN(1.1, 700, () => apeAtBait(h, { log: r.log, bait: r.bait, stand: { x: b.x - 0.8, z: b.z }, act: { tugYaw: TOWARD_BODY }, vnOf }));
++    report('deadfall staged, 700 N control', res);
++    // GATE: no spring, no hit.
++    expect(res.spring).toBe(-1);
++    expect(res.hits.filter((i) => i.damage > 0)).toEqual([]);
++  }, RAPIER_IT_MS);
++
++  it('staged physics: the 6 m log springs on an ape that walks its route under it into the prop, and hits it at v_n ≥ 2 m/s', async () => {
++    const h = await make(48, 40);
++    const r = buildStagedDeadfall(h);
++    const vnOf = watchVelocities(h, [r.log]);
++    stagedHold(h, r);
++    const z0 = h.ent(r.log).pose.p.z;
++    const b = h.ent(r.bait).pose.p;
++    const res = apeAtBait(h, { log: r.log, bait: r.bait, stand: { x: b.x - 0.4, z: b.z }, act: { walkTo: { x: b.x + 1.2, z: b.z } }, vnOf });
++    report('deadfall staged, walked', res);
++    h.ticks(240);
++    const zEnd = h.ent(r.log).pose.p.z;
++    console.info(`deadfall staged, walked: the log came to rest ${Math.abs(zEnd - z0).toFixed(3)} m from its vertical plane; tripwire events ${h.tripwires().length} (LOGGED)`);
++    // GATE: the ape fits until the spring; it springs; a hit from the log, not held, v_n ≥ 2 m/s, damage > 0.
++    expect(res.fit).toBeGreaterThan(0);
++    expect(res.spring).toBeGreaterThan(0);
++    const k = res.hits.findIndex((i, j) => !i.cause.held && i.damage > 0 && res.vn[j] >= 2);
++    expect(k, 'a log hit with v_n ≥ 2 m/s and damage > 0').toBeGreaterThanOrEqual(0);
++    // GATE: the log lands within 0.35 m of its own vertical plane.
++    expect(Math.abs(zEnd - z0)).toBeLessThan(0.35);
++  }, LONG_IT_MS);
++});
++
++// ---------------------------------------------------------------------------
++// (b) Spike pit: the giant ape, weight-triggered
++// ---------------------------------------------------------------------------
++
++/*
++ * AC-2(b). P28's first run found the pit unreachable: its spoil made a 1 m berm with sheer edges all round it, steeper
++ * than the giant's 40° slope limit (§4.7), so every charge stopped at its foot. SIM-fix4 heaps the spoil at a 34° angle
++ * of repose with no lip at the rim. The cover's bearers now span the hole as dug (scenes.ts furnishPit coverDugRim, P28):
++ * with 20 of them over the planned 8 m (x −3.8 … 3.8) the giant's front foot met the open strip at the dug rim (≈ ±4.3)
++ * and tripped `ledge`, never `cover`.
++ * Third pass (P28): a ruler's foot (and root) now stands on what is under its whole sole (rulerBody soleGround, a flat
++ * box cast; World.supportAt with a sole for its footwork, so its foot load reaches the bearers, §4.11), and a support
++ * its own step woke keeps holding it until it breaks (coverHoldTicks). Measured on the rebuilt pit (25 bearers from
++ * undug ground to undug ground): stakes wound the giant in 9 of 9 runs (89-5,265 HP each). At 6 m/s every run has a
++ * load break, then a `cover` trip, then stake wounds; they fail only the SPEC:344 gate: the stakes that break are
++ * snapped by the giant's shins side-on (5-37 kJ to the stake), a blunt contact that is a brush on the giant (its own
++ * motion, v_safe), so no `impact` event precedes those breaks. At 3 and 4.5 m/s the first bearer gives way to the foot's
++ * impact before 0.2 s of load has built (no load break first) and the trip is `ledge`. The bridge control: the logs'
++ * ends rest on the uneven rims as dug, so their tops stand 0.34-0.56 m (the giant's ankle is 0.39 m): it trips on them.
++ */
++describe('AC-2(b): a covered spike pit wounds the giant that steps on its cover', () => {
++  let pit: Uint8Array;
++  beforeAll(async () => {
++    pit = await cachedScene('pit');
++  }, SCENE_BUILD_TIMEOUT_MS);
++
++  /** The cached pit's parts, from the loaded world: 108 driven stakes, the rotten bearers, the grass laid on them. */
++  function parts(h: Harness): { stakes: Set<number>; bearers: number[]; grass: number[] } {
++    const all = [...h.w.entities.all()];
++    const stakes = new Set(all.filter((e) => e.state === 'anchored' && e.sharpPoints.length > 0).map((e) => e.id));
++    const bearers = all.filter((e) => e.material === 'rottenWood').map((e) => e.id);
++    const grass = all.filter((e) => e.look === 'grass' && Math.abs(e.pose.p.x) < 4.8 && Math.abs(e.pose.p.z) < 4.8).map((e) => e.id);
++    return { stakes, bearers, grass };
++  }
++
++  it('the cached pit: 108 stakes and the cover; the cover holds its own weight 60 s awake', async () => {
++    const h = await load(pit);
++    const { stakes, bearers, grass } = parts(h);
++    console.info(`pit: ${stakes.size} stakes, ${bearers.length} bearers, ${grass.length} grass bundles on them`);
++    expect(stakes.size).toBe(108);
++    // 20 bearers over the planned 8 m; furnishPit's coverDugRim spans the hole as dug, so at least that many.
++    expect(bearers.length).toBeGreaterThanOrEqual(20);
++    const cover = [...bearers, ...grass];
++    const y0 = new Map(cover.map((id) => [id, h.ent(id).pose.p.y]));
++    for (const id of cover) h.keepAwake(id);
++    const ev = h.ticks(3600);
++    let sink = 0;
++    for (const id of cover) {
++      const e = h.w.entities.get(id);
++      if (e) sink = Math.max(sink, y0.get(id)! - e.pose.p.y);
++    }
++    console.info(`pit cover 60 s awake: breaks ${of(ev.world, 'break').length}, deepest sink ${(sink * 100).toFixed(1)} cm`);
++    // GATE: no break, nothing sinks more than 5 cm.
++    expect(of(ev.world, 'break')).toEqual([]);
++    expect(sink).toBeLessThanOrEqual(0.05);
++  }, LONG_IT_MS);
++
++  const RUNS = [3, 4.5, 6].flatMap((speed) => [-1, 0, 1].map((dz) => ({ speed, dz })));
++
++  /**
++   * The steepest rise on the giant's charge line z = `dz` from x −30 to the pit's end (x −4.5), sampled every 0.25 m
++   * (the terrain's spacing), in degrees, and where. The ruler's mover refuses a rise steeper than maxSlopeDeg (§4.7).
++   */
++  function steepestOnLine(h: Harness, dz: number): { deg: number; x: number } {
++    let worst = { deg: 0, x: Number.NaN };
++    for (let x = -30; x < -4.5; x += 0.25) {
++      const rise = h.w.terrain.heightAt(x + 0.25, dz) - h.w.terrain.heightAt(x, dz);
++      const d = deg(Math.atan2(rise, 0.25));
++      if (d > worst.deg) worst = { deg: d, x };
++    }
++    return worst;
++  }
++
++  /** Every entity a broken entity's pieces became (recursively), live now. */
++  function descendants(h: Harness, roots: readonly number[]): number[] {
++    const out = new Set<number>();
++    const breaks = of(h.history.world, 'break');
++    const kids = new Map<number, number[]>(breaks.map((b) => [b.entity, b.pieces]));
++    const visit = (id: number): void => {
++      const k = kids.get(id);
++      if (!k) {
++        if (h.w.entities.get(id)) out.add(id);
++        return;
++      }
++      for (const c of k) visit(c);
++    };
++    for (const r of roots) visit(r);
++    return [...out];
++  }
++
++  /** Does the entity rest on both long rims (one end beyond each, both up at rim level)? */
++  function spansPit(h: Harness, id: number): boolean {
++    const e = h.ent(id);
++    if (e.shape.kind !== 'cylinder') return false;
++    const half = (e.shape as { halfLength?: number; length?: number }).halfLength ?? ((e.shape as { length?: number }).length ?? 0) / 2;
++    const a = axisOf(h, id);
++    const ends = [1, -1].map((s) => ({ x: e.pose.p.x + a.x * half * s, y: e.pose.p.y + a.y * half * s, z: e.pose.p.z + a.z * half * s }));
++    const rim = (q: V3): boolean => Math.abs(q.z) > 3 && q.y > h.w.terrain.heightAt(q.x, q.z) - 0.3;
++    return ends[0].z * ends[1].z < 0 && rim(ends[0]) && rim(ends[1]);
++  }
++
++  it.each(RUNS)('the giant charges across it at $speed m/s, $dz m off its centre line: a load break, a cover trip, a stake wound', async ({ speed, dz }) => {
++    const h = await load(pit);
++    const { stakes, bearers, grass } = parts(h);
++    const cover = new Set([...bearers, ...grass]);
++    const giant = h.creature('giantApe', { x: -30, z: dz }, Math.PI / 2, { brain: 'off' });
++    h.script(giant, { kind: 'charge', heading: Math.PI / 2, speed });
++    let firstBreak = -1;
++    let bridged = 0;
++    let nan = false;
++    let reached = -Infinity;
++    const maxTicks = Math.round((30 / speed + 12) * 60);
++    h.ticks(maxTicks, (_, t) => {
++      reached = Math.max(reached, giant.pos.x);
++      if (firstBreak < 0) {
++        const b = of(h.history.world, 'break').find((e) => cover.has(e.entity));
++        if (b) firstBreak = t;
++      } else if (t - firstBreak === 30) {
++        bridged = descendants(h, [...cover].filter((id) => of(h.history.world, 'break').some((b) => b.entity === id))).filter((id) => spansPit(h, id)).length;
++      }
++      if (!nan && !noNaN(h, [giant])) nan = true;
++    });
++    const evs = h.history.world;
++    const idx = (e: WorldEvent): number => evs.indexOf(e);
++    const coverBreaks = of(evs, 'break').filter((b) => cover.has(b.entity));
++    const loadBreaks = coverBreaks.filter((b) => b.energy === 0);
++    const trips = of(evs, 'trip').filter((e) => e.f === giant);
++    const wounds = h.wounds(giant).filter((w) => w.cause.entityId !== null && stakes.has(w.cause.entityId));
++    const pitDamage = h.wounds(giant).reduce((s, w) => s + w.hp, 0) + of(evs, 'impact').filter((i) => i.defender === giant && i.cause.entityId !== null && stakes.has(i.cause.entityId) && !i.wound).reduce((s, i) => s + i.damage, 0);
++    const stakeBreaks = of(evs, 'break').filter((b) => stakes.has(b.entity));
++    const firstImpact = (stake: number): number => evs.findIndex((e) => e.type === 'impact' && e.defender === giant && e.cause.entityId === stake);
++    console.info(
++      `pit run ${speed} m/s, ${dz} m: cover breaks ${coverBreaks.length} (load ${loadBreaks.length}), trips ${trips.map((t) => t.why).join(',') || 'none'}, ` +
++        `stake wounds ${wounds.length} (${wounds.map((w) => `${w.zone} ${w.hp.toFixed(0)} HP`).join(', ')}), pit damage ${pitDamage.toFixed(0)} HP, ` +
++        `stakes broken ${stakeBreaks.length}, broken cover still bridging 0.5 s on ${bridged}, alive ${giant.alive} (LOGGED); ` +
++        `furthest x ${reached.toFixed(2)}; the steepest rise on its line ${steepestOnLine(h, dz).deg.toFixed(0)}° at x ${steepestOnLine(h, dz).x.toFixed(2)}`,
++    );
++    // The charge reaches the cover (x −4.5 is the pit's end): what every gate below needs.
++    expect(reached, 'the giant reaches the pit').toBeGreaterThan(-4.5);
++    // GATE: a load break of a cover entity before the trip, and the trip is the cover's (RT-1).
++    expect(loadBreaks.length).toBeGreaterThan(0);
++    expect(trips.length).toBeGreaterThan(0);
++    expect(trips[0].why).toBe('cover');
++    expect(idx(loadBreaks[0])).toBeLessThan(idx(trips[0]));
++    // GATE: ≥ 1 wound from a stake, credited to the player.
++    expect(wounds.length).toBeGreaterThan(0);
++    expect(wounds.some((w) => w.credit.includes('p1') || w.cause.credit.includes('p1'))).toBe(true);
++    // GATE: 0.5 s after the first cover break no piece of a broken cover entity rests on both rims (RT-7).
++    expect(bridged).toBe(0);
++    // GATE: every stake that broke had its impact before its break (SPEC:344).
++    for (const b of stakeBreaks) {
++      const i = firstImpact(b.entity);
++      expect(i, `stake ${b.entity}'s impact`).toBeGreaterThanOrEqual(0);
++      expect(i).toBeLessThan(idx(b));
++    }
++    // GATE: no NaN.
++    expect(nan).toBe(false);
++    // PIN (§11.2(b): 385-3,084 HP per run, I-rev ac3_density.out): the pit's damage in that band.
++    expect(pitDamage).toBeGreaterThan(385 * 0.5);
++  }, LONG_IT_MS);
++
++  it('negative control: the same pit bridged by 651 kg green logs (cover carried off): the giant crosses at 6 m/s, nothing breaks, no trip, never in the pit', async () => {
++    const h = await load(pit);
++    const { bearers } = parts(h);
++    // The giant can only cross what it can reach: the charge line must be no steeper than its mover climbs (§4.7). On
++    // the cached pit before SIM-fix4 it wasn't (the spoil berm, above), and the test stopped here.
++    const steep = steepestOnLine(h, 0);
++    console.info(`bridge: the steepest rise on the charge line is ${steep.deg.toFixed(0)}° at x ${steep.x.toFixed(2)} (the mover climbs ≤ ${RULER_BODY_TUNING.maxSlopeDeg}°)`);
++    expect(steep.deg, 'the charge line is climbable').toBeLessThanOrEqual(RULER_BODY_TUNING.maxSlopeDeg);
++    // The player carries every bearer off by verbs (the grass on them falls into the pit), from the −z rim lane beyond
++    // their ends (on a rotten bearer his weight would break it, §4.11), round the pit's +x end to the south-east (as
++    // buildPit brought them).
++    const halfL = Math.max(...bearers.map((id) => (h.ent(id).shape as { halfHeight: number }).halfHeight));
++    const laneZ = -(halfL + 0.6);
++    const southEast = { x: 6, z: laneZ };
++    for (const [k, id] of bearers.entries()) {
++      goTo(h, southEast);
++      const e = h.ent(id).pose.p;
++      goTo(h, { x: e.x, z: laneZ });
++      take(h, id, `take bearer ${id}`);
++      goTo(h, southEast);
++      goTo(h, { x: 8, z: laneZ - 5 - 0.6 * k });
++      // (Carrying a 10.5 m pole round the pit's corner, he may stumble and let it go: it lies where it fell.)
++      if (h.p.inventory?.hands?.entity === id) h.must({ verb: 'drop', target: 0 }, `put bearer ${id} down`);
++    }
++    const left = bearers.filter((id) => h.w.entities.get(id) && Math.abs(h.ent(id).pose.p.x) < 5 && Math.abs(h.ent(id).pose.p.z) < 5);
++    console.info(`bridge: bearers still over the pit after carrying them off: ${left.length}`);
++    goTo(h, { x: 0, z: -12 });
++    h.ticks(300);
++    // The bridge (D-25: 651 kg logs no verb moves), spawned at their pose. DEPARTURE (§11.2(b) "8 green logs r 0.18 m ×
++    // 8 m (651 kg)"): the design's mass, 651 kg each, but over the hole as dug (P28: ≈ ±4.45 m by ±4.25 m, not the
++    // planned 8 × 6): long enough to bear 0.5 m on undug ground at both long rims, and as many as keep them ≤ 1 m apart
++    // from undug ground at one end to the other (the giant's 1.06 m sole bridges a gap that wide).
++    const dug = (x: number, z: number): boolean => h.w.terrain.heightAt(x, z) < h.w.terrain.originalHeightAt(x, z) - 0.05;
++    let xMin = 0;
++    let xMax = 0;
++    let zHalf = 0;
++    for (let z = -5; z <= 5; z += 0.25) for (let x = -6; x <= 6; x += 0.05) if (dug(x, z)) [xMin, xMax] = [Math.min(xMin, x), Math.max(xMax, x)];
++    for (let x = xMin; x <= xMax; x += 0.1) for (let z = 0; z <= 5; z += 0.05) if (dug(x, z) || dug(x, -z)) zHalf = Math.max(zHalf, z);
++    const lengthM = 2 * (zHalf + 0.5);
++    const n = Math.ceil((xMax - xMin) / 1.0) + 1;
++    const logs: number[] = [];
++    for (let i = 0; i < n; i++) {
++      const x = xMin + ((xMax - xMin) * i) / (n - 1) + 0.013;
++      let rim = -Infinity;
++      for (const z of [zHalf + 0.1, zHalf + 0.3, zHalf + 0.5]) rim = Math.max(rim, h.w.terrain.heightAt(x, z), h.w.terrain.heightAt(x, -z));
++      logs.push(h.log({ mass: 651, length: lengthM, r: 0.18, material: 'greenWood', p: { x, y: rim + 0.22, z: 0 }, q: lyingAlong(0) }));
++    }
++    h.ticks(240);
++    const lr = (h.ent(logs[0]).shape as { r: number }).r;
++    console.info(`bridge: ${logs.length} logs of ${h.ent(logs[0]).mass.toFixed(0)} kg, ${lengthM.toFixed(2)} m, r ${lr.toFixed(3)}, over x ${xMin.toFixed(2)} … ${xMax.toFixed(2)}; tops at ${logs.map((l) => (h.ent(l).pose.p.y + lr).toFixed(2)).join(', ')} m`);
++    const from = h.history.world.length;
++    const giant = h.creature('giantApe', { x: -30, z: 0 }, Math.PI / 2, { brain: 'off' });
++    h.script(giant, { kind: 'charge', heading: Math.PI / 2, speed: 6 });
++    h.ticks(Math.round((60 / 6 + 4) * 60));
++    const evs = h.history.world.slice(from);
++    console.info(`bridge run: giant at x ${giant.pos.x.toFixed(1)}; breaks ${of(evs, 'break').length}, trips ${of(evs, 'trip').length}, pit on ${of(evs, 'pit').filter((e) => e.on).length}`);
++    // The giant got across.
++    expect(giant.pos.x).toBeGreaterThan(5);
++    // GATE: no break, no trip, `pit` never on.
++    expect(of(evs, 'break')).toEqual([]);
++    expect(of(evs, 'trip')).toEqual([]);
++    expect(of(evs, 'pit').filter((e) => e.on)).toEqual([]);
++  }, LONG_IT_MS);
++});
++
++// ---------------------------------------------------------------------------
++// (c) Swinging log: the ape
++// ---------------------------------------------------------------------------
++
++describe('AC-2(c): a swinging log wounds the ape at the bottom of its arc', () => {
++  it('verb-only gate: the 30 kg log hauled back on its vines and tied off holds; cut loose, it passes the bottom at ≥ 4 m/s and hits the ape', async () => {
++    const h = await make(45, 50);
++    const r = buildHauledLog(h, { at: { x: 0, z: 0 } });
++    // The hauled end is tied off from here on (the recipe's own 'loose' events, its rope ends let go of, come before).
++    const tiedFrom = h.history.world.length;
++    const vnOf = watchVelocities(h, [r.log]);
++    const tieRope = h.w.joints.get(r.tie)!.rope!.entity;
++    const ape = h.creature('ape', { x: 0.25, z: 0 }, -Math.PI / 2, { brain: 'off' });
++    h.ticks(120);
++    // GATE: while tied nothing snaps or pulls loose; no tripwire event; the stake stays anchored.
++    expect(of(h.history.world.slice(tiedFrom), 'joint').filter((e) => e.what === 'snap' || e.what === 'loose')).toEqual([]);
++    expect(h.tripwires()).toEqual([]);
++    expect(h.ent(r.stake).state).toBe('anchored');
++    expect(h.w.joints.get(r.tie)).toBeDefined();
++    const held = h.ent(r.log).pose.p;
++    console.info(`swing gate: tied off at (${held.x.toFixed(2)}, ${held.y.toFixed(2)}), tie ${h.w.joints.get(r.tie)!.rope!.lengthM.toFixed(2)} m`);
++    // The player draws the stone axe and cuts the tie, standing beside it (focused on the rope sensor's nearest point).
++    h.must({ verb: 'draw', target: 0, slot: BACK_SLOT }, 'draw the stone axe');
++    const tie = h.w.joints.get(r.tie)!;
++    const ends = h.w.joints.endPoints(tie)!;
++    goTo(h, { x: (ends.a.x + ends.b.x) / 2, z: (ends.a.z + ends.b.z) / 2 + 1.2 });
++    const from = h.history.world.length;
++    h.must({ verb: 'cut', target: tieRope }, 'cut the tie');
++    let bottomV = 0;
++    h.ticks(240, () => {
++      const e = h.ent(r.log);
++      if (Math.abs(e.pose.p.x) < 0.3) bottomV = Math.max(bottomV, Math.hypot(e.vel.lin.x, e.vel.lin.y, e.vel.lin.z));
++    });
++    const evs = h.history.world.slice(from);
++    const cut = of(evs, 'joint').find((e) => e.joint === r.tie);
++    const hits = h.impacts(ape).filter((i) => i.cause.entityId === r.log);
++    console.info(`swing gate: the tie went '${cut?.what}'; the log passes the bottom at ${bottomV.toFixed(2)} m/s; hits ${hits.map((i) => `${i.bone} v_n ${vnOf(i).toFixed(2)} m/s ${i.damage.toFixed(2)} HP`).join('; ') || 'none'}`);
++    expect(cut?.what).toBe('cut');
++    // GATE: past the bottom at ≥ 4 m/s; an impact on the ape from the log, damage > 0, credited to the player.
++    expect(bottomV).toBeGreaterThanOrEqual(4);
++    const hit = hits.find((i) => !i.cause.held && i.damage > 0);
++    expect(hit).toBeDefined();
++    expect(hit!.cause.credit).toContain('p1');
++    // PIN (§11.2(c): 5.26 m/s, shin hit v_n 4.94 m/s, 3.4 HP; P28 lab: 4.66 m/s peak, the thigh 3.0 HP): 4-6 m/s, 1-6 HP.
++    expect(bottomV).toBeLessThan(6);
++    expect(hit!.damage).toBeGreaterThan(1);
++    expect(hit!.damage).toBeLessThan(6);
++  }, RAPIER_IT_MS);
++
++  it('staged physics: the 300 kg log held 60° back by a 0.58 m tie holds; cut from the scaffold, it hits the ape at v_n ≥ 5 m/s', async () => {
++    const h = await make(47, 50);
++    h.give('stoneAxe', 'back');
++    // 1: the two trees and their vines (as the gate's).
++    const vines: number[] = [];
++    for (const s of [1, -1]) vines.push(h.tree({ at: { x: 0, z: 2.6 * s }, diameter: 0.4, height: 14, vine: { anchorH: 8, lengthM: 9, yaw: s > 0 ? Math.PI : 0 } }).vine!.rope);
++    // 2: the 300 kg dry hex log along z, staged at the pulled-back pose: 60° back, centre (−5.59, 4.78, 0), its top face
++    // toward the anchors.
++    const C = { x: -5.59, y: 4.78, z: 0 };
++    const q = mulQ(aboutZ((-60 * Math.PI) / 180), lyingAlong(0));
++    // (The factory sizes a log from its mass when given one; r is then unused.)
++    const log = h.log({ mass: 300, length: 4, r: 0.23, p: { x: 6, y: 0.4, z: 8 }, q: lyingAlong(0) });
++    h.ticks(10);
++    const R = (h.ent(log).shape as { r: number }).r;
++    h.stage(log, { p: C, q });
++    // 3: the scaffold (x −6.2 … −5.85, z −2.0 … 3.5, top 2.65 m) and the tie post (0.4 × 6 × 0.4 m at x −6.6).
++    h.box({ p: { x: -6.025, y: 2.65 / 2, z: 0.75 }, size: [0.35, 2.65, 5.5], material: 'dryWood', state: 'fixed', look: 'scaffold' });
++    const post = h.box({ p: { x: -6.6, y: 3, z: 0 }, size: [0.4, 6, 0.4], material: 'dryWood', state: 'fixed', look: 'post' });
++    h.ticks(5);
++    // 4: each vine end tied to the log's top face at local ±1.6 m from the scaffold; a vine coil tied from the log's
++    // back edge to the post (a horizontal 0.58 m tie at 4.78 m); then the log unstaged.
++    const ri = R * Math.cos(Math.PI / 6);
++    for (const [k, s] of [1, -1].entries()) {
++      take(h, vines[k], 'take a vine end');
++      const tp = rotQ(q, { x: ri, y: 1.6 * s, z: 0 });
++      const at = { x: C.x + tp.x, y: C.y + tp.y, z: C.z + tp.z };
++      h.standAt({ x: -6.0, z: at.z }, Math.PI / 2);
++      h.ticks(5);
++      h.must({ verb: 'tie', target: log, at: toCm(at) }, 'tie a vine to the log');
++    }
++    const coil = h.coil({ material: 'vine', lengthM: 3, at: { x: -4, y: 0, z: -3 } });
++    h.ticks(5);
++    take(h, coil, 'take the tie coil');
++    h.standAt({ x: -6.0, z: 0 }, -Math.PI / 2);
++    h.ticks(5);
++    h.must({ verb: 'tie', target: log, at: toCm({ x: C.x - R + 0.01, y: C.y, z: 0 }) }, 'tie the coil to the log');
++    h.must({ verb: 'tie', target: post, at: toCm({ x: -6.4, y: C.y, z: 0 }) }, 'tie the coil to the post');
++    const vineJoints = h.w.joints.all().filter((j) => j.kind === 'rope' && j.rope!.entity !== coil && [j.a.entity, j.b.entity].includes(log));
++    const tie = h.w.joints.all().find((j) => j.rope?.entity === coil)!;
++    expect(vineJoints).toHaveLength(2);
++    h.unstage(log);
++    const vnOf = watchVelocities(h, [log]);
++    let peakRope = 0;
++    let peakTie = 0;
++    const tension = (): void => {
++      for (const j of vineJoints) peakRope = Math.max(peakRope, ...(h.w.joints.get(j.id)?.tension ?? [0]));
++      peakTie = Math.max(peakTie, ...(h.w.joints.get(tie.id)?.tension ?? [0]));
++    };
++    h.ticks(60, tension);
++    // 5: the ape holds at the arc's bottom; the player draws the axe and cuts the tie from the scaffold.
++    const ape = h.creature('ape', { x: 0.25, z: 0 }, -Math.PI / 2, { brain: 'off' });
++    h.ticks(60, tension);
++    console.info(`swing staged: vines ${vineJoints.map((j) => j.rope!.lengthM.toFixed(2)).join(', ')} m, tie ${tie.rope!.lengthM.toFixed(2)} m; held peaks: per vine ${(peakRope / 1000).toFixed(2)} kN, tie ${(peakTie / 1000).toFixed(2)} kN`);
++    // GATE: while held no rope snaps; no tripwire.
++    expect(of(h.history.world, 'joint').filter((e) => e.what === 'snap')).toEqual([]);
++    expect(h.tripwires()).toEqual([]);
++    // PIN (§11.2(c), C lab e3_swing: per rope ≤ 2.94 kN ± 3 %; tie 5.09 kN).
++    expect(peakRope).toBeLessThan(2940 * 1.03);
++    h.must({ verb: 'draw', target: 0, slot: BACK_SLOT }, 'draw the stone axe');
++    // The cut is made from the scaffold's back edge, 1 m along it from the tie (P28 lab: from right under the tie the
++    // arc meets the log's back edge first and the push snaps the tie; from here it meets the rope).
++    h.standAt({ x: -6.15, z: 1.0 }, Math.PI);
++    h.ticks(5);
++    const from = h.history.world.length;
++    h.must({ verb: 'cut', target: coil }, 'cut the tie');
++    const cutAt = of(h.history.world.slice(from), 'joint').find((e) => e.joint === tie.id);
++    let peakV = 0;
++    h.ticks(240, () => {
++      const e = h.ent(log);
++      peakV = Math.max(peakV, Math.hypot(e.vel.lin.x, e.vel.lin.y, e.vel.lin.z));
++    });
++    goTo(h, { x: -6.15, z: 3.0 });
++    h.ticks(120);
++    const hits = h.impacts(ape).filter((i) => i.cause.entityId === log);
++    const onPlayer = h.impacts(h.p).filter((i) => i.cause.entityId === log);
++    console.info(
++      `swing staged: the tie went '${cutAt?.what}'; the log peaks at ${peakV.toFixed(2)} m/s; hits ${hits.map((i) => `${i.bone} v_n ${vnOf(i).toFixed(2)} m/s dv ${Math.hypot(i.dv.x, i.dv.y, i.dv.z).toFixed(2)} m/s ${i.damage.toFixed(1)} HP${i.launched ? ' launched' : ''}`).join('; ') || 'none'}; the log on the player: ${onPlayer.length}`,
++    );
++    // GATE: the tie is cut (the timing starts there); an impact on the ape from the log with v_n ≥ 5 m/s, damage > 0.
++    expect(cutAt?.what).toBe('cut');
++    const k = hits.findIndex((i) => !i.cause.held && i.damage > 0 && vnOf(i) >= 5);
++    expect(k, 'a log hit with v_n ≥ 5 m/s and damage > 0').toBeGreaterThanOrEqual(0);
++    // RT-19: the log was spawned and staged, but the player tied it (a verb touched it), so the scored cause carries 'p1'.
++    expect(hits[k].cause.credit).toContain('p1');
++    // PIN (§11.2(c): the log reaches 7.95 m/s ± 3 %; 32.9 HP on the chest, launched; C lab e3_swing, rev.out §2).
++    expect(peakV).toBeGreaterThan(7.95 * 0.97);
++    expect(peakV).toBeLessThan(7.95 * 1.03);
++    expect(hits[k].damage).toBeGreaterThan(25);
++    expect(hits[k].damage).toBeLessThan(40);
++  }, RAPIER_IT_MS);
++});
++
++// ---------------------------------------------------------------------------
++// (d) Felled tree: an ape at 12 m, the giant at 8 m
++// ---------------------------------------------------------------------------
++
++describe('AC-2(d): a tree felled by a pull on its vine hits the creature on its fall line', () => {
++  /** buildNotchedTree (chopped from −x to 0.2: it falls toward +x), then the player takes the vine end out to P. */
++  function notched(h: Harness): { tree: number; rope: number } {
++    const r = buildNotchedTree(h, { at: { x: 0, z: 0 }, fromSide: { x: -1, z: 0 }, remaining: 0.2, vine: { anchorH: 10, lengthM: 18.2 } });
++    // GATE: the tree stays fixed (notched) for 120 ticks with no pull.
++    h.ticks(120);
++    expect(h.ent(r.tree).state).toBe('fixed');
++    expect(h.ent(r.tree).plant?.phase).toBe('notched');
++    const rope = h.w.joints.get(r.vineJoint)!.rope!.entity;
++    take(h, rope, 'take the vine end');
++    // P: 15.6 m from the trunk, 45° off the fall line.
++    h.walk({ x: 15.6 * Math.SQRT1_2, z: 15.6 * Math.SQRT1_2 });
++    expect(h.p.inventory?.hands?.mode).toBe('ropeEnd');
++    return { tree: r.tree, rope };
++  }
++
++  it('the ape 12 m out on the fall line: the hinge breaks to the pull, the trunk lands on the line and hits it at v_n ≥ 10 m/s', async () => {
++    const h = await make(46, 60);
++    const { tree, rope } = notched(h);
++    const ape = h.creature('ape', { x: 12, z: 0 }, -Math.PI / 2, { brain: 'off' });
++    const vnOf = watchVelocities(h, [tree]);
++    h.ticks(60);
++    // The hinge breaks on the first pulling tick: the `fell` event's tick against the first tick the vine is taut and so
++    // carries the hand's pull to the tree (P28 lab: the vine hangs with ≈ 0.36 m of slack from P, which the haul takes
++    // in at the hand's speed first; the joint's tension reads the hand's pullN meanwhile, so slack is what is measured).
++    const vine = h.w.joints.all().find((j) => j.rope?.entity === rope)!.id;
++    const slack = (): number => {
++      const j = h.w.joints.get(vine);
++      const pts = j ? h.w.joints.endPoints(j) : null;
++      return j?.rope && pts ? j.rope.lengthM - Math.hypot(pts.a.x - pts.b.x, pts.a.y - pts.b.y, pts.a.z - pts.b.z) : Number.NaN;
++    };
++    const slack0 = slack();
++    let fellAt = -1;
++    let tautAt = -1;
++    const pullAt = h.w.tick + 1;
++    const watch = (s: { world: WorldEvent[] }, t: number): void => {
++      if (tautAt < 0 && slack() <= 1e-3) tautAt = t;
++      if (fellAt < 0 && of(s.world, 'fell').some((e) => e.tree === tree)) fellAt = t;
++    };
++    const on = h.verb({ verb: 'pull', target: 0, charge: 255 });
++    expect(on.ok).toBe(true);
++    watch({ world: on.events }, pullAt);
++    h.ticks(119, watch);
++    h.verb({ verb: 'pull', target: 0, charge: 0 });
++    h.ticks(600);
++    const a = axisOf(h, tree);
++    const off = deg(Math.acos(Math.abs(a.x) / Math.hypot(a.x, a.z)));
++    const hits = h.impacts(ape).filter((i) => i.cause.entityId === tree);
++    const vn = hits.map(vnOf);
++    console.info(
++      `felled tree, ape: slack ${slack0.toFixed(3)} m at the pull; the vine taut ${tautAt - pullAt} ticks after the pull went on, fell ${fellAt < 0 ? 'never' : `${fellAt - pullAt} ticks after it`}, lies ${off.toFixed(2)}° off the fall line; ` +
++        `hits ${hits.map((i, k) => `${i.bone} v_n ${vn[k].toFixed(2)} m/s ${i.damage.toFixed(1)} HP${i.ko ? ' KO' : ''}`).join('; ') || 'none'} (LOGGED: HP and KO)`,
++    );
++    const kos = h.history.combat.filter((e) => (e as { type?: string }).type === 'ko');
++    if (kos.length) console.info(`felled tree, ape: KO events ${JSON.stringify(kos.map((e) => ({ environmental: (e as { environmental?: boolean }).environmental })))}`);
++    // GATE: the hinge breaks on the first pulling tick (net 1,794 N·m > 1,018): the tick the vine first carries the pull.
++    expect(tautAt).toBeGreaterThanOrEqual(pullAt);
++    expect(fellAt).toBeGreaterThanOrEqual(tautAt);
++    expect(fellAt - tautAt).toBeLessThanOrEqual(1);
++    // GATE: the trunk lands within 5° of the fall line.
++    expect(off).toBeLessThan(5);
++    // GATE: an impact on the ape from the trunk with v_n ≥ 10 m/s and damage > 0 (RT-3), credited to the player.
++    const k = hits.findIndex((i, j) => !i.cause.held && i.damage > 0 && vn[j] >= 10);
++    expect(k, 'a trunk hit with v_n ≥ 10 m/s and damage > 0').toBeGreaterThanOrEqual(0);
++    expect(hits[k].cause.credit).toContain('p1');
++    // PIN (§11.2(d), C lab e4_fell: within 1° of the fall line).
++    expect(off).toBeLessThan(1);
++  }, RAPIER_IT_MS);
++
++  it('the giant 8 m out on the fall line, standing: the trunk wounds it (> 240 HP)', async () => {
++    const h = await make(46, 60);
++    const { tree } = notched(h);
++    const giant = h.creature('giantApe', { x: 8, z: 0 }, -Math.PI / 2, { brain: 'off' });
++    h.ticks(60);
++    h.pull(120);
++    h.ticks(600);
++    const wounds = h.wounds(giant).filter((w) => w.cause.entityId === tree);
++    console.info(`felled tree, giant: wounds ${wounds.map((w) => `${w.zone}/${w.bone} ${w.hp.toFixed(0)} HP`).join(', ') || 'none'}`);
++    // GATE: a wound (> 240 HP, SPEC:502) from the trunk, credited to the player.
++    expect(wounds.length).toBeGreaterThan(0);
++    expect(wounds[0].hp).toBeGreaterThan(240);
++    expect(wounds[0].credit.includes('p1') || wounds[0].cause.credit.includes('p1')).toBe(true);
++    // PIN (§11.2(d): 534-721 HP on the head or chest, C lab e4_fell; P28 lab: 501 HP on the head): 450-800 HP.
++    expect(wounds[0].hp).toBeGreaterThan(450);
++    expect(wounds[0].hp).toBeLessThan(800);
++  }, RAPIER_IT_MS);
++});
++
++afterAll(() => {
++  for (const h of live.splice(0)) h.w.dispose();
++});
+diff --git a/packages/sim/tests/harness.test.ts b/packages/sim/tests/harness.test.ts
+index 833b9d8..f70e8f1 100644
+--- a/packages/sim/tests/harness.test.ts
++++ b/packages/sim/tests/harness.test.ts
+@@ -908,7 +908,8 @@ describe('the scene cache (§11.0)', () => {
+       expect(ys[ys.length - 1]).toBeLessThan(-2.5 + FLOOR_BAND.shortM);
+       expect(ys[0]).toBeGreaterThan(-2.5 - FLOOR_BAND.overM);
+       const bearers = h.w.entities.all().filter((e) => e.material === 'rottenWood');
+-      expect(bearers).toHaveLength(20);
++      // P28: furnishPit's coverDugRim spans the hole as dug (≈ ±4.3 m), so at least the planned 20.
++      expect(bearers.length).toBeGreaterThanOrEqual(20);
+       for (const b of bearers) expect(b.pose.p.y).toBeGreaterThan(-0.3);
+       const grassOn = h.w.entities.all().filter((e) => e.look === 'grass' && Math.abs(e.pose.p.x) < 4 && Math.abs(e.pose.p.z) < 3.2);
+       expect(grassOn.length).toBeGreaterThanOrEqual(PIT_GRASS_MIN);
+diff --git a/packages/sim/tests/records.test.ts b/packages/sim/tests/records.test.ts
+index f67cb36..735f08b 100644
+--- a/packages/sim/tests/records.test.ts
++++ b/packages/sim/tests/records.test.ts
+@@ -591,6 +591,7 @@ const FIGHTER_NOT_SAVED: Record<string, string> = {
+   ruler: "the save's rulers (§8.3)",
+   ground: 'the world, set again when the fighter joins a sim',
+   reachAt: "written by the world's controller in every phase 3 before updatePose reads it (core-fix: a dragged grip)",
++  faceAt: "P28: cleared at the start of every stepBody, written by a mind's think and read by updateFacing in that tick",
+ };
+ 
+ const ANIMATOR_KEYS = ['snapshot', 'keys', 'mode', 'fadeLen', 'procT'];
+diff --git a/packages/sim/tests/save.test.ts b/packages/sim/tests/save.test.ts
+index da8958f..d06a3d6 100644
+--- a/packages/sim/tests/save.test.ts
++++ b/packages/sim/tests/save.test.ts
+@@ -1394,7 +1394,7 @@ describe('save → load → save', () => {
+     // A continuous verb as P16's pull would leave it (hand-made, as P14's own test does), its command's keys out of order.
+     const cmd = { charge: 255, verb: 'pull', kind: 'verb', target: ids.coil, player: 1, tick: 5 } as VerbCommand;
+     const grip = { x: 0.5, y: 0, z: 0.1 };
+-    w.verbs.restoreRecord([{ fighter: 1, focus: { target: ids.log, at: null }, cont: { verb: 'pull', cmd, ticks: 7, data: [['strokes', 2], ['yank', 3]] }, tug: { entity: ids.log, grip } }]);
++    w.verbs.restoreRecord([{ fighter: 1, focus: { target: ids.log, at: null }, cont: { verb: 'pull', cmd, ticks: 7, data: [['strokes', 2], ['yank', 3]] }, tug: { entity: ids.log, grip, holdM: 0.5 } }]);
+     const a = serializeWorld(w);
+     const rec = (parsed(a) as unknown as SaveV1).verbs;
+     expect(rec).toHaveLength(1);
+@@ -1960,7 +1960,7 @@ describe('broken saves', () => {
+     refuse(rec({ cont: pull({}, { verb: 'cut' }) }), 'save record: verbs[0].cont.cmd.verb is "cut", not the continuous verb "pull"');
+     refuse(rec({ cont: pull({ data: [['yank', 3], ['a', 1]] }) }), 'save record: verbs[0].cont.data[1][0] is "a", not a key after the one before it');
+     refuse(rec({ fighter: 7 }), "save record: verbs[0] names fighter 7, who isn't among the fighters");
+-    refuse(rec({ tug: { entity: 999, grip: { x: 0, y: 0, z: 0 } } }), 'save record: verbs[0].tug.entity names entity 999, which is not below counters.entity');
++    refuse(rec({ tug: { entity: 999, grip: { x: 0, y: 0, z: 0 }, holdM: 0.5 } }), 'save record: verbs[0].tug.entity names entity 999, which is not below counters.entity');
+     refuse(
+       (s) =>
+         (s.verbs = [
+diff --git a/packages/sim/tests/support/scenes.ts b/packages/sim/tests/support/scenes.ts
+index 754bf3a..80ed4ac 100644
+--- a/packages/sim/tests/support/scenes.ts
++++ b/packages/sim/tests/support/scenes.ts
+@@ -479,6 +479,9 @@ function shapeR(h: Harness, id: number): number {
+ // AC-2(b), AC-3: the spike pit (§11.2(b), §11.3)
+ // ---------------------------------------------------------------------------
+ 
++/** Ground this far below its original height is dug (the terrain's spoilUndugTolM, §4.13): the hole's edge. */
++const DUG_EDGE_M = 0.05;
++
+ /** §11.2(b)'s pit numbers. */
+ const PIT = {
+   stake: { lengthM: 1.4, r: 0.05, sharpness: 0.6 },
+@@ -491,7 +494,7 @@ const PIT = {
+    * measured r ≤ 0.002 m failing at 4 m half-length). Reported for P17 (shrinkShape). 5.7 kg, holding 283 N (≥ 200 N).
+    */
+   /** 8 m across the 6 m width (overM beyond each long rim), spacingM apart along the length (20 on an 8 m pit). */
+-  bearer: { overM: 1, r: 0.025, spacingM: 0.4 },
++  bearer: { overM: 1, r: 0.025, spacingM: 0.4, endOutM: 0.25 },
+   /**
+    * Up to `count` bundles (at least PIT_GRASS_MIN laid) in rows along the long rims (rowsInsetM inside each: |z| 2.5
+    * and 3.0 m on the 6 m pit), each across the two neighbouring bearers nearest a spot of the row (spots every 0.2 m,
+@@ -532,7 +535,7 @@ export function buildPit(h: Harness, o: { centre: XZ; lengthX: 8; widthZ: 6; dep
+     { x: x0 - 1.5, z: c.z - o.widthZ / 2 - 2.2 },
+     { x: c.x + o.lengthX / 2 + 1.5, z: c.z - o.widthZ / 2 - 2.2 },
+   ]);
+-  const furnished = furnishPit(h, { ...o, grass: { count: PIT.grass.count, minCount: PIT_GRASS_MIN } }, stick);
++  const furnished = furnishPit(h, { ...o, grass: { count: PIT.grass.count, minCount: PIT_GRASS_MIN }, coverDugRim: true }, stick);
+   console.info(`buildPit: ${furnished.stakes.length} stakes, ${furnished.cover.length} cover; standAts ${JSON.stringify(h.standAts())}, tick ${h.w.tick}`);
+   return { ...furnished, strikes: dug.strikes };
+ }
+@@ -544,7 +547,7 @@ export function buildPit(h: Harness, o: { centre: XZ; lengthX: 8; widthZ: 6; dep
+  */
+ export function furnishPit(
+   h: Harness,
+-  o: { centre: XZ; lengthX: number; widthZ: number; stakeSpacing: number; grass: { count: number; minCount: number } },
++  o: { centre: XZ; lengthX: number; widthZ: number; stakeSpacing: number; grass: { count: number; minCount: number }; coverDugRim?: boolean },
+   stick: number,
+ ): { cover: number[]; stakes: number[] } {
+   const c = o.centre;
+@@ -608,7 +611,31 @@ export function furnishPit(
+ 
+   // The cover: bearers across the width, laid from the −z rim; grass bundles on them from the nearer long rim.
+   const bearers: number[] = [];
+-  const B = { ...PIT.bearer, lengthM: o.widthZ + 2 * PIT.bearer.overM, count: Math.round(o.lengthX / PIT.bearer.spacingM) };
++  // P28 (coverDugRim, the 8 × 6 m pit): the bearers span the hole as dug, not the planned footprint. The planner's cone
++  // strikes dig the rim out beyond the footprint (≈ ±4.3 m at an 8 m pit's ends, where 20 bearers 0.4 m apart reached
++  // ±3.8: a giant's front foot met the open strip and tripped `ledge`, not `cover`), so the bearers run from the dug
++  // edge at one end to the other, at most spacingM apart, each overM onto undug ground beyond both long rims.
++  const dug = (x: number, z: number): boolean => ground(h, { x, z }) < h.w.terrain.originalHeightAt(x, z) - DUG_EDGE_M;
++  let xMin = c.x;
++  let xMax = c.x;
++  let zHalf = o.widthZ / 2;
++  if (o.coverDugRim) {
++    for (let x = c.x; x > c.x - o.lengthX; x -= 0.05) if (dug(x, c.z)) xMin = x;
++    for (let x = c.x; x < c.x + o.lengthX; x += 0.05) if (dug(x, c.z)) xMax = x;
++    for (let x = xMin; x <= xMax + 1e-9; x += 0.1) {
++      for (let z = 0; z < o.widthZ; z += 0.05) if (dug(x, c.z + z) || dug(x, c.z - z)) zHalf = Math.max(zHalf, z);
++    }
++    // The end bearers on undug ground just beyond the ends as dug on the centre line (P28: one laid on the dug edge's
++    // slope rolled in under the giant's first step).
++    xMin -= PIT.bearer.endOutM;
++    xMax += PIT.bearer.endOutM;
++  }
++  const spanX = xMax - xMin;
++  const B = o.coverDugRim
++    ? { ...PIT.bearer, lengthM: 2 * (zHalf + PIT.bearer.overM), count: Math.ceil(spanX / PIT.bearer.spacingM - 1e-9) + 1 }
++    : { ...PIT.bearer, lengthM: o.widthZ + 2 * PIT.bearer.overM, count: Math.round(o.lengthX / PIT.bearer.spacingM) };
++  const bearerX = (i: number): number => (o.coverDugRim ? xMin + (spanX * i) / (B.count - 1) : c.x - ((B.count - 1) * B.spacingM) / 2 + i * B.spacingM);
++  if (o.coverDugRim) console.info(`furnishPit: bearers x ${xMin.toFixed(2)} … ${xMax.toFixed(2)}, dug |z| ≤ ${zHalf.toFixed(2)}: ${B.count} bearers ${B.lengthM.toFixed(2)} m long`);
+   for (let i = 0; i < B.count; i++) {
+     // Staged south-east of the pit (the player fetches them from the −z rim lane without crossing the pit).
+     const q = { x: c.x + o.lengthX / 2 + 2, z: c.z - 9 - 0.4 * i };
+@@ -619,7 +646,10 @@ export function furnishPit(
+   const spots: { q: XZ; side: number }[] = [];
+   const half = o.lengthX / 2 - 0.3;
+   for (const side of [-1, 1]) {
+-    for (const inset of G.rowsInsetM) for (let cx = -half; cx <= half + 1e-9; cx += 0.2) spots.push({ q: offVertex(h, { x: c.x + cx, z: c.z + side * (o.widthZ / 2 - inset) }), side });
++    // (coverDugRim: the rows inset from the hole's dug edge, as the bearers' ends are set from it, so the player laying
++    // them from beyond those ends still reaches both rows.)
++    const rowHalf = o.coverDugRim ? zHalf : o.widthZ / 2;
++    for (const inset of G.rowsInsetM) for (let cx = -half; cx <= half + 1e-9; cx += 0.2) spots.push({ q: offVertex(h, { x: c.x + cx, z: c.z + side * (rowHalf - inset) }), side });
+   }
+   Array.from({ length: o.grass.count }).forEach((_, gi) => {
+     const q = { x: c.x + o.lengthX / 2 + 4 + 1.2 * (gi % 5), z: c.z - 19 - 1.0 * Math.floor(gi / 5) };
+@@ -628,14 +658,17 @@ export function furnishPit(
+   h.ticks(60);
+   const rimY = (x: number): number => {
+     let top = -Infinity;
+-    for (const zz of [z0 - 0.5, z0 - 0.75, z0 - 1.0, z1 + 0.5, z1 + 0.75, z1 + 1.0]) top = Math.max(top, h.w.terrain.heightAt(x, zz));
++    const zs = o.coverDugRim
++      ? [0.1, 0.35, 0.6, 0.85].flatMap((d) => [c.z - zHalf - d, c.z + zHalf + d])
++      : [z0 - 0.5, z0 - 0.75, z0 - 1.0, z1 + 0.5, z1 + 0.75, z1 + 1.0];
++    for (const zz of zs) top = Math.max(top, h.w.terrain.heightAt(x, zz));
+     return top;
+   };
+   // The dirt piles lie out beyond the long sides (digPit's pileSides 'z'), and a pile heaped on a pile rolls: between
+   // the staging (south-east) and the −z rim the player goes by the pit's +x end, never past them.
+   const southEast = { x: c.x + o.lengthX / 2 + 1.5, z: c.z - B.lengthM / 2 - PIT.rimM };
+   for (let i = 0; i < B.count; i++) {
+-    const x = offVertex(h, { x: c.x - ((B.count - 1) * B.spacingM) / 2 + i * B.spacingM, z: c.z }).x;
++    const x = offVertex(h, { x: bearerX(i), z: c.z }).x;
+     route(h, [southEast]);
+     if (!bring(h, bearers[i], [southEast, { x, z: c.z - B.lengthM / 2 - PIT.rimM }])) throw new Error(`buildPit: bearer ${bearers[i]} broke on the way`);
+     h.must({ verb: 'place', target: 0, at: toCm({ x, y: rimY(x) + B.r + 0.05, z: c.z }), yaw: 0, pitch: 0 }, `lay bearer ${bearers[i]} at x ${x.toFixed(2)}`);

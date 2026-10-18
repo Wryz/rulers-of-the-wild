@@ -1,3 +1,25 @@
+# Paused again: 2026-10-18 (owner asked to stop spending tokens)
+
+**State:** `claude/rulers-wild-setup-3p5iba` = verified integration head a1789cc + this note; `main` = ccf9ba7 (same
+tree as a1789cc). Waves 0–9 merged except P28, P29, P39, then P38 gate. AC-4, AC-5, AC-6, AC-7 pass and are verified.
+SIM-fix4 (spoil at repose) merged. Open follow-ups: `docs/work/ledger.md` (search "P38", "SIM-fix4").
+
+**Unmerged work, saved as patches in `docs/work/wip/`:**
+- `P28-ac2-traps.patch` (diff vs a1789cc). AC-2: (c) swing and (d) felled tree pass; (a) bait-tug deadfall and (b)
+  spike pit fail. Includes the second pass (full-rim cover, low-posture blend, backing tug) and an UNVERIFIED,
+  partly done third pass (stopped just before its ledger entry and full-suite run): raise the deadfall for ≥ 0.1 m
+  clearance and v_n ≥ 2; find why the prop springs at 700 N; sole-footprint ledge check; tag trips 'cover' from the
+  supporting bearer's break; the 2/9 stake misses; bridge logs to 651 kg. Delete `tests/ac2.lab*.test.ts` if present.
+- `P29-ac3-solo-hunt.patch` (diff vs 1c93088; its null guards are already merged via SIM-fix4). Rerun after P28.
+
+**Resume:** branch from the integration head, `git apply --3way docs/work/wip/<name>.patch`, finish P28, rebuild the
+pit scene (~12 min cold), full suite `--maxWorkers=2`, typecheck, build, independent review, merge. Then P29, P39,
+P38, independent verification of every criterion, `docs/reports/m1.md`, tag m1, ask the owner before merging to
+main. A Codex prompt for safe follow-ups (outside P28's files) was given to the owner; review its branch if one
+appears.
+
+---
+
 # Paused: where the build stands and how to resume
 
 The owner asked to pause on 2026-10-17 at about 18:45 UTC because of token usage. Everything merged is green and
