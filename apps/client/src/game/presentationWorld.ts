@@ -20,6 +20,7 @@ import {
   BONES,
   type BoneName,
   cylinderPoints,
+  roundCylinderR,
   defineTuning,
   DT,
   type Entity,
@@ -606,11 +607,26 @@ export class PresentationWorld implements PresentationPort, BodyFallSource {
         return C.cuboid(s.hx, s.hy, s.hz);
       case 'capsule':
         return C.capsule(s.halfHeight, s.r);
-      case 'cylinder':
-        return C.convexHull(new Float32Array(cylinderPoints(s)));
-      case 'hull':
-        return C.convexHull(new Float32Array(s.points));
+      // SIM-fix3: ColliderDesc.convexHull never returns null (Rapier makes the hull when the collider is created, and a
+      // needle or sliver then throws "expected instance of p"), so the hull is tried first. A prism Rapier can't make a
+      // hull of is its round cylinder, as the sim's colliderDesc builds it; such a hull gets no mirror.
+      case 'cylinder': {
+        const pts = new Float32Array(cylinderPoints(s));
+        return this.hullBuilds(pts) ? C.convexHull(pts) : C.cylinder(s.halfHeight, roundCylinderR(s));
+      }
+      case 'hull': {
+        const pts = new Float32Array(s.points);
+        return this.hullBuilds(pts) ? C.convexHull(pts) : null;
+      }
     }
+  }
+
+  /** Whether Rapier can make a convex hull of the points (see mirrorDesc). */
+  private hullBuilds(pts: Float32Array): boolean {
+    const raw = new this.R.ConvexPolyhedron(pts, null).intoRaw();
+    if (!raw) return false;
+    raw.free();
+    return true;
   }
 }
 

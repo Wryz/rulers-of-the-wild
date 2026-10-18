@@ -187,7 +187,7 @@ export class World implements WorldPort {
     this.queries = new WorldQueries(this.physics, {
       mass: (id) => this.entities.get(id)?.mass ?? 0,
       collider: (id) => this.entities.get(id)?.collider ?? null,
-    });
+    }, this.terrain);
 
     this.combat = new CombatSim(this.rngs.seedOf('combat'));
     this.rngs.attachCombat(this.combat.rng);

@@ -150,7 +150,7 @@ describe('every dev op is a command applied at its tick, in both runs of a repla
   });
 
   it('giveTool [i]: a real entity made by the factory, put in the hands (each of GIVE_TOOLS)', async () => {
-    const classes: Record<(typeof GIVE_TOOLS)[number], string | null> = { stoneAxe: 'stoneAxe', diggingStick: 'sharpStick', spear: 'spear', vine: null };
+    const classes: Record<(typeof GIVE_TOOLS)[number], string | null> = { stoneAxe: 'stoneAxe', diggingStick: 'sharpStick', spear: 'spear', vine: null, starterVine: null };
     for (let i = 0; i < GIVE_TOOLS.length; i++) {
       const tool = GIVE_TOOLS[i];
       await replayed({
@@ -163,7 +163,7 @@ describe('every dev op is a command applied at its tick, in both runs of a repla
           const e = w.entities.get(after.hands!)!;
           expect(e, tool).toBeDefined();
           expect(toolClass(w, e.id), tool).toBe(classes[tool]);
-          if (tool === 'vine') expect(e.material).toBe('vine');
+          if (tool === 'vine' || tool === 'starterVine') expect(e.material).toBe('vine');
         },
       });
     }

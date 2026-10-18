@@ -57,7 +57,7 @@ import { COMMAND_STEPS, type VerbCommand } from '../../sim/commands';
 import type { Fighter } from '../../sim/fighter';
 import { defineTuning } from '../../tuning/registry';
 import { propertyAtLeast } from '../materials';
-import { cylinderPoints, GEOM_EPS, principalAxis } from '../shapes';
+import { cylinderPoints, GEOM_EPS, principalAxis, rapierHullOk } from '../shapes';
 import type { Entity, Owner, Pose3, Quat, RefuseReason, Shape, V3 } from '../types';
 import type { World } from '../world';
 import { letGo } from './hands';
@@ -165,33 +165,61 @@ function shapeVertices(s: Shape): V3[] {
 /**
  * The shape made `m` smaller all round (the clearance test's and the sloped cast's placeShrinkM): a prism, box, ball or
  * capsule loses m from every half-extent; a hull's vertices move m toward its centroid. Never below a millimetre.
+ *
+ * SIM-fix3: m is clamped to placeShrinkMaxFrac of the shape's smallest half-extent (a cylinder's r, a box's least
+ * half-side, a hull's least half-extent about its centroid), so a thin thing keeps its proportions instead of becoming a
+ * needle: an r 0.02 m × 8 m bearer shrunk the full 0.02 m was an r 1 mm prism Rapier can't build as a hull ("expected
+ * instance of p" from every query with it). Should the shrunk prism or hull still be one Rapier rejects (rapierHullOk),
+ * the shape comes back unshrunk: its own collider is that hull, so Rapier builds it.
  */
 export function shrinkShape(s: Shape, m: number): Shape {
   const min = 1e-3;
-  const less = (x: number): number => Math.max(min, x - m);
+  const room = (smallest: number): number => Math.max(0, Math.min(m, VERB_TUNING.placeShrinkMaxFrac * smallest));
+  const less = (x: number, k: number): number => Math.max(min, x - k);
+  let out: Shape;
   switch (s.kind) {
-    case 'cylinder':
-      return { kind: 'cylinder', halfHeight: less(s.halfHeight), r: less(s.r), sides: s.sides };
-    case 'box':
-      return { kind: 'box', hx: less(s.hx), hy: less(s.hy), hz: less(s.hz) };
+    case 'cylinder': {
+      const k = room(Math.min(s.r, s.halfHeight));
+      out = { kind: 'cylinder', halfHeight: less(s.halfHeight, k), r: less(s.r, k), sides: s.sides };
+      break;
+    }
+    case 'box': {
+      const k = room(Math.min(s.hx, s.hy, s.hz));
+      return { kind: 'box', hx: less(s.hx, k), hy: less(s.hy, k), hz: less(s.hz, k) };
+    }
     case 'ball':
-      return { kind: 'ball', r: less(s.r) };
-    case 'capsule':
-      return { kind: 'capsule', halfHeight: Math.max(0, s.halfHeight - m), r: less(s.r) };
+      return { kind: 'ball', r: less(s.r, room(s.r)) };
+    case 'capsule': {
+      const k = room(s.r);
+      return { kind: 'capsule', halfHeight: Math.max(0, s.halfHeight - k), r: less(s.r, k) };
+    }
     case 'hull': {
       const pts = shapeVertices(s);
       const c = scale(pts.reduce((a, p) => add(a, p), v(0, 0, 0)), 1 / Math.max(1, pts.length));
-      const out: number[] = [];
+      let lo = v(Infinity, Infinity, Infinity);
+      let hi = v(-Infinity, -Infinity, -Infinity);
+      for (const p of pts) {
+        lo = v(Math.min(lo.x, p.x), Math.min(lo.y, p.y), Math.min(lo.z, p.z));
+        hi = v(Math.max(hi.x, p.x), Math.max(hi.y, p.y), Math.max(hi.z, p.z));
+      }
+      // The least half-extent of the local axis-aligned bounds. A hull thin along a diagonal (a sliver lying across
+      // the axes) has fat bounds, so this overestimates its thin side and the clamp may let it shrink too far; the
+      // rapierHullOk fallback below still catches a result Rapier can't build. Every M1 hull is a prism's or a
+      // fracture's, built along its local axes.
+      const k = pts.length ? room(Math.min(hi.x - lo.x, hi.y - lo.y, hi.z - lo.z) / 2) : 0;
+      const flat: number[] = [];
       for (const p of pts) {
         const d = sub(p, c);
         const l = len(d);
-        const k = l > GEOM_EPS ? Math.max(min / l, 1 - m / l) : 1;
-        const q = add(c, scale(d, k));
-        out.push(q.x, q.y, q.z);
+        const f = l > GEOM_EPS ? Math.max(min / l, 1 - k / l) : 1;
+        const q = add(c, scale(d, f));
+        flat.push(q.x, q.y, q.z);
       }
-      return { kind: 'hull', points: out };
+      out = { kind: 'hull', points: flat };
+      break;
     }
   }
+  return rapierHullOk(out) ? out : s;
 }
 
 /** The point of segment a-b nearest p. */

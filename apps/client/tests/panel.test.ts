@@ -6,6 +6,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   type Command,
+  COMMAND_STEPS,
   createWorld,
   defineTuning,
   getTuningValue,
@@ -333,7 +334,7 @@ describe('dev panel: dev ops', () => {
       { op: 'spawnApe', args: [Math.round((p.pos.x + Math.sin(p.yaw) * d) * 100) + 0, Math.round((p.pos.z + Math.cos(p.yaw) * d) * 100) + 0] },
     ]);
     expect(click(/^Spawn the giant/)).toEqual([{ op: 'spawnGiant', args: [] }]);
-    GIVE_TOOLS.forEach((_t, i) => expect(click(new RegExp(`^Give: ${['stone axe', 'digging stick', 'spear', 'vine'][i]}`))).toEqual([{ op: 'giveTool', args: [i] }]));
+    GIVE_TOOLS.forEach((_t, i) => expect(click(new RegExp(`^Give: ${['stone axe', 'digging stick', 'spear', 'vine', "the cache's vine coil"][i]}`))).toEqual([{ op: 'giveTool', args: [i] }]));
     expect(click(/^Teleport: spawn/)).toEqual([{ op: 'teleport', args: [0, 0] }]);
     expect(click(/^Pause minds/)).toEqual([{ op: 'pauseMinds', args: [1] }]);
     expect(click(/^Resume minds/)).toEqual([{ op: 'pauseMinds', args: [0] }]);
@@ -345,6 +346,29 @@ describe('dev panel: dev ops', () => {
     for (const c of pushed) expect(c.tick).toBe(world.tick + 1);
     // The shared world never runs them (the other tests read it as built).
     world.commands.discard(1, 'meta');
+  });
+
+  it("'Teleport: the giant' sends the 4-argument teleport (SIM-fix3): off the giant, id 0, a yaw facing it", async () => {
+    const other = await createWorld({ seed: 7, scene: 'empty', nav: 'off' });
+    try {
+      const g = other.spawnCreature('giantApe', { x: 10, z: -6 }, 0);
+      const { pane } = setup({ world: other });
+      pane.button(/^Teleport: the giant/).click();
+      const devs = pushed.filter((c): c is MetaCommand => c.kind === 'meta' && c.meta === 'dev').map((c) => c.dev!);
+      const o = PANEL_TUNING.teleportGiantOffsetM;
+      const at = { x: g.pos.x + o, z: g.pos.z + o };
+      expect(devs).toHaveLength(1);
+      expect(devs[0].op).toBe('teleport');
+      const [x, z, id, yaw] = devs[0].args;
+      expect([x, z, id]).toEqual([Math.round(at.x * 100), Math.round(at.z * 100), 0]);
+      expect(Number.isInteger(yaw) && yaw >= 0 && yaw < COMMAND_STEPS).toBe(true);
+      const want = Math.atan2(g.pos.x - at.x, g.pos.z - at.z);
+      const got = (yaw / COMMAND_STEPS) * 2 * Math.PI;
+      expect(Math.abs(Math.atan2(Math.sin(got - want), Math.cos(got - want)))).toBeLessThanOrEqual(Math.PI / COMMAND_STEPS + 1e-9);
+    } finally {
+      world.commands.discard(1, 'meta');
+      other.dispose();
+    }
   });
 });
 
