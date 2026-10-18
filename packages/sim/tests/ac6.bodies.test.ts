@@ -113,6 +113,7 @@ describe('AC-6 part 1: the player push (§11.6.1, §4.2)', () => {
     h.ticks(120);
     const e = h.ent(id);
     expect(e.mass).toBeCloseTo(AC6.boulderKg, 3);
+    expect(e.body!.isDynamic()).toBe(true);
     expect(speedOf(e.vel.lin)).toBeLessThan(0.01);
     const pts = (e.shape as Extract<typeof e.shape, { kind: 'hull' }>).points;
     let rMax = 0;

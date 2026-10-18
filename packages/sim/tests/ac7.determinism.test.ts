@@ -12,7 +12,7 @@
 // first tick; one the script itself makes (the spear, the axe, a vine) is checked the same way at the tick it is first
 // named. A generation change therefore fails with a clear message instead of turning the script into a silent no-op.
 //
-// What the log does (in order; ≈ 4,100 ticks): move and button noise from its own Rng(99); a `setTuning` of
+// What the log does (in order; 4,209 ticks): move and button noise from its own Rng(99); a `setTuning` of
 // MOVE_TUNING.sprintMul and a sprint under it, then the edit undone by a second `setTuning`; take the starter cache's
 // vine coil and stow it on the belt; take the digging stick and dig (6 strikes); drop it; take a flint and shape a dry
 // stick's end to a point (three strokes, then `charge: 0`); drop the flint; take the stake and place it upright,

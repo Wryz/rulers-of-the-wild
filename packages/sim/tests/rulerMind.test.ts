@@ -8,6 +8,7 @@
 // Scenes are flat `scene 'empty'` worlds with a navmesh (nav 'full'). Scene numbers (distances, masses, tick budgets)
 // are test constants, never tuning (§9); expected values come from the tuning tables.
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { YIELD_TICKS, yieldToVitest } from './support/yieldToVitest';
 import { canonicalJson, parseCanonicalJson } from '../src/save/canonical';
 import { loadWorld } from '../src/save/load';
 import type { MindRecV1, SaveV1 } from '../src/save/schema';
@@ -51,7 +52,7 @@ afterEach(async () => {
   resetTuning();
   // Back to the event loop's I/O between tests: this file steps worlds for over a minute under load with no other turn
   // of it, and the worker's progress messages to Vitest would time out (60 s) unanswered.
-  await new Promise<void>((resolve) => setImmediate(resolve));
+  await yieldToVitest();
 });
 
 // ---------------------------------------------------------------------------
@@ -87,19 +88,21 @@ function hunting(w: World, mind: RulerMind, p: Fighter): void {
 }
 
 /** Steps until `pred` holds; returns the tick, or throws after `max` ticks. `each` runs before every step. */
-function until(w: World, pred: () => boolean, max: number, what: string, each?: () => void): number {
+async function until(w: World, pred: () => boolean, max: number, what: string, each?: () => void): Promise<number> {
   for (let n = 0; n < max; n++) {
     each?.();
     w.step();
     if (pred()) return w.tick;
+    if ((n + 1) % YIELD_TICKS === 0) await yieldToVitest();
   }
   throw new Error(`${what} not reached in ${max} ticks (tick ${w.tick})`);
 }
 
-function steps(w: World, n: number, each?: () => void): void {
+async function steps(w: World, n: number, each?: () => void): Promise<void> {
   for (let k = 0; k < n; k++) {
     each?.();
     w.step();
+    if ((k + 1) % YIELD_TICKS === 0) await yieldToVitest();
   }
 }
 
@@ -107,12 +110,12 @@ function steps(w: World, n: number, each?: () => void): void {
  * The states a mind passes through while `run` steps (it calls `note` between steps; the state after the last step is
  * noted too), without repeats, each with the tick it was first noted at.
  */
-function trace(w: World, mind: RulerMind, run: (note: () => void) => void): { state: MindState; tick: number }[] {
+async function trace(w: World, mind: RulerMind, run: (note: () => void) => Promise<void>): Promise<{ state: MindState; tick: number }[]> {
   const seen = [{ state: mind.state, tick: w.tick }];
   const note = (): void => {
     if (seen[seen.length - 1].state !== mind.state) seen.push({ state: mind.state, tick: w.tick });
   };
-  run(note);
+  await run(note);
   note();
   return seen;
 }
@@ -206,7 +209,7 @@ describe('patrol and investigate (§6.4)', () => {
     const marks: number[] = [];
     let prev = mind.routeIdx;
     let maxSpeed = 0;
-    until(w, () => mind.state === 'rest', secs(400), 'back at rest', () => {
+    await until(w, () => mind.state === 'rest', secs(400), 'back at rest', () => {
       if (mind.state === 'patrol' && mind.routeIdx !== prev) {
         marks.push(w.tick);
         prev = mind.routeIdx;
@@ -228,7 +231,7 @@ describe('patrol and investigate (§6.4)', () => {
     const w = await make({ size: 200, player: false });
     const { g, mind } = giantAt(w, 0, -40, 0);
     const { tree } = spawnTree(w, { at: { x: 0, z: d - 40 }, diameter: 0.3, height: 15 });
-    steps(w, 30);
+    await steps(w, 30);
     expect(mind.state).toBe('rest');
     expect(w.entities.get(tree)!.mass).toBeGreaterThan(738);
     // Felled toward +x (cut from −x), across the giant's view.
@@ -239,8 +242,8 @@ describe('patrol and investigate (§6.4)', () => {
   /** The design's investigation of a felled tree (§6.4 investigate), `d` m away: rest → investigate → sniff → patrol. */
   async function investigatesFelled(d: number): Promise<void> {
     const { w, g, mind, tree } = await felledAt(d);
-    const states = trace(w, mind, (note) => {
-      until(w, () => mind.state === 'investigate', secs(10), 'investigating', note);
+    const states = await trace(w, mind, async (note) => {
+      await until(w, () => mind.state === 'investigate', secs(10), 'investigating', note);
     });
     expect(states.map((s) => s.state)).toEqual(['rest', 'investigate']);
     expect(mind.senses.level()).toBeGreaterThanOrEqual(G.investigateAt);
@@ -248,7 +251,7 @@ describe('patrol and investigate (§6.4)', () => {
     expect(flat(lkp, tree)).toBeLessThan(16);
     expect(flat(lkp, g.pos)).toBeGreaterThan(d - 10);
     let maxSpeed = 0;
-    until(w, () => mind.mark >= 0, secs(90), 'sniffing', () => {
+    await until(w, () => mind.mark >= 0, secs(90), 'sniffing', () => {
       maxSpeed = Math.max(maxSpeed, speedOf(g));
     });
     expect(maxSpeed).toBeGreaterThan(G.speed.investigate * 0.9);
@@ -259,7 +262,7 @@ describe('patrol and investigate (§6.4)', () => {
     let maxRel = -Infinity;
     const at = w.tick;
     const sound = mind.senses.lkp!;
-    until(w, () => mind.state !== 'investigate', secs(G.sniffS) + 5, 'sniffed', () => {
+    await until(w, () => mind.state !== 'investigate', secs(G.sniffS) + 5, 'sniffed', () => {
       if (w.tick > at + 2) {
         expect(g.posture?.id).toBe('sniff');
         const rel = angleDiff(mind.heading, yawTo(g.pos, sound)) / DEG;
@@ -289,7 +292,7 @@ describe('patrol and investigate (§6.4)', () => {
     const { w, g, mind, tree } = await felledAt(70);
     let peak = 0;
     let heard = false;
-    steps(w, secs(8), () => {
+    await steps(w, secs(8), () => {
       peak = Math.max(peak, mind.senses.of(UNKNOWN_STIMULUS));
       if (mind.senses.lkp && flat(mind.senses.lkp, tree) < 20) heard = true;
     });
@@ -322,7 +325,7 @@ describe('the telegraph and the charge (§6.4)', () => {
     let teleStart = -1;
     let close = false;
     let was: MindState = mind.state;
-    steps(w, secs(60), () => {
+    await steps(w, secs(60), () => {
       pace();
       if (was !== mind.state) {
         if (mind.state === 'telegraph') {
@@ -359,14 +362,14 @@ describe('the telegraph and the charge (§6.4)', () => {
     const p = w.player!;
     const { g, mind } = giantAt(w, 0, -20, 0);
     hunting(w, mind, p);
-    until(w, () => mind.state === 'charge', secs(5), 'charging');
+    await until(w, () => mind.state === 'charge', secs(5), 'charging');
     const commit = mind.heading;
     // The commit is the bearing to the player's position at that instant (§6.4); he stands still until then.
     expect(Math.abs(angleDiff(commit, yawTo(g.pos, p.pos))) / DEG).toBeLessThan(1e-6);
     let last = mind.heading;
     let maxTurn = 0;
     let turned = 0;
-    steps(w, secs(3), () => {
+    await steps(w, secs(3), () => {
       const t = w.tick + 1;
       if (t % 10 === 0) w.commands.push(moveCommand(t, 1, 1, 0));
       if (mind.state === 'charge') {
@@ -389,11 +392,11 @@ describe('the telegraph and the charge (§6.4)', () => {
     const { g, mind } = giantAt(w, 0, -25, 0);
     severe(w, g, 'limp');
     hunting(w, mind, p);
-    const tele = until(w, () => mind.state === 'telegraph', secs(5), 'telegraphing');
-    const start = until(w, () => mind.state === 'charge', secs(5), 'charging');
+    const tele = await until(w, () => mind.state === 'telegraph', secs(5), 'telegraphing');
+    const start = await until(w, () => mind.state === 'charge', secs(5), 'charging');
     expect(start - tele).toBe(secs(G.telegraphS * G.limpTelegraphMul));
     let top = 0;
-    until(w, () => mind.state !== 'charge', secs(10), 'charge over', () => {
+    await until(w, () => mind.state !== 'charge', secs(10), 'charge over', () => {
       top = Math.max(top, speedOf(g));
     });
     expect(G.speed.charge * G.limpChargeMul).toBeCloseTo(4.9, 12);
@@ -406,13 +409,13 @@ describe('the telegraph and the charge (§6.4)', () => {
     const p = w.player!;
     const { g, mind } = giantAt(w, 0, -25, 0);
     hunting(w, mind, p);
-    until(w, () => mind.state === 'charge', secs(5), 'charging');
+    await until(w, () => mind.state === 'charge', secs(5), 'charging');
     const from = { x: g.pos.x, z: g.pos.z };
     // The player gets out of the way (he is not the test here).
     w.commands.push(moveCommand(w.tick + 1, 1, 1, 0, MOVE_SPRINT));
     // (Its speed when it decides, in phase 2: the speed the last tick left, read before each step.)
     let v0 = 0;
-    until(w, () => mind.state !== 'charge', secs(10), 'charge over', () => {
+    await until(w, () => mind.state !== 'charge', secs(10), 'charge over', () => {
       const t = w.tick + 1;
       if (t % 10 === 0) w.commands.push(moveCommand(t, 1, 1, 0, MOVE_SPRINT));
       v0 = speedOf(g);
@@ -424,7 +427,7 @@ describe('the telegraph and the charge (§6.4)', () => {
     expect(v0).toBeGreaterThan(G.speed.charge - 0.01);
     const stop = w.tick + Math.ceil(v0 / G.brake / DT);
     expect(mind.restUntil).toBe(stop + secs(G.recoverS));
-    until(w, () => mind.state !== 'recover', secs(10), 'recovered', () => {
+    await until(w, () => mind.state !== 'recover', secs(10), 'recovered', () => {
       if (w.tick >= stop + 2) expect(speedOf(g)).toBeLessThan(0.05);
     });
     expect(['chase', 'investigate']).toContain(mind.state);
@@ -442,7 +445,7 @@ describe('the dodge table with the real body and the real separate() (§6.4, RF-
     const p = w.player!;
     const { g, mind } = giantAt(w, 0, -D, 0);
     hunting(w, mind, p);
-    const commit = until(w, () => mind.state === 'charge', secs(3), 'charging');
+    const commit = await until(w, () => mind.state === 'charge', secs(3), 'charging');
     // The charge goes knuckles down (posture headLow, its forearms in front at a player's height).
     expect(g.posture?.id).toBe('headLow');
     let hit: Extract<WorldEvent, { type: 'impact' }> | null = null;
@@ -456,14 +459,14 @@ describe('the dodge table with the real body and the real separate() (§6.4, RF-
       if (input > 0 && t >= commit + secs(react)) w.commands.push(moveCommand(t, 1, dir * input, 0, flags));
       top = Math.max(top, speedOf(p));
     };
-    until(w, () => mind.state !== 'charge', secs(10), 'charge over', () => {
+    await until(w, () => mind.state !== 'charge', secs(10), 'charge over', () => {
       move();
       look();
       minD = Math.min(minD, flat(p.pos, g.pos));
     });
     look();
     // (His top speed over a second more: at 10 m the charge is past him before a late sprint is up to speed.)
-    steps(w, secs(1), move);
+    await steps(w, secs(1), move);
     return { hit: hit as Extract<WorldEvent, { type: 'impact' }> | null, minD, top, g };
   }
 
@@ -519,7 +522,7 @@ describe('what the charge meets (§4.7 through the mind)', () => {
     const w = await make();
     const p = w.player!;
     const log = spawnLog(w, { p: { x: -8, y: 1.0, z: 0 }, q: LOG_Z, length: 4.4, mass: 300, state: 'fixed' });
-    steps(w, 2);
+    await steps(w, 2);
     expect(w.entities.isAnchored(w.entities.get(log)!)).toBe(true);
     // The giant 26 m west of the player, the log between them.
     w.teleport(p, 0, 0, -EAST);
@@ -527,14 +530,14 @@ describe('what the charge meets (§4.7 through the mind)', () => {
     expect(chargeLineClear(w, g.pos, p.pos, g.scale)).toBe(true);
     hunting(w, mind, p);
     let trip: Extract<WorldEvent, { type: 'trip' }> | null = null;
-    const states = trace(w, mind, (note) => {
-      until(w, () => trip !== null, secs(10), 'tripped', () => {
+    const states = await trace(w, mind, async (note) => {
+      await until(w, () => trip !== null, secs(10), 'tripped', () => {
         for (const e of w.events) if (e.type === 'trip' && e.f === g) trip = e;
         note();
       });
       for (const e of w.events) if (!trip && e.type === 'trip' && e.f === g) trip = e;
       note();
-      until(w, () => mind.state === 'recover', secs(10), 'recovering', note);
+      await until(w, () => mind.state === 'recover', secs(10), 'recovering', note);
     });
     expect(trip!.why).toBe('obstacle');
     expect(states.map((s) => s.state)).toEqual(['chase', 'telegraph', 'charge', 'down', 'recover']);
@@ -552,11 +555,11 @@ describe('what the charge meets (§4.7 through the mind)', () => {
     const a = 20 * DEG;
     const yaw = Math.atan2(Math.cos(a), Math.sin(a));
     const { g, mind } = giantAt(w, 6 - 14 * Math.cos(a), -1.95 - 14 * Math.sin(a), yaw);
-    steps(w, 2);
+    await steps(w, 2);
     mind.script = { kind: 'charge', heading: yaw, speed: G.speed.charge };
     let deflect = -1;
     let tripped = false;
-    until(w, () => deflect > 0 && w.tick >= deflect + 30, secs(6), 'deflected', () => {
+    await until(w, () => deflect > 0 && w.tick >= deflect + 30, secs(6), 'deflected', () => {
       for (const e of w.events) {
         if (e.type === 'deflect' && deflect < 0) deflect = w.tick;
         if (e.type === 'trip') tripped = true;
@@ -568,7 +571,7 @@ describe('what the charge meets (§4.7 through the mind)', () => {
     expect(g.drive!.heading).toBeCloseTo(EAST, 6);
     // Sliding along the wall, at speed, still charging.
     const x0 = g.pos.x;
-    steps(w, 10);
+    await steps(w, 10);
     expect((g.pos.x - x0) / (10 * DT)).toBeGreaterThan(G.speed.charge * Math.cos(a) - 0.1);
     expect(g.ruler!.deflectedHeading).toBeNull();
     expect(g.posture?.id).toBe('headLow');
@@ -587,14 +590,14 @@ describe('what the charge meets (§4.7 through the mind)', () => {
     hunting(w, mind, p);
     let deflected = false;
     let tripped = false;
-    until(w, () => deflected, secs(8), 'deflected', () => {
+    await until(w, () => deflected, secs(8), 'deflected', () => {
       for (const e of w.events) {
         if (e.type === 'deflect' && e.ruler === g) deflected = true;
         if (e.type === 'trip') tripped = true;
       }
     });
     expect(mind.state).toBe('charge');
-    steps(w, 2);
+    await steps(w, 2);
     expect(tripped).toBe(false);
     expect(mind.state).toBe('charge');
     expect(Math.abs(angleDiff(mind.heading, EAST)) / DEG).toBeLessThan(2);
@@ -615,9 +618,9 @@ describe('severe effects and wounds (§6.4)', () => {
     if (effect) severe(w, g, effect);
     // + toward the giant's left (+x facing +z, perception.ts bearingDeg).
     w.teleport(p, 25 * Math.sin(deg * DEG), 25 * Math.cos(deg * DEG));
-    steps(w, 2);
+    await steps(w, 2);
     mind.restUntil = 1e9;
-    steps(w, secs(3));
+    await steps(w, secs(3));
     return { aw: mind.senses.of(p.id), state: mind.state };
   }
 
@@ -635,12 +638,12 @@ describe('severe effects and wounds (§6.4)', () => {
     const w = await make({ player: false });
     const { g, mind } = giantAt(w, 0, 0, 0);
     severe(w, g, 'blindL');
-    steps(w, 2);
+    await steps(w, 2);
     mind.senses.awareness.set(UNKNOWN_STIMULUS, 0.5);
     mind.senses.lkp = { x: 0, y: 0, z: 30 };
     mind.senses.lkpTick = w.tick + 1;
-    until(w, () => mind.state === 'investigate', 10, 'investigating');
-    steps(w, secs(6));
+    await until(w, () => mind.state === 'investigate', 10, 'investigating');
+    await steps(w, secs(6));
     // Blind on the left: the sound on its right, so it heads left of it (+).
     const off = angleDiff(mind.heading, yawTo(g.pos, mind.senses.lkp!)) / DEG;
     expect(off).toBeCloseTo(G.blindApproachDeg, 0);
@@ -651,7 +654,7 @@ describe('severe effects and wounds (§6.4)', () => {
     const lair = { x: 0, z: 30 };
     const { g, mind } = giantAt(w, lair.x, lair.z, Math.PI);
     w.teleport(g, 0, -10, 0);
-    steps(w, 2);
+    await steps(w, 2);
     const cause: ImpactCause = { kind: 'entity', entityId: null, fighterId: null, credit: ['p1'], held: false, feature: 'fall' };
     // A wound (not severe): awareness, lkp on its chest.
     const small = rulerDamage(w, g, 300, 'chest', 'chest', cause, g.rig.chest.pos.clone())!;
@@ -670,7 +673,7 @@ describe('severe effects and wounds (§6.4)', () => {
     w.step();
     expect(mind.state).toBe('flee');
     let top = 0;
-    until(w, () => mind.state !== 'flee', secs(G.fleeSevereS) + 5, 'fled', () => {
+    await until(w, () => mind.state !== 'flee', secs(G.fleeSevereS) + 5, 'fled', () => {
       top = Math.max(top, speedOf(g));
     });
     expect(w.tick).toBe(t0 + secs(G.fleeSevereS));
@@ -685,14 +688,14 @@ describe('severe effects and wounds (§6.4)', () => {
     const lair = { x: 0, z: 30 };
     const { g, mind } = giantAt(w, lair.x, lair.z, Math.PI);
     w.teleport(g, 0, -10, 0);
-    steps(w, 2);
+    await steps(w, 2);
     const cause: ImpactCause = { kind: 'entity', entityId: null, fighterId: null, credit: [], held: false, feature: 'fall' };
     const big = rulerDamage(w, g, RULER_TUNING.severeFrac * g.ruler!.maxHp + 1, 'flanks', 'abdomen', cause, g.rig.abdomen.pos.clone())!;
     mind.onWound(big);
     w.rulers.requestTrip(g, 'impact', cause);
-    const states = trace(w, mind, (note) => {
-      until(w, () => mind.state === 'down', 5, 'down', note);
-      until(w, () => mind.state === 'flee', secs(10), 'fleeing again', note);
+    const states = await trace(w, mind, async (note) => {
+      await until(w, () => mind.state === 'down', 5, 'down', note);
+      await until(w, () => mind.state === 'flee', secs(10), 'fleeing again', note);
     });
     // It takes up the flee at the next decision (the body trips at that tick's phase 4c), is down while tripped and
     // rising, and flees on once up.
@@ -707,10 +710,10 @@ describe('severe effects and wounds (§6.4)', () => {
       const w = await make({ player: false });
       const { g, mind } = giantAt(w, 0, -30, 0);
       if (limp) severe(w, g, 'limp');
-      steps(w, 2);
+      await steps(w, 2);
       mind.script = { kind: 'route', points: [{ x: 0, z: 30 }], speed: G.speed.patrol };
       const out = { L: { dur: [] as number[], height: [] as number[] }, R: { dur: [] as number[], height: [] as number[] } };
-      steps(w, secs(14), () => {
+      await steps(w, secs(14), () => {
         for (const foot of [g.footwork.L, g.footwork.R]) {
           if (w.tick >= secs(3) && foot.stepping && foot.t === 0) {
             out[foot.side].dur.push(foot.dur);
@@ -740,7 +743,7 @@ describe('severe effects and wounds (§6.4)', () => {
     expect(canonicalJson(parsed(serializeWorld(l)).fighters)).toBe(canonicalJson(parsed(a).fighters));
     // Healed of nothing (wounds persist), but a giant without the wound has none: cleared when the wound is gone.
     lame.g.ruler!.wounds.length = 0;
-    steps(lame.w, 1);
+    await steps(lame.w, 1);
     expect(lame.g.footwork.style.limp).toBeUndefined();
   });
 
@@ -751,11 +754,11 @@ describe('severe effects and wounds (§6.4)', () => {
     severe(w, g, 'winded');
     hunting(w, mind, p);
     let top = 0;
-    until(w, () => mind.state === 'telegraph', secs(30), 'telegraphing', () => {
+    await until(w, () => mind.state === 'telegraph', secs(30), 'telegraphing', () => {
       if (mind.state === 'chase') top = Math.max(top, speedOf(g));
     });
     expect(top).toBeCloseTo(G.speed.chase * G.windedChaseMul, 6);
-    until(w, () => mind.state === 'recover' || mind.state === 'down', secs(15), 'charge over');
+    await until(w, () => mind.state === 'recover' || mind.state === 'down', secs(15), 'charge over');
     expect(mind.cooldownUntil).toBe(w.tick + secs(G.chargeCooldownS * G.windedCooldownMul));
   });
 });
@@ -773,10 +776,10 @@ describe('down in a pit (§6.4, §4.7, RR-1)', () => {
     digPit(w, -4, 4, -3, 3, 2.5);
     w.teleport(p, 6, 0, -EAST);
     const { g, mind } = giantAt(w, -22, 0, EAST);
-    steps(w, 2);
+    await steps(w, 2);
     hunting(w, mind, p);
     let trip: Extract<WorldEvent, { type: 'trip' }> | null = null;
-    until(w, () => trip !== null, secs(10), 'tripped', () => {
+    await until(w, () => trip !== null, secs(10), 'tripped', () => {
       for (const e of w.events) if (e.type === 'trip' && e.f === g) trip = e;
     });
     for (const e of w.events) if (!trip && e.type === 'trip' && e.f === g) trip = e;
@@ -788,7 +791,7 @@ describe('down in a pit (§6.4, §4.7, RR-1)', () => {
     let recover = -1;
     let floor = Infinity;
     const roars: number[] = [];
-    until(w, () => recover > 0, secs(40), 'recovering', () => {
+    await until(w, () => recover > 0, secs(40), 'recovering', () => {
       for (const e of w.events) {
         if (e.type === 'rise' && e.f === g) rise = w.tick;
         if (e.type === 'pit' && e.f === g && !e.on) out = w.tick;
@@ -832,21 +835,21 @@ describe('down in a pit (§6.4, §4.7, RR-1)', () => {
     digPit(w, -4, 4, -3, 3, 2.5);
     // A fixed 1 m log, 12 m long, lying along the north rim just beyond the wall.
     spawnLog(w, { p: { x: 0, y: 0.5, z: 4.6 }, length: 12, r: 0.5, state: 'fixed' });
-    steps(w, 2);
+    await steps(w, 2);
     const { g, mind } = giantAt(w, 0, 1, 0);
-    steps(w, 2);
+    await steps(w, 2);
     expect(mind.state).toBe('down');
     // The nearest rim is the north wall, 2 m off.
     expect(Math.abs(angleDiff(mind.heading, 0)) / DEG).toBeLessThan(1);
     const first = mind.climb!.tick;
-    until(w, () => (mind.climb?.skip ?? 0) > 0, secs(20), 're-planned');
+    await until(w, () => (mind.climb?.skip ?? 0) > 0, secs(20), 're-planned');
     // Not before a whole stuckTicks without progress.
     expect(w.tick - first).toBeGreaterThanOrEqual(G.stuckTicks);
     // Away from the blocked bearing (north): the new rim lies in the half-plane behind it.
     expect(Math.abs(angleDiff(mind.heading, 0)) / DEG).toBeGreaterThanOrEqual(90);
-    until(w, () => !g.ruler!.inPit, secs(30), 'out of the pit');
+    await until(w, () => !g.ruler!.inPit, secs(30), 'out of the pit');
     expect(g.pos.z).toBeLessThan(3);
-    until(w, () => mind.state !== 'down', 5, 'up and out');
+    await until(w, () => mind.state !== 'down', 5, 'up and out');
     expect(mind.state).toBe('recover');
     expect(mind.climb).toBeNull();
   });
@@ -854,16 +857,16 @@ describe('down in a pit (§6.4, §4.7, RR-1)', () => {
   it('teleported into a pit (no trip) it is down at once and climbs out toward the nearest rim', async () => {
     const w = await make({ player: false });
     digPit(w, -4, 4, -3, 3, 2.5);
-    steps(w, 1);
+    await steps(w, 1);
     const { g, mind } = giantAt(w, 0, 1, Math.PI);
-    steps(w, 2);
+    await steps(w, 2);
     expect(g.ruler!.inPit).toBe(true);
     expect(mind.state).toBe('down');
     // The nearest rim from (0, 1) is the north wall (z = 3), 2 m away.
     expect(Math.abs(angleDiff(mind.heading, 0)) / DEG).toBeLessThan(1);
-    until(w, () => !g.ruler!.inPit, secs(20), 'out of the pit');
+    await until(w, () => !g.ruler!.inPit, secs(20), 'out of the pit');
     expect(g.pos.z).toBeGreaterThan(3);
-    until(w, () => mind.state !== 'down', 5, 'up and out');
+    await until(w, () => mind.state !== 'down', 5, 'up and out');
     expect(mind.state).toBe('recover');
   });
 });
@@ -891,11 +894,11 @@ describe('chargeLineClear (§6.4)', () => {
     // A light fixed post (6 m, 0.2 m square, dry wood: ≈ 100 kg) on the line, and a free 1.5 t log standing on end.
     spawnBox(w, { p: { x: 0, y: 3, z: 0 }, size: [0.2, 6, 0.2], material: 'dryWood', state: 'fixed', look: 'post' });
     spawnLog(w, { p: { x: 5, y: 3.0, z: 0 }, q: UP, length: 6, mass: 1500 });
-    steps(w, 40);
+    await steps(w, 40);
     expect(chargeLineClear(w, from, to)).toBe(true);
     // A 30 cm trunk 12 m tall (≈ 600 kg, fixed) on the line stops it.
     spawnTree(w, { at: { x: 10, z: 0.2 }, diameter: 0.3, height: 12 });
-    steps(w, 1);
+    await steps(w, 1);
     expect(chargeLineClear(w, from, to)).toBe(false);
     // ... but not a line beside it.
     expect(chargeLineClear(w, { x: -15, y: 0, z: 4 }, { x: 15, y: 0, z: 4 })).toBe(true);
@@ -909,7 +912,7 @@ describe('chargeLineClear (§6.4)', () => {
       const w = await make({ player: false, nav: 'off' });
       // A ridge across the line at x ∈ [−1, 1] (narrow: the probe's 0.8 m ball, ~2.9 m up, clears its top).
       w.terrain.generate((x) => (Math.abs(x) <= 1 ? bank : 0));
-      steps(w, 1);
+      await steps(w, 1);
       expect(chargeLineClear(w, { x: -15, y: 0, z: 0 }, { x: 15, y: 0, z: 0 }), `bank ${bank} m`).toBe(clear);
     }
   });
@@ -925,11 +928,11 @@ describe('the charge script (§6.6)', () => {
     const p = w.player!;
     w.teleport(p, 10, 20);
     const { g, mind } = giantAt(w, 0, -20, 0);
-    steps(w, 2);
+    await steps(w, 2);
     mind.script = { kind: 'charge', heading: 0, speed: 6 };
     const z0 = g.pos.z;
     let top = 0;
-    until(w, () => mind.scriptDone, secs(15), 'script done', () => {
+    await until(w, () => mind.scriptDone, secs(15), 'script done', () => {
       top = Math.max(top, speedOf(g));
       expect(mind.heading).toBe(0);
       expect(Math.abs(g.pos.x)).toBeLessThan(0.05);
@@ -938,18 +941,18 @@ describe('the charge script (§6.6)', () => {
     });
     expect(top).toBeCloseTo(6, 6);
     expect(g.pos.z - z0).toBeGreaterThanOrEqual(G.chargeMaxDistM - 0.2);
-    until(w, () => speedOf(g) < 0.01, secs(5), 'stopped');
+    await until(w, () => speedOf(g) < 0.01, secs(5), 'stopped');
     expect(g.posture).toBeNull();
   });
 
   it('with telegraph: roars, lowers its head and slows for telegraphS, then charges', async () => {
     const w = await make({ player: false });
     const { g, mind } = giantAt(w, 0, -20, 0);
-    steps(w, 2);
+    await steps(w, 2);
     let roared = -1;
     mind.script = { kind: 'charge', heading: 0, speed: 7, telegraph: true };
     const t0 = w.tick + 1;
-    until(w, () => speedOf(g) > 2, secs(5), 'charging', () => {
+    await until(w, () => speedOf(g) > 2, secs(5), 'charging', () => {
       for (const e of w.events) if (roared < 0 && e.type === 'noise' && e.kind === 'roar') roared = w.tick;
     });
     expect(roared).toBe(t0);
@@ -960,17 +963,17 @@ describe('the charge script (§6.6)', () => {
     const w = await make({ player: false });
     const { g, mind } = giantAt(w, -20, 0, EAST);
     spawnLog(w, { p: { x: 0, y: 1.0, z: 0 }, q: LOG_Z, length: 4.4, mass: 300, state: 'fixed' });
-    steps(w, 2);
+    await steps(w, 2);
     mind.script = { kind: 'charge', heading: EAST, speed: 6 };
     let trip = -1;
-    until(w, () => trip > 0, secs(8), 'tripped', () => {
+    await until(w, () => trip > 0, secs(8), 'tripped', () => {
       for (const e of w.events) if (e.type === 'trip' && e.f === g) trip = w.tick;
     });
-    steps(w, 2);
+    await steps(w, 2);
     expect(mind.scriptDone).toBe(true);
-    until(w, () => g.state !== 'tripped' && g.state !== 'getup', secs(8), 'up');
+    await until(w, () => g.state !== 'tripped' && g.state !== 'getup', secs(8), 'up');
     mind.paused = true;
-    steps(w, 3);
+    await steps(w, 3);
     expect(g.drive!.speed).toBe(0);
     expect(g.idlePaused).toBe(true);
   });
@@ -985,7 +988,7 @@ describe('determinism and the record (§6.8, §8)', () => {
     mind.setRoute(octagon(0, 0, 30), { x: 0, z: 38 });
     hunting(w, mind, p);
     const out: string[] = [];
-    steps(w, secs(25), () => {
+    await steps(w, secs(25), () => {
       const t = w.tick + 1;
       if (t % 10 === 0) w.commands.push(moveCommand(t, 1, Math.floor(t / 300) % 2 === 0 ? 0.6 : -0.6, 0));
       if (t % 30 === 0) out.push(canonicalJson(mind.toRecord()));
@@ -1007,7 +1010,7 @@ describe('determinism and the record (§6.8, §8)', () => {
     const { mind } = giantAt(w, 0, 0, 0);
     expect(mind.toRecord().route).toBeNull();
     mind.setRoute([{ x: 1, z: 2 }, { x: 3, z: 4 }]);
-    steps(w, 5);
+    await steps(w, 5);
     const r = mind.toRecord();
     expect(r.route).toEqual([
       { x: 1, z: 2 },
@@ -1030,7 +1033,7 @@ describe('determinism and the record (§6.8, §8)', () => {
     const w = await make({ player: false, nav: 'off' });
     giantAt(w, -10, 0, 0);
     createCreature(w, 'ape', { x: 10, z: 0 }, 0);
-    steps(w, 3);
+    await steps(w, 3);
     const bytes = serializeWorld(w);
     const edit = (fn: (s: SaveV1) => void): Uint8Array => {
       const s = parsed(bytes);
@@ -1054,8 +1057,8 @@ describe('determinism and the record (§6.8, §8)', () => {
     const { g, mind } = giantAt(w, 0, -25, 0);
     mind.setRoute(octagon(0, 0, 30), { x: 0, z: 38 });
     hunting(w, mind, p);
-    until(w, () => mind.state === 'charge', secs(5), 'charging');
-    steps(w, 20);
+    await until(w, () => mind.state === 'charge', secs(5), 'charging');
+    await steps(w, 20);
     expect(mind.state).toBe('charge');
     expect(mind.charge!.travelled).toBeGreaterThan(0);
     const a = serializeWorld(w);
@@ -1075,8 +1078,8 @@ describe('determinism and the record (§6.8, §8)', () => {
     expect(lm.heading).toBe(mind.heading);
     expect(lm.cooldownUntil).toBe(mind.cooldownUntil);
     expect(lm.route(l)).toEqual(mind.route(w));
-    steps(l, 5);
-    steps(w, 5);
+    await steps(l, 5);
+    await steps(w, 5);
     expect(lm.state).toBe(mind.state);
     expect(Math.abs(angleDiff(lm.heading, mind.heading))).toBeLessThan(1e-9);
     expect(flat(lg.pos, g.pos)).toBeLessThan(0.05);

@@ -694,6 +694,27 @@ describe('sloped (§5.7 step 2, §11.2(a))', () => {
 // ---------------------------------------------------------------------------
 
 describe('refusals (§5.7 steps 1-3, §5.0)', () => {
+  it('rejects a non-finite placement coordinate as noTarget before querying support, without releasing the object', async () => {
+    const w = await make();
+    const id = stick(w, 1.4, 0.05, 2, 2);
+    hold(w, id);
+    const overlaps = vi.spyOn(w.queries, 'overlaps');
+    const castRay = vi.spyOn(w.queries, 'castRay');
+    const castShape = vi.spyOn(w.queries, 'castShape');
+    for (const bad of [NaN, Infinity, -Infinity]) {
+      for (const axis of [0, 1, 2]) {
+        const at: [number, number, number] = [0, 10, 100];
+        at[axis] = bad;
+        expect(refusal(w, { tick: w.tick + 1, player: 1, kind: 'verb', verb: 'place', target: 0, at, yaw: 0, pitch: 0 })).toBe('noTarget');
+        expect(w.player!.inventory!.hands?.entity).toBe(id);
+        expect(ent(w, id).state).toBe('held');
+      }
+    }
+    expect(overlaps).not.toHaveBeenCalled();
+    expect(castRay).not.toHaveBeenCalled();
+    expect(castShape).not.toHaveBeenCalled();
+  });
+
   it('an overlapping place is refused blocked: through a standing trunk, through the player’s own body', async () => {
     const w = await make();
     const p = w.player!;

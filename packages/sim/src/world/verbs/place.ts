@@ -523,7 +523,7 @@ export function planPlace(w: World, f: Fighter, cmd: VerbCommand): PlaceVerdict 
   const quarter = COMMAND_STEPS / 4;
   const yawSteps = cmd.yaw ?? 0;
   const pitchSteps = cmd.pitch ?? 0;
-  if (!cmd.at || !Number.isInteger(yawSteps) || !Number.isInteger(pitchSteps) || pitchSteps < 0 || pitchSteps > quarter) return no('noTarget');
+  if (!cmd.at || !cmd.at.every(Number.isFinite) || !Number.isInteger(yawSteps) || !Number.isInteger(pitchSteps) || pitchSteps < 0 || pitchSteps > quarter) return no('noTarget');
   if (cmd.drive !== undefined && cmd.drive !== 0 && cmd.drive !== 1) return no('noTarget');
   const mode: PlaceMode = pitchSteps === 0 ? 'lying' : pitchSteps === quarter ? 'upright' : 'sloped';
   const yaw = (yawSteps / COMMAND_STEPS) * 2 * Math.PI;
