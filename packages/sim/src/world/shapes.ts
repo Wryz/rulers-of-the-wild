@@ -123,16 +123,35 @@ export function colliderDesc(s: Shape, m: Material): RAPIER.ColliderDesc {
       d = RAPIER.ColliderDesc.capsule(s.halfHeight, s.r);
       break;
     case 'cylinder':
-      d = flatPrism(s)
+      // A prism too thin for Rapier's hull (rapierHullOk: a needle) is its round cylinder too, as a flat one is.
+      d = flatPrism(s) || !rapierHullOk(s)
         ? RAPIER.ColliderDesc.cylinder(s.halfHeight, s.r * Math.sqrt(prismArea(1, s.sides) / Math.PI))
         : RAPIER.ColliderDesc.convexHull(new Float32Array(cylinderPoints(s)));
       break;
     case 'hull':
-      d = RAPIER.ColliderDesc.convexHull(new Float32Array(s.points));
+      // ColliderDesc.convexHull never returns null: Rapier computes the hull only when the collider is created, and a
+      // degenerate one then fails there ("expected instance of p"). Test it here, where the error can say what it is.
+      d = rapierHullOk(s) ? RAPIER.ColliderDesc.convexHull(new Float32Array(s.points)) : null;
       break;
   }
   if (!d) throw new Error(`colliderDesc: Rapier could not build a convex hull for a ${s.kind}`);
   return d.setDensity(m.density).setFriction(m.friction).setFrictionCombineRule(RAPIER.CoefficientCombineRule.Average);
+}
+
+/**
+ * Whether Rapier can build the shape: true for a ball, box or capsule; for a prism or a hull, whether Rapier's own
+ * convex hull of its points succeeds. Rapier 0.21 rejects needle-thin and flat point sets by aspect, not by a size we
+ * can bound (an 8-gon prism 8 m long builds at r 3 mm but not at 2 mm, and 20 m long not at 5 mm), so only asking it is
+ * safe. A query shape (queries.ts) and a collider (colliderDesc) are hulls of these points. Needs `physicsReady()`.
+ */
+export function rapierHullOk(s: Shape): boolean {
+  if (s.kind !== 'cylinder' && s.kind !== 'hull') return true;
+  const pts = s.kind === 'cylinder' ? cylinderPoints(s) : s.points;
+  if (pts.length < 12 || !pts.every(Number.isFinite)) return false;
+  const raw = new RAPIER.ConvexPolyhedron(new Float32Array(pts), null).intoRaw();
+  if (!raw) return false;
+  raw.free();
+  return true;
 }
 
 /**
@@ -347,6 +366,25 @@ export function crossCut(s: Shape, axisT: number): [ShapePiece, ShapePiece] {
   const h = convexHull(hullPoints(s));
   const dir = toP3(ax.dir);
   return [cutPiece(h, scale(dir, -1), -t, at(ax.min + lo)), cutPiece(h, dir, t, at(t + hi))];
+}
+
+/**
+ * The shape scaled by k about its own local origin (a piece's centre), every dimension alike: volume × k³. Breaking
+ * uses it to give a piece the volume of a sliver merged into it (SIM-fix3), so the pieces' mass sums to the parent's.
+ */
+export function scaleShape(s: Shape, k: number): Shape {
+  switch (s.kind) {
+    case 'ball':
+      return { kind: 'ball', r: s.r * k };
+    case 'box':
+      return { kind: 'box', hx: s.hx * k, hy: s.hy * k, hz: s.hz * k };
+    case 'capsule':
+      return { kind: 'capsule', halfHeight: s.halfHeight * k, r: s.r * k };
+    case 'cylinder':
+      return { kind: 'cylinder', halfHeight: s.halfHeight * k, r: s.r * k, sides: s.sides };
+    case 'hull':
+      return { kind: 'hull', points: s.points.map((x) => x * k) };
+  }
 }
 
 /**

@@ -9,6 +9,7 @@
 // objects (a proxy per field, its read-outs); it binds no sim table, no fighter and nothing a fighter holds.
 import { type FolderApi, Pane } from 'tweakpane';
 import {
+  COMMAND_STEPS,
   defineTuning,
   type DevOp,
   GIVE_TOOLS,
@@ -303,7 +304,10 @@ export class DevPanel implements PanelPort {
     op('Teleport: the giant', 'teleport', () => {
       const g = giantOf(this.host.world);
       const o = PANEL_TUNING.teleportGiantOffsetM;
-      return g ? cm([g.pos.x + o, g.pos.z + o]) : null;
+      if (!g) return null;
+      // Facing it (devOps' 4-argument teleport: id 0 is the command's player, the yaw in 1/COMMAND_STEPS turns).
+      const at: [number, number] = [g.pos.x + o, g.pos.z + o];
+      return [...cm(at), 0, yawSteps(Math.atan2(g.pos.x - at[0], g.pos.z - at[1]))];
     });
     op('Pause minds', 'pauseMinds', () => [1]);
     op('Resume minds', 'pauseMinds', () => [0]);
@@ -626,7 +630,13 @@ export class DevPanel implements PanelPort {
 // -----------------------------------------------------------------------------
 
 /** The labels of the tools "give a tool" offers (§10.10); giveTool's argument is the tool's index in GIVE_TOOLS. */
-const TOOL_LABELS: Record<GiveTool, string> = { stoneAxe: 'stone axe', diggingStick: 'digging stick', spear: 'spear', vine: 'vine (DEV_OPS_TUNING.vineM)' };
+const TOOL_LABELS: Record<GiveTool, string> = {
+  stoneAxe: 'stone axe',
+  diggingStick: 'digging stick',
+  spear: 'spear',
+  vine: 'vine (DEV_OPS_TUNING.vineM)',
+  starterVine: "the cache's vine coil (CLEARING_TUNING.starterCoilM)",
+};
 
 /** A Tweakpane on `container`, as the panel's root folder. */
 function tweakpane(container: HTMLElement): PanelFolder {
@@ -754,6 +764,12 @@ function defaultOf(defaults: unknown, table: string, key: string): TuningValue |
 
 function cm(xz: [number, number]): number[] {
   return xz.map((v) => Math.round(v * 100) + 0);
+}
+
+/** A yaw (radians, the fighter convention) in whole 1/COMMAND_STEPS turns, 0..COMMAND_STEPS − 1 (teleport's yaw). */
+function yawSteps(yaw: number): number {
+  const k = Math.round((yaw / (2 * Math.PI)) * COMMAND_STEPS);
+  return ((k % COMMAND_STEPS) + COMMAND_STEPS) % COMMAND_STEPS;
 }
 
 function push(list: string[], line: string, max: number): void {

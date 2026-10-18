@@ -497,7 +497,7 @@ const INVENTORY: Record<string, Record<string, string>> = {
     pairFilters: 'not saved: code (the pair filters systems register when the world is built)',
     hooks: "not saved: code (Rapier's contact-pair hook, calling the pair filters)",
   },
-  WorldQueries: { physics: 'not saved: a link', entities: 'not saved: links to the entity store' },
+  WorldQueries: { physics: 'not saved: a link', entities: 'not saved: links to the entity store', ground: 'not saved: a link to the terrain (SIM-fix3)' },
   Terrain: {
     tileSize: 'not saved: TERRAIN_TUNING when the world was built',
     spacing: 'not saved: derived from the tile size',

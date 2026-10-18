@@ -21,7 +21,7 @@
 import type RAPIER from '@dimforge/rapier3d-compat';
 import { defineTuning } from '../tuning/registry';
 import { breakEnergyJ, MATERIALS } from './materials';
-import { crossCut, fracture, GEOM_EPS, principalAxis, shapeContains, type ShapePiece } from './shapes';
+import { crossCut, fracture, GEOM_EPS, principalAxis, rapierHullOk, scaleShape, shapeContains, shapeVolume, type ShapePiece } from './shapes';
 import type { Entity, Owner, Pose3, Quat, Shape, SharpPoint, V3 } from './types';
 import type { World } from './world';
 
@@ -36,6 +36,7 @@ export const BREAK_TUNING = defineTuning(
     pieceGraceTicks: 10,
     pieceGraceMaxTicks: 600,
     loadPointSplitM: 0.5,
+    pieceMinVolumeM3: 1e-6,
   },
   {
     integrityPerExcess: { unit: '—', source: 'D-17' },
@@ -46,6 +47,7 @@ export const BREAK_TUNING = defineTuning(
     pieceGraceTicks: { unit: 'ticks', source: 'NEW: C §7 item 7 (the minimum; the grace lasts until the piece is clear)' },
     pieceGraceMaxTicks: { unit: 'ticks', source: 'NEW: a piece still inside its breaker after 10 s is crushed (RF-7)' },
     loadPointSplitM: { unit: 'm along the axis', source: 'NEW: §4.10 (3 pieces "when two load points are more than 0.5 m apart", RT-7)' },
+    pieceMinVolumeM3: { unit: 'm³', source: 'NEW (SIM-fix3): a smaller piece (a sliver cut at an end) is merged into its nearest neighbour' },
   },
 );
 
@@ -112,7 +114,13 @@ export class Breaking {
     for (const e of now) {
       if (w.entities.get(e.id) !== e) continue;
       const p = this.pending.get(e.id) ?? { kind: 'impact' as const, energy: 0, ratio: 1, point: { ...e.pose.p }, breaker: null, loadPoints: [] };
-      this.split(w, e, p);
+      // SIM-fix3: no exception escapes World.step from a break. split makes only pieces the store accepts and recovers
+      // from a failed create itself; anything else thrown here (a WASM failure) leaves the parent whole, if it is there.
+      try {
+        this.split(w, e, p);
+      } catch {
+        if (w.entities.get(e.id) === e) e.integrity = 1;
+      }
     }
     this.pending.clear();
     for (const e of w.entities.all()) if (e.grace && w.entities.get(e.id) === e) this.graceTick(w, e);
@@ -130,7 +138,9 @@ export class Breaking {
     const v = dyn ? v3(b.linvel()) : { ...e.vel.lin };
     const omega = dyn ? v3(b.angvel()) : { ...e.vel.ang };
     const com = dyn ? v3(b.worldCom()) : { ...pose.p };
-    const pieces = p.kind === 'load' ? loadPieces(e.shape, pose, p.loadPoints) : fracture(e.shape, pieceCount(p.ratio), w.rngs.world);
+    const cut = p.kind === 'load' ? loadPieces(e.shape, pose, p.loadPoints) : fracture(e.shape, pieceCount(p.ratio), w.rngs.world);
+    // SIM-fix3: no piece without volume (or one Rapier can't build) reaches the entity store, and mass is conserved.
+    const pieces = settlePieces(e.shape, cut);
     // Its joints go first: a rope's end on it lies loose where it was; anything else is released.
     for (const jid of [...e.joints]) {
       const j = w.joints.get(jid);
@@ -150,21 +160,18 @@ export class Breaking {
       sharp: e.sharpPoints.map((s) => ({ local: { ...s.local }, dir: { ...s.dir }, sharpness: s.sharpness })),
       span: shapeSpan(e),
     };
+    const parentShape = e.shape;
     w.entities.remove(e.id);
     // Each sharp point goes to the first piece holding it, else the nearest.
     const owner = parent.sharp.map((s) => pieceOf(pieces, s.local, parent.span));
     const ids: number[] = [];
     const tick = w.tick;
-    pieces.forEach((pc, i) => {
+    const make = (pc: ShapePiece, sharpPoints: SharpPoint[]): void => {
       const c = add(pose.p, rotate(pose.q, pc.offset));
       const lin = add(v, cross(omega, sub(c, com)));
       // A piece of a stake that was driven in starts inside the ground: lifted out, as a stake knocked loose is
       // (EntityStore.unanchor's measure).
       c.y += w.entities.depthBelowGround(pc.shape, { p: c, q: pose.q });
-      const sharpPoints: SharpPoint[] = [];
-      parent.sharp.forEach((s, k) => {
-        if (owner[k] === i) sharpPoints.push({ local: sub(s.local, pc.offset), dir: s.dir, sharpness: s.sharpness });
-      });
       const piece = w.entities.create({
         material: parent.material,
         shape: pc.shape,
@@ -184,7 +191,26 @@ export class Breaking {
       piece.age = parent.age;
       if (p.breaker) w.entities.setGrace(piece, { from: p.breaker, minUntil: tick + BREAK_TUNING.pieceGraceTicks, maxUntil: tick + BREAK_TUNING.pieceGraceMaxTicks });
       ids.push(piece.id);
-    });
+    };
+    // SIM-fix3: nothing thrown here may escape World.step (phase 12). settlePieces leaves only shapes the store and
+    // Rapier accept, so a throw is a WASM failure: the pieces made so far go, and the parent's whole shape is made in
+    // their place (one piece, its sharp points, the same mass); should even that fail, it is gone, as a crushed piece is.
+    try {
+      pieces.forEach((pc, i) => {
+        const sharpPoints: SharpPoint[] = [];
+        parent.sharp.forEach((s, k) => {
+          if (owner[k] === i) sharpPoints.push({ local: sub(s.local, pc.offset), dir: s.dir, sharpness: s.sharpness });
+        });
+        make(pc, sharpPoints);
+      });
+    } catch {
+      for (const id of ids.splice(0)) if (w.entities.get(id)) w.entities.remove(id);
+      try {
+        make({ shape: parentShape, offset: { x: 0, y: 0, z: 0 } }, parent.sharp);
+      } catch {
+        ids.length = 0;
+      }
+    }
     w.events.push({ type: 'break', entity: e.id, pieces: ids, point: { ...p.point }, energy: p.energy });
   }
 
@@ -282,6 +308,59 @@ function loadPieces(shape: Shape, pose: Pose3, points: readonly V3[]): ShapePiec
   const along = rest.offset.x * ax.dir.x + rest.offset.y * ax.dir.y + rest.offset.z * ax.dir.z;
   const [b, c] = crossCut(rest.shape, hi - along);
   return [a, { shape: b.shape, offset: add(rest.offset, b.offset) }, { shape: c.shape, offset: add(rest.offset, c.offset) }];
+}
+
+/**
+ * SIM-fix3: the pieces a split may make. A cut at an end (a load point at a tip, an axisT clamped GEOM_EPS inside the
+ * shape) or a wedge of a sliver leaves pieces of ~1e-28 m³ or of none at all (a flat point set: shapeVolume 0), which
+ * the entity store refuses ("a hull shape with no volume") or Rapier can't make a hull of: either threw out of
+ * World.step. A piece under pieceMinVolumeM3, or one Rapier can't build, is merged into the nearest kept piece (centre
+ * to centre), and volume fracture lost outright (a wedge with none) goes to the largest; a kept piece that gains volume
+ * is scaled about its centre to hold it, so the pieces' mass (density × volume) sums to the parent's. No piece kept:
+ * the parent is one piece of its own shape.
+ */
+export function settlePieces(parentShape: Shape, cut: readonly ShapePiece[]): ShapePiece[] {
+  const V = shapeVolume(parentShape);
+  const volOf = (s: Shape): number => {
+    const x = shapeVolume(s);
+    return Number.isFinite(x) && x > 0 ? x : 0;
+  };
+  const ok = (pc: ShapePiece): boolean => {
+    if (!(volOf(pc.shape) >= BREAK_TUNING.pieceMinVolumeM3) || !rapierHullOk(pc.shape)) return false;
+    if (pc.shape.kind === 'cylinder' && !(Number.isInteger(pc.shape.sides) && pc.shape.sides >= 3)) return false;
+    return [pc.offset.x, pc.offset.y, pc.offset.z].every(Number.isFinite);
+  };
+  const keep = cut.filter(ok);
+  if (keep.length === 0) return [{ shape: parentShape, offset: { x: 0, y: 0, z: 0 } }];
+  const vols = keep.map((pc) => volOf(pc.shape));
+  for (const pc of cut) {
+    if (keep.includes(pc)) continue;
+    let best = 0;
+    let bestD = Infinity;
+    keep.forEach((k, i) => {
+      const d = Math.hypot(pc.offset.x - k.offset.x, pc.offset.y - k.offset.y, pc.offset.z - k.offset.z);
+      if (d < bestD) {
+        bestD = d;
+        best = i;
+      }
+    });
+    vols[best] += volOf(pc.shape);
+  }
+  // Volume lost outright (a wedge fracture dropped for having none) goes to the largest piece.
+  const lost = V - vols.reduce((a, x) => a + x, 0);
+  if (Math.abs(lost) > GEOM_EPS * V) {
+    let big = 0;
+    vols.forEach((x, i) => {
+      if (x > vols[big]) big = i;
+    });
+    if (vols[big] + lost > 0) vols[big] += lost;
+  }
+  return keep.map((pc, i) => {
+    const now = volOf(pc.shape);
+    if (!(Math.abs(vols[i] - now) > GEOM_EPS * V)) return pc;
+    const shape = scaleShape(pc.shape, Math.cbrt(vols[i] / now));
+    return rapierHullOk(shape) ? { shape, offset: pc.offset } : pc;
+  });
 }
 
 /** The piece a parent-local point belongs to: the first whose shape holds it, else the one whose centre is nearest. */

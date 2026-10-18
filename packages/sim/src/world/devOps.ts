@@ -12,8 +12,13 @@
 // |               |                              | standing at (x, z) facing the command's player                         |
 // | giveTool      | [tool]                       | GIVE_TOOLS[tool] made by the factory at the player's feet and put in its |
 // |               |                              | hands (VerbSystem.putInHands, whatever they held let go of first)       |
+// |               |                              | (0 stone axe, 1 digging stick, 2 spear, 3 12 m vine, 4 the cache's 8 m |
+// |               |                              | vine coil)                                                              |
 // | teleport      | [xCm, zCm] or [xCm, zCm, id] | the command's player (or fighter `id`) moved to (x, z) by World.teleport |
-// |               |                              | (pose history reset and a contact grace, §4.3; a downed body's slab)    |
+// |               | or [xCm, zCm, id, yaw]       | (pose history reset and a contact grace, §4.3; a downed body's slab);   |
+// |               |                              | with `yaw` (1/COMMAND_STEPS turns, as verb commands' yaw; the fighter   |
+// |               |                              | yaw convention) it is turned to it, id 0 meaning the command's player  |
+// |               |                              | (fighter ids start at 1). Without it the yaw is left as it was.         |
 // | pauseMinds    | [on] or [on, id]             | every creature mind (or fighter `id`'s) paused (on 1) or resumed (on 0) |
 // | killCreature  | [id]                         | creature `id` knocked out (CombatSim.koFighter): parts, its corpse and  |
 // |               |                              | its respawn follow as for any KO                                       |
@@ -30,11 +35,13 @@
 // spear and vine lengths are starting values no table holds (§5.2's 1.9 m spear, §10.10's 12 m vine), and P05's stub of
 // this module registered no table, so they live in DEV_OPS_TUNING here (CLAUDE.md: every starting value in a live
 // tuning table). The stone axe and the digging stick are made exactly as the starter cache makes them
-// (FACTORY_TUNING.starterAxe, CLEARING_TUNING.diggingStick).
+// (FACTORY_TUNING.starterAxe, CLEARING_TUNING.diggingStick), and so is the cache's vine coil (SIM-fix3: 'starterVine',
+// CLEARING_TUNING.starterCoilM, appended so the older indices keep their tools): every starter tool can be given. The
+// stone axe is the lashed axe itself (handle, flint head, lashing); the hands take the handle and the head comes along.
 // INTERPRETATION (§10.10 "kill the target"): a dev kill knocks the creature out through koFighter, CombatSim's only way
 // into 'ko', with no killer and no cause (credit nobody, never environmental), and leaves its HP alone: HP is written
 // only by the damage rule's sites (rule 2, tests/damageRule.test.ts), and a dev kill is not damage.
-import type { MetaCommand } from '../sim/commands';
+import { COMMAND_STEPS, type MetaCommand } from '../sim/commands';
 import type { Fighter } from '../sim/fighter';
 import { PHYSICS_TUNING } from './physics';
 import { defineTuning, setTuningValue } from '../tuning/registry';
@@ -64,7 +71,7 @@ export const DEV_OPS_TUNING = defineTuning(
 );
 
 /** giveTool's first argument indexes this list (the dev panel's "Give" buttons, §10.10). */
-export const GIVE_TOOLS = ['stoneAxe', 'diggingStick', 'spear', 'vine'] as const;
+export const GIVE_TOOLS = ['stoneAxe', 'diggingStick', 'spear', 'vine', 'starterVine'] as const;
 export type GiveTool = (typeof GIVE_TOOLS)[number];
 
 /** Applies one `meta 'dev'` command now (phase 1c). Throws on a malformed one (see the table above). */
@@ -112,11 +119,16 @@ export function applyDevOp(w: World, cmd: MetaCommand): void {
       return;
     }
     case 'teleport': {
-      arity(2, 3);
-      const f = args.length === 3 ? fighter(args[2]) : player;
+      // SIM-fix3: an optional yaw as a 4th argument (with id 0 for the command's player); the 2- and 3-argument
+      // encodings are unchanged and leave the yaw alone.
+      arity(2, 3, 4);
+      const id = args.length >= 3 ? args[2] : 0;
+      if (id < 0) throw bad('id is a fighter id, or 0 for the command\'s player');
+      const f = id === 0 ? player : fighter(id);
       if (!f) return;
       const p = at();
-      w.teleport(f, p.x, p.z);
+      if (args.length === 4) w.teleport(f, p.x, p.z, yawOfSteps(args[3]));
+      else w.teleport(f, p.x, p.z);
       return;
     }
     case 'pauseMinds': {
@@ -157,6 +169,13 @@ export function applyDevOp(w: World, cmd: MetaCommand): void {
 /** Whole cm per m (command points are in whole cm, §1.5.3). */
 const CM = 100;
 
+/** A yaw in 1/COMMAND_STEPS turns as radians in (−π, π] (the fighter yaw convention). */
+function yawOfSteps(steps: number): number {
+  const k = ((steps % COMMAND_STEPS) + COMMAND_STEPS) % COMMAND_STEPS;
+  const a = (k / COMMAND_STEPS) * 2 * Math.PI;
+  return a > Math.PI ? a - 2 * Math.PI : a;
+}
+
 /** The yaw at `p` that faces `toward` (the fighter yaw convention: sin yaw along x, cos yaw along z); 0 with none. */
 function facing(p: { x: number; z: number }, toward: Fighter | null): number {
   return toward ? Math.atan2(toward.pos.x - p.x, toward.pos.z - p.z) : 0;
@@ -184,13 +203,18 @@ function makeTool(w: World, tool: GiveTool, x: number, z: number): number {
       const S = DEV_OPS_TUNING.spear;
       return pointedStick(w, x, z, S.lengthM, S.roundDiamM, S.sharpness);
     }
-    case 'vine': {
-      const lengthM = DEV_OPS_TUNING.vineM;
-      const coil = ropeCoilShape(lengthM);
-      const y = groundRestY(w, x, z, coil);
-      return spawnRopeCoil(w, { at: { x, y: y - coil.halfHeight, z }, material: 'vine', lengthM });
-    }
+    case 'vine':
+      return vineCoil(w, x, z, DEV_OPS_TUNING.vineM);
+    case 'starterVine':
+      return vineCoil(w, x, z, CLEARING_TUNING.starterCoilM);
   }
+}
+
+/** A vine coil of `lengthM` resting on the terrain at (x, z), as the starter cache lays its coil. */
+function vineCoil(w: World, x: number, z: number, lengthM: number): number {
+  const coil = ropeCoilShape(lengthM);
+  const y = groundRestY(w, x, z, coil);
+  return spawnRopeCoil(w, { at: { x, y: y - coil.halfHeight, z }, material: 'vine', lengthM });
 }
 
 /** A dry stick of round section `roundDiamM` (as its 8-gon), pointed at one end, lying along x on the terrain. */
