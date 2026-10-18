@@ -4,3 +4,5 @@ dist
 *.log
 # Developer screenshots: saves and manifest (tools/shots/README.md)
 tools/shots/out/
+# Cached test scenes (tests/support/globalSetup.ts: the AC-2(b)/AC-3 pit; CI caches the directory)
+packages/sim/.cache/
