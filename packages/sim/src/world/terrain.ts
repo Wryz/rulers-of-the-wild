@@ -90,9 +90,9 @@ export const TERRAIN_TUNING = defineTuning(
     spoilReposeDeg: {
       unit: '°',
       source:
-        "NEW (SIM-fix4, P29): loose dirt's angle of repose (≈ 30-35°, rule 3): no terrain triangle of spoil is steeper. Keep it below RULER_BODY_TUNING.maxSlopeDeg (40°), or a berm fences a ruler out of its pit",
+        "NEW (SIM-fix4, P29): loose dirt's angle of repose (≈ 30-35°, rule 3): no terrain triangle of spoil is steeper. Keep it below RULER_BODY_TUNING.maxSlopeDeg (40°), or a berm fences a ruler out of its pit (so the panel caps it at 39°)",
       min: 1,
-      max: 60,
+      max: 39,
     },
     spoilSlideM: {
       unit: 'm',
