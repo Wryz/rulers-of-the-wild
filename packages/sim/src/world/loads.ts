@@ -221,6 +221,8 @@ export class Loads {
     const rapier = w.physics.rapier;
     const others: { key: number; o: typeof c; owner: Owner }[] = [];
     rapier.contactPairsWith(c, (o) => {
+      // Null for a collider removed since the last step (the narrow phase lists the pair until the next step).
+      if (!o) return;
       const owner = w.physics.ownerOf(o.handle);
       if (!owner || (owner.kind !== 'terrain' && owner.kind !== 'entity')) return;
       others.push({ key: owner.kind === 'terrain' ? 0 : owner.id, o, owner });
