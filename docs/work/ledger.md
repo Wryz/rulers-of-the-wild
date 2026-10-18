@@ -220,3 +220,10 @@
 - AC-4 design text: §11.4 mash re-placement "while free" never fires; test re-places on a swing's frame 0.
 - AC-4 (P25, verified: approve). Departures: logs placed over the lying body's highest part (P20's curled fall rolls chest/pelvis logs off); W is the trip log's 306 HP wound (shoulders), not §11.4's ≈586 HP chest wound from the pinning logs; "trip opens no wound" checked only to the trip tick (the trip log opens W just after); re-placement on swing frame 0; mash pin read over minutes 5–10; pinned half mash only. Fix in P38: test comments at ac4.rule5.test.ts:26 and :727 claim the logs' wound.
 - [P38] terrain.test 'generate ≤ 20 ms' is load-sensitive: failed once at 20.51 ms during the P25 merge (load ~6 on 4 cores), passed alone. Use CPU time or a margin. Integration head de1548a was pushed with only this flake red.
+
+## AC-2 (P28, b6ea132, not merged) — first run
+- (c) swinging log PASS (verb-only 3.55 HP; staged 32.8 HP, launched); (d) felled tree PASS (ape 23.2 HP; giant 501 HP skull). 
+- (a) deadfall as designed (bait tug) FAILS: ape is inside the log before it springs (posture crouch→workLow passes through standing height; tug script walks forward, back to the bait); negative controls spring from the ape's own shove. Walked-into-prop variant PASSES (2.65 / 3.71 HP).
+- (b) spike pit FAILS: spoil ridge (SIM-fix4) + buildPit bearers span x −3.8…3.8 but rim is ±4.3 → uncovered 0.45 m strip → 'ledge' trip, cover breaks under the falling body not from foot load.
+- Fixed in P28's branch: dragImpulse unstable < 5 kg; MOVE_CROUCH now shows crouch posture; null-collider guards (same as P29's).
+- Plan: after SIM-fix4, P28 continues: bearers to full rim (scenes.ts, authorised), smooth posture transitions, tug backs off; rebuild pit; rerun. Then P29.
