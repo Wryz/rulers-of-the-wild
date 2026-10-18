@@ -23,7 +23,7 @@
 // The pinned half: the giant is tripped by the AC-5 recipe (a 300 kg log lashed to two stakes the player drove, charged
 // at 6 m/s), paused at the trip. Two 1,000 kg hex logs are spawned across it (perpendicular to its chest → pelvis line)
 // 2 m above its top, when every collider of the ruler is below 0.05 m/s or at +2.5 s after the trip, whichever comes
-// first. Their impact opens a wound and they pin it; W = ruler.downWound read when the axe hits begin. Then 20 s of the
+// first. They pin it; the trip log opens the shoulder wound W = ruler.downWound read when the axe hits begin. Then 20 s of the
 // mashed overhead on a soft zone in reach of the lying body (the placement search re-run on the tripped rig).
 //
 // DEVIATION (§11.4 "across it", recorded in the ledger): the logs are centred over the lying body's highest volume and
@@ -717,14 +717,14 @@ describe('AC-4: the same attacks while the ruler is pinned add to its wound (§1
 
   it('tripped by the AC-5 recipe, pinned by two 1,000 kg logs before +4 s; it stays down', async () => {
     const r = await pinned();
-    // The trip (the AC-5 recipe) opens no wound.
+    // No wound exists at the trip tick; the trip log opens W just afterwards.
     expect(r.tripWhy).toBe('obstacle');
     expect(r.tripWounds).toBe(0);
     // GATE: pinned turns on before +4.0 s, and the ruler is still tripped past +4 s.
     expect(r.pinnedOnS).toBeGreaterThan(0);
     expect(r.pinnedOnS).toBeLessThan(AC4.pin.pinnedByS);
     expect(r.trippedAt4).toBe(true);
-    // GATE: the logs' impact opened a wound, and it is the down wound when the axe hits begin.
+    // GATE: a down wound exists when the axe hits begin (the trip log opened it).
     expect(r.W).not.toBeNull();
   }, 900_000);
 

@@ -238,3 +238,9 @@
 - [tests] spoilRepose.test.ts's cached-pit charge runs only with ROTW_SCENES=pit (as harness.test's own pit check), so a plain run never builds the pit (≈ 12 min, synchronous in a worker). P29's ac3.soloHunt.test.ts awaits cachedScene('pit') in a plain run.
 - [tests, intermittent] "Timeout calling onTaskUpdate" (an unhandled Vitest RPC error: a worker's event loop blocked > 60 s, which fails the run with every test passed) in 3 of 5 full `--maxWorkers=2` runs on this branch (0 of 1 at 1c93088; 2 of the 3 ran alongside other CPU load). Long synchronous files (harness.test: its planner now takes 28,286 ticks for the small pit, was 26,137; spawner, rulerMind) are the likely blockers; more yieldToVitest points would fix it.
 - Also in: P29's null-collider guards (5dcec9e, src only: rulerBody.ts restingLoad, loads.ts supportsOf).
+
+
+## Codex small follow-ups on ccf9ba7
+- AC-7's header now names the fixture's exact 4,209 ticks. AC-4's comments name the trip log's shoulder wound, and distinguish no wound at the trip tick from the wound just afterwards. AC-6.1 explicitly checks that the 800 kg boulder is dynamic, so an immovable fixture cannot satisfy the push gate.
+- The noise.ts `e.point ? … : jointPoint(…)` cleanup is already present on this main; no additional change needed.
+- Deferred P38 work: tuning-table consolidation and missing §9 rows (including PLACE_TUNING and ROPE_TUNING); the numeric-constant allowlist; AC-7's end-to-end negative control and broader verb coverage; pinned/sleeping-ruler save format; charge posture/ramp and shin-band issues; splitting AC-5's expected failures; dev-op/spawn validation and pause semantics; planner edge over-digging and capped spoil placement/range. These need broader decisions or touch the other agent's protected files.
