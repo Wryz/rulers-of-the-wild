@@ -5,8 +5,8 @@
 // banner, whose countdown reads sim ticks (it slows with slow motion and stops with the sim).
 //
 // Positions, masses, HP and ticks here are test constants, never tuning (§9).
-import { afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { PerspectiveCamera } from 'three';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { PerspectiveCamera, Scene } from 'three';
 import {
   createPlayer,
   createWorld,
@@ -22,12 +22,32 @@ import {
   WEAPONS,
   WORLD_TUNING,
   type World,
+  type WorldEvent,
 } from '@wild/sim';
-import { beatOf } from '../src/game/game';
+import { Game } from '../src/game/game';
+import { GameLoop } from '../src/game/loop';
+import type {
+  CameraPort,
+  CinematicsPort,
+  FxPort,
+  GamePorts,
+  HudPort,
+  KillCamPort,
+  MenusPort,
+  MomentsPort,
+  PanelPort,
+  PresentationPort,
+  RendererPort,
+  SfxPort,
+  VerbInputPort,
+  WorldViewsPort,
+} from '../src/game/ports';
+import { DEFAULT_PREFS } from '../src/game/prefs';
+import { fullFrame } from '../src/input/input';
 import { FOLLOW_TUNING } from '../src/render/followCam';
 import { awarenessMarks, markerPoint } from '../src/render/markers';
 import { VERB_UI_TUNING } from '../src/input/verbInput';
-import { bannerText, entityLabel, handsModel, HUD_TUNING, keyFor, lockedTarget, massText, rulerBarLayout, targetModel } from '../src/ui/hud';
+import { bannerText, entityLabel, handsModel, HUD_TUNING, keyFor, lockedTarget, massText, refusalText, rulerBarLayout, targetModel } from '../src/ui/hud';
 import { bearingDeg, GiantSighting, headingDeg, type SightWorld, stripOffset } from '../src/ui/compass';
 import { DEFAULT_BINDINGS } from '../src/input/bindings';
 
@@ -51,6 +71,7 @@ beforeAll(async () => {
 
 afterEach(() => {
   for (const w of live.splice(0)) w.dispose();
+  vi.unstubAllGlobals();
 });
 
 describe('the hands strip (§10.8)', () => {
@@ -262,39 +283,101 @@ describe('awareness markers (§10.8, rule 3)', () => {
 });
 
 describe('death and respawn (§10.8)', () => {
-  it('counts the respawn down in sim ticks: "DOWN — back in N s" from (respawnTick − tick) × DT', async () => {
+  it('counts the respawn down in sim ticks through Game and the loop: "DOWN — back in N s" from (respawnTick − tick) × DT', async () => {
     const w = await make();
     const me = w.player!;
+    // The real Game and GameLoop around the world, every other port a stub; the HUD's deathBanner calls are recorded.
+    const banners: (number | null)[] = [];
+    const moods: string[] = [];
+    const hud = stub<HudPort>({ deathBanner: (s: number | null) => void banners.push(s), mood: (m: '' | 'death') => void moods.push(m) });
+    const { game, loop } = headlessGame(w, { hud });
+    const frame = () => game.render(DT, DT, 1);
+    frame();
+    expect(banners.at(-1)).toBeNull();
+
     w.combat.koFighter(me, { by: 'strike', killer: null, cause: null, point: me.pos.clone() });
-    const r = w.step();
-    const death = r.world.find((e) => e.type === 'death');
+    loop.advance(1);
+    const death = w.events.find((e) => e.type === 'death');
     expect(death && death.type === 'death' && death.f).toBe(me);
     if (!death || death.type !== 'death') return;
     expect(death.respawnTick).toBe(w.tick + Math.round(WORLD_TUNING.respawnDelayS / DT));
-    // game.ts keeps the death's respawn tick (beatOf) and feeds the HUD the sim seconds left each frame.
-    const beat = beatOf(death, { player: me, cues: false, hitstop: 0, falling: new Set(), camera: { x: 0, y: 0, z: 0 } });
-    expect(beat.respawnTick).toBe(death.respawnTick);
-    const game = SOURCES['../src/game/game.ts'];
-    expect(game).toMatch(/this\.hud\.deathBanner\(this\.respawnTick === null \? null : Math\.max\(0, \(this\.respawnTick - w\.tick\) \* DT\)\)/);
-    const left = () => Math.max(0, (beat.respawnTick! - w.tick) * DT);
-    expect(bannerText(left())).toBe('back in 10 s');
+    frame();
+    expect(bannerText(banners.at(-1)!)).toBe('back in 10 s');
     // Rendered frames that step no tick (a pause, a hit-pause) leave it where it is; ticks count it down.
-    expect(bannerText(left())).toBe('back in 10 s');
-    for (let i = 0; i < 300; i++) w.step();
-    expect(left()).toBeCloseTo(5, 9);
-    expect(bannerText(left())).toBe('back in 5 s');
-    expect(bannerText(left() - 0.01)).toBe('back in 5 s');
+    frame();
+    frame();
+    expect(bannerText(banners.at(-1)!)).toBe('back in 10 s');
+    loop.advance(300);
+    frame();
+    expect(banners.at(-1)).toBeCloseTo(5, 9);
+    expect(bannerText(banners.at(-1)!)).toBe('back in 5 s');
     expect(bannerText(4.2)).toBe('back in 5 s');
-    // The respawn comes at that tick, and the banner reads 0 there.
-    let respawned = false;
-    while (!respawned && w.tick < death.respawnTick + 5) respawned = w.step().world.some((e) => e.type === 'respawn' && e.f === me);
-    expect(respawned).toBe(true);
+    // The respawn comes at that tick: the banner goes (null) and the mood clears.
+    while (w.tick < death.respawnTick) loop.advance(1);
     expect(w.tick).toBe(death.respawnTick);
-    expect(bannerText(left())).toBe('back in 0 s');
-    expect(beatOf({ type: 'respawn', f: me, at: { x: 0, y: 0, z: 0 } }, { player: me, cues: false, hitstop: 0, falling: new Set(), camera: { x: 0, y: 0, z: 0 } }).respawnTick).toBeNull();
+    expect(w.events.some((e) => e.type === 'respawn' && e.f === me)).toBe(true);
+    expect(banners.at(-1)).toBeNull();
+    expect(moods.at(-1)).toBe('');
+    frame();
+    expect(banners.at(-1)).toBeNull();
+    game.dispose();
   });
 
   it("the training ring's round label is gone from the HUD", () => {
-    for (const f of ['../src/ui/hud.ts', '../src/ui/hudPort.ts']) expect(code(SOURCES[f]), f).not.toMatch(/class="wave"|\.wave\b|\bthis\.wave\b/);
+    expect(SOURCES['../src/ui/hudPort.ts']).toBeUndefined();
+    expect(code(SOURCES['../src/ui/hud.ts'])).not.toMatch(/class="wave"|\.wave\b|\bthis\.wave\b/);
   });
 });
+
+describe('a refused verb (§10.7)', () => {
+  it("says why over the player's head in §5.13's words; never for a focus, a verb that worked, or someone else's", async () => {
+    const w = await make();
+    const me = w.player!;
+    const log = spawnLog(w, { p: { x: 3, y: 0.3, z: 0 }, length: 4, mass: 300 });
+    const ape = createPlayer();
+    const verb = (o: Partial<Extract<WorldEvent, { type: 'verb' }>>): Extract<WorldEvent, { type: 'verb' }> => ({ type: 'verb', f: me, verb: 'take', ok: false, ...o });
+    expect(refusalText(verb({ reason: 'tooHeavy', entity: log }), me, w)).toBe('take: too heavy (300 kg)');
+    expect(refusalText(verb({ reason: 'tooHeavy' }), me, w)).toBe('take: too heavy');
+    expect(refusalText(verb({ verb: 'dig', reason: 'noDigTool' }), me, w)).toBe('dig: needs a digging tool or empty hands');
+    expect(refusalText(verb({}), me, w)).toBe("can't take");
+    expect(refusalText(verb({ verb: 'focus', reason: 'outOfRange' }), me, w)).toBeNull();
+    expect(refusalText(verb({ ok: true }), me, w)).toBeNull();
+    expect(refusalText(verb({ f: ape, reason: 'tooHeavy' }), me, w)).toBeNull();
+    // game.ts raises no popup of its own for it any more: the HUD's handle() is the one place.
+    expect(code(SOURCES['../src/game/game.ts'])).not.toMatch(/hud\.popup\(/);
+  });
+});
+
+/** A port whose every method is a no-op, except the ones given. */
+function stub<T>(own: Record<string, unknown> = {}): T {
+  return new Proxy(own, { get: (t, k) => (k in t ? t[k as string] : () => undefined) }) as T;
+}
+
+/**
+ * The real Game and GameLoop around `w` with stub ports (no renderer, DOM or audio: the test runs in Node). The stubs
+ * answer what Game reads back: a camera, no running cut, the default prefs, no moments.
+ */
+function headlessGame(w: World, own: Partial<GamePorts>): { game: Game; loop: GameLoop } {
+  vi.stubGlobal('window', { innerWidth: 1280, innerHeight: 720, devicePixelRatio: 1, addEventListener() {} });
+  const camera = new PerspectiveCamera(50, 16 / 9, 0.1, 600);
+  const ports: GamePorts = {
+    scene: new Scene(),
+    renderer: stub<RendererPort>(),
+    views: stub<WorldViewsPort>({ fighterView: () => null }),
+    presentation: stub<PresentationPort>({ bodyPose: () => null }),
+    fx: stub<FxPort>(),
+    cams: stub<CameraPort>({ camera }),
+    cine: stub<CinematicsPort>({ active: false, timeScale: 1 }),
+    verbInput: stub<VerbInputPort>({ commands: () => [], mode: 'idle' }),
+    killCam: stub<KillCamPort>({ onMoment: () => false }),
+    moments: stub<MomentsPort>({ fromStep: () => [] }),
+    hud: stub<HudPort>(),
+    sfx: stub<SfxPort>({ volume: 0 }),
+    panel: stub<PanelPort>({ visible: false }),
+    menus: stub<MenusPort>({ open: false, prefs: DEFAULT_PREFS }),
+    ...own,
+  };
+  const game = Game.create(w, { style: {} } as HTMLCanvasElement, ports);
+  const loop = new GameLoop(w, game, { poll: () => fullFrame({ moveX: 0, moveY: 0, presses: [], pickup: false, keys: [] }) }, ports.cine);
+  return { game, loop };
+}

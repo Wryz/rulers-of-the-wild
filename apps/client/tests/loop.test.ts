@@ -494,9 +494,8 @@ describe('Game beats: what an event asks of the loop and the camera (beatOf)', (
     expect(beatOf(ev('respawn', { f: them, at: { x: 0, y: 0, z: 0 } }), ctx()).snap).toBeNull();
   });
 
-  it('a refused verb of yours says why', () => {
-    expect(beatOf(ev('verb', { f: me, verb: 'take', ok: false, reason: 'tooHeavy' }), ctx()).popup).toBe('take: tooHeavy');
-    expect(beatOf(ev('verb', { f: me, verb: 'take', ok: true }), ctx()).popup).toBeNull();
-    expect(beatOf(ev('verb', { f: them, verb: 'take', ok: false }), ctx()).popup).toBeNull();
+  it("a refused verb is no beat (its popup is the HUD's, in §5.13's words: hud.test.ts)", () => {
+    const b = beatOf(ev('verb', { f: me, verb: 'take', ok: false, reason: 'tooHeavy' }), ctx());
+    expect([b.hitstop, b.slow, b.shake, b.mood]).toEqual([0, null, 0, null]);
   });
 });

@@ -1,6 +1,6 @@
 import { Mesh } from 'three';
 import { describe, expect, it } from 'vitest';
-import { WEAPON_MOVES, WEAPONS, type WeaponDef, type WeaponId } from '@wild/sim';
+import { TOOL_WEAPON_IDS, WEAPON_MOVES, WEAPONS, type WeaponDef, type WeaponId } from '@wild/sim';
 import { buildWeapon } from '../src/render/weaponView';
 
 // Carried over from the retired tests/arenas.test.ts (the training ring retires, SPEC:863, D-50): its weapon check is
@@ -30,6 +30,21 @@ describe('weapons', () => {
       });
       expect(top).toBeGreaterThan(1.4);
       expect(top).toBeLessThan(1.7);
+    }
+  });
+
+  it('every primitive tool (TOOL_WEAPON_IDS) has a model too, so WEAPONS can enumerate them (C-fix, the P32-fix note)', () => {
+    // In play a tool is drawn from its entity; this model is for anything that asks buildWeapon for one by its def.
+    // TODO(sim, P14 follow-up): weapons.ts can now drop the non-enumerable loop over TOOL_WEAPON_IDS (and the
+    // verbs.tools.test.ts line that pins it): the client draws every one of them.
+    for (const id of TOOL_WEAPON_IDS) {
+      const g = buildWeapon(WEAPONS[id]);
+      let meshes = 0;
+      g.traverse((o) => {
+        if (o instanceof Mesh) meshes++;
+      });
+      expect(meshes, id).toBeGreaterThan(0);
+      expect(WEAPON_MOVES[WEAPONS[id].light], `${id} light`).toBeDefined();
     }
   });
 });

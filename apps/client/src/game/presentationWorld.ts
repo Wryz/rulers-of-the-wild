@@ -36,7 +36,7 @@ import {
   type World,
   WORLD_TUNING,
 } from '@wild/sim';
-import { type BodyMove, type DownTarget, GROUP_ENV, groups, movePoint, Ragdoll, RagdollSlots, SLOT_COUNT } from '../body/ragdoll';
+import { type BodyMove, type DownTarget, GROUP_ENV, GROUP_MIRROR, groups, movePoint, Ragdoll, RagdollSlots, SLOT_COUNT } from '../body/ragdoll';
 import { Blood } from '../render/blood';
 import { Gibs } from '../render/gibs';
 import { Effects, type Ground } from '../render/particles';
@@ -142,7 +142,7 @@ const TORSO = ['chest', 'abdomen', 'head'] as const;
 const UP = new Vector3(0, 1, 0);
 const DOWN = Object.freeze({ x: 0, y: -1, z: 0 });
 /** Rapier InteractionGroups for a query that sees only the environment (terrain and mirrors), never a ragdoll. */
-const ENV_QUERY = groups(0xffff, GROUP_ENV);
+const ENV_QUERY = groups(0xffff, GROUP_ENV | GROUP_MIRROR);
 
 /** Knocked down or KO'd (a dead fighter is KO'd: Fighter.alive): the only states a slab may draw the body in. */
 const isDown = (f: Fighter): boolean => f.state === 'knockdown' || f.state === 'ko';
@@ -582,7 +582,8 @@ export class PresentationWorld implements PresentationPort, BodyFallSource {
       .setTranslation(e.pose.p.x, e.pose.p.y, e.pose.p.z)
       .setRotation(e.pose.q);
     const body = this.rapier.createRigidBody(bd);
-    this.rapier.createCollider(desc.setFriction(MATERIALS[e.material]?.friction ?? 0.6).setCollisionGroups(groups(GROUP_ENV, 0xffff)), body);
+    // (GROUP_MIRROR: a standing fighter's ragdoll never meets it, only a downed one: ragdoll.ts setContacts.)
+    this.rapier.createCollider(desc.setFriction(MATERIALS[e.material]?.friction ?? 0.6).setCollisionGroups(groups(GROUP_MIRROR, 0xffff)), body);
     const m: Mirror = { body, shape: e.shape, kinematic, p: { ...e.pose.p }, q: { ...e.pose.q }, seen: 0 };
     this.mirrors.set(e.id, m);
     return m;

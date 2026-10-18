@@ -28,7 +28,7 @@ import {
   type WorldEvent,
   type WorldOptions,
 } from '@wild/sim';
-import { GROUP_ENV, groups, RAGDOLL_TUNING, RagdollSlots, SLOT_COUNT } from '../src/body/ragdoll';
+import { GROUP_ENV, GROUP_MIRROR, groups, RAGDOLL_TUNING, RagdollSlots, SLOT_COUNT } from '../src/body/ragdoll';
 import { type BodyFall, Fx, PRESENTATION_TUNING, PresentationWorld } from '../src/game/presentationWorld';
 import type { SimEvent, WorldViewsPort } from '../src/game/ports';
 import { Blood } from '../src/render/blood';
@@ -132,7 +132,7 @@ function addApe(w: World, x: number, z: number): Fighter {
 const dist = (a: V3, b: V3): number => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 const DEG = Math.PI / 180;
 /** A ray that sees the terrain and the mirrors, never a ragdoll. */
-const ENV_ONLY = groups(0xffff, GROUP_ENV);
+const ENV_ONLY = groups(0xffff, GROUP_ENV | GROUP_MIRROR);
 
 /** Everything the sim decides about its fighters, entities and slabs (rule 6: the presentation must change none of it). */
 function simState(w: World): string {
@@ -426,6 +426,36 @@ describe('level of detail (SPEC:655-656)', () => {
 });
 
 describe('mirrors: terrain and entities in the presentation world', () => {
+  it('a mirrored entity never touches the ragdoll of a fighter the sim has standing; a downed one lies on it (C-fix)', async () => {
+    const w = await make({ seed: 13 });
+    const p = w.player!;
+    const cam = { x: p.pos.x, y: 2, z: p.pos.z };
+    const stone = spawnStone(w, { p: { x: p.pos.x + 1.5, y: 1.5, z: p.pos.z }, mass: 20 });
+    const pw = present(w, () => cam);
+    ticks(w, pw, 3);
+    const rd = pw.ragdollOf(p)!;
+    expect(pw.mirrorOf(stone)).toBe('kinematic');
+    const meet = (a: number, b: number) => ((a >>> 16) & b & 0xffff) !== 0 && ((b >>> 16) & a & 0xffff) !== 0;
+    const mirrorGroups = (() => {
+      let g = -1;
+      pw.rapier.forEachCollider((c) => {
+        if (c.parent()?.isKinematic()) g = c.collisionGroups();
+      });
+      return g;
+    })();
+    expect(mirrorGroups).not.toBe(-1);
+    const terrain = groups(GROUP_ENV, 0xffff);
+    const pelvis = rd.bodies.pelvis.collider(0).collisionGroups();
+    expect(p.state).not.toBe('knockdown');
+    expect(meet(pelvis, mirrorGroups)).toBe(false);
+    expect(meet(pelvis, terrain)).toBe(true);
+    knock(w, p, { kb: 3, lift: 0.75 });
+    ticks(w, pw, 2);
+    expect(p.state).toBe('knockdown');
+    expect(meet(rd.bodies.pelvis.collider(0).collisionGroups(), mirrorGroups)).toBe(true);
+  });
+
+
   it('the terrain tiles match heightAt, and follow an edit', async () => {
     const w = await make({ seed: 12 });
     const h1 = (x: number, z: number) => 0.4 * Math.sin(x * 0.3) + 0.3 * Math.cos(z * 0.25);

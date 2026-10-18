@@ -5,7 +5,7 @@
 // queries); the ping stays where it was last seen and fades out over VERB_UI_TUNING.compassPingS.
 //
 // Convention: north is −z and east is +x (a bearing is measured clockwise from north, so it reads like a map with x to
-// the right). TODO(P21): the Clearing's lair is "at the north rim foot" (§6.7): the generator should use this convention.
+// the right). The Clearing's generator uses the same convention: its lair is at the north rim foot, on −z (§6.7).
 import { type Camera, Vector3 } from 'three';
 import { type Fighter, type QueryFilter, type V3, WORLD_TUNING, type Hit } from '@wild/sim';
 import { VERB_UI_TUNING } from '../input/verbInput';

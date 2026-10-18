@@ -34,6 +34,7 @@ import {
   Terrain,
   trunkPrism,
   type World,
+  type Wound,
   type WorldOptions,
   type WoundRecord,
 } from '@wild/sim';
@@ -41,7 +42,7 @@ import type { BodyPose, SimEvent, ViewFrame } from '../src/game/ports';
 import { entityColour, EntityViews, notchDepthAt, protoOf, unitPrism } from '../src/render/entityViews';
 import { FighterView } from '../src/render/fighterView';
 import { crownRadius } from '../src/render/forestView';
-import { GrassView, tuftsFor } from '../src/render/grassView';
+import { GrassView, tuftFits, tuftsFor } from '../src/render/grassView';
 import { APE_PALETTE, GIANT_APE_PALETTE, lookForSpecies } from '../src/render/looks';
 import { ropePoints, RopeViews } from '../src/render/ropeView';
 import { shadowTexelM, Sky, snapToTexels, sunDirection } from '../src/render/sky';
@@ -717,6 +718,32 @@ describe('held and stowed things', () => {
   });
 });
 
+describe('drag link (C-fix)', () => {
+  it('draws a link from the drawn fist to the grip of a dragged log, and none once the hands let go', async () => {
+    const w = await make({ player: true });
+    const f = w.player!;
+    const log = spawnLog(w, { p: { x: 0.5, y: 0.2, z: 1.8 }, length: 3, r: 0.15 });
+    const grip = { x: 0, y: -1.5, z: 0 };
+    f.inventory = { hands: { entity: log, mode: 'drag', grip, twoHanded: true, joint: null }, belt: [null, null, null], back: null };
+    const scene = new Scene();
+    const views = new WorldViews(scene, w);
+    views.sync(w, 0, new Vector3(0, 2, -4), frame());
+    const link = views.dragLinks.linkOf(f);
+    expect(link).not.toBeNull();
+    const v = views.fighterView(f)!;
+    const fist = v.fist();
+    const gripW = new Vector3(grip.x, grip.y, grip.z).applyMatrix4(views.entities.matrixOf(log)!);
+    // From the fist, along the link's axis, its length: the grip.
+    expect(link!.position.distanceTo(fist)).toBeLessThan(1e-5);
+    const end = new Vector3(0, 1, 0).applyQuaternion(link!.quaternion).multiplyScalar(link!.scale.y).add(link!.position);
+    expect(end.distanceTo(gripW)).toBeLessThan(1e-4);
+    f.inventory = { hands: null, belt: [null, null, null], back: null };
+    views.sync(w, 0, new Vector3(0, 2, -4), frame());
+    expect(views.dragLinks.linkOf(f)).toBeNull();
+    views.dispose();
+  });
+});
+
 describe('blood on what struck', () => {
   it('bloodies the entity a world impact wounded with, and not with gore off', async () => {
     const w = await make({ player: true });
@@ -848,6 +875,38 @@ describe('fighters', () => {
     });
     expect(anyRed).toBe(true);
   });
+
+  it('draws a severed stump by the gore level: red with bone (full), red (stylised), a dark mark (off) (C-fix)', () => {
+    const stump = { bone: 'upperArmL', local: [0, -0.3, 0], stump: 'foreArmL', length: 0.1, angle: 0, bleed: 1 } as unknown as Wound;
+    const look = (gore: 'full' | 'stylised' | 'off') => {
+      const view = new FighterView(APE_PALETTE);
+      view.gore = gore;
+      const before = new Set<Mesh>();
+      view.root.traverse((o) => o instanceof Mesh && before.add(o));
+      view.addWound(stump);
+      let red = 0;
+      let pale = 0;
+      let added = 0;
+      view.root.traverse((o) => {
+        if (!(o instanceof Mesh) || before.has(o)) return;
+        added++;
+        const c = (o.material as MeshStandardMaterial).color;
+        if (c.r - Math.max(c.g, c.b) > 0.2) red++;
+        if (c.r > 0.7 && c.g > 0.7 && c.b > 0.6) pale++;
+      });
+      return { red, pale, added };
+    };
+    const full = look('full');
+    expect(full.red).toBeGreaterThan(0);
+    expect(full.pale).toBe(1);
+    const stylised = look('stylised');
+    expect(stylised.red).toBeGreaterThan(0);
+    expect(stylised.pale).toBe(0);
+    const off = look('off');
+    expect(off.added).toBeGreaterThan(0);
+    expect(off.red).toBe(0);
+    expect(off.pale).toBe(0);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -961,6 +1020,54 @@ describe('grass', () => {
     expect(lightRight / right).toBeGreaterThan((lightLeft / left) * 1.15);
     // Denser cover, more tufts.
     expect(right).toBeGreaterThan(left * 1.5);
+    grass.dispose();
+  });
+});
+
+describe('grass on spoil and cliffs (C-fix)', () => {
+  it('lays no tuft on raised spoil, on a cliff, or overhanging a cliff edge, and reads the cover grid\'s own cell size', () => {
+    const T = RENDER_TUNING;
+    const t = new Terrain(null, 50);
+    // A sheer 2 m step at x = 10 (a cliff); flat elsewhere.
+    t.generate((x) => (x > 10 ? 2 : 0));
+    // A heap of spoil around (−8, 0): raised up to 0.6 m over the generated ground.
+    const H = t.heights;
+    for (let tile = 0; tile < t.tileCount; tile++) {
+      const n1 = t.cells + 1;
+      const tx = tile % t.tilesX;
+      const tz = (tile - tx) / t.tilesX;
+      for (let c = 0; c <= t.cells; c++) {
+        for (let r = 0; r <= t.cells; r++) {
+          const x = t.minX + tx * t.tileSize + c * t.spacing;
+          const z = t.minZ + tz * t.tileSize + r * t.spacing;
+          if (Math.hypot(x + 8, z) < 3) H[tile][r + c * n1] += 0.6;
+        }
+      }
+    }
+    let cells = 0;
+    const cover = {
+      at: () => 1,
+      get cellM() {
+        cells++;
+        return 1;
+      },
+    };
+    const grass = new GrassView(new Scene());
+    grass.sync({ terrain: t, cover }, { x: 0, z: 0 });
+    expect(cells).toBeGreaterThan(0);
+    const n = grass.tufts.count;
+    expect(n).toBeGreaterThan(100);
+    const r = (T.grass.widthM * 1.2) / 2;
+    for (let i = 0; i < n; i++) {
+      const p = new Vector3().setFromMatrixPosition(grass.tufts.matrixAt(i));
+      // Not on the spoil heap, nor within half a tuft of the cliff's lip or foot.
+      expect(Math.hypot(p.x + 8, p.z)).toBeGreaterThan(3 - 0.3);
+      expect(Math.abs(p.x - 10)).toBeGreaterThan(r * 0.8 - t.spacing);
+    }
+    expect(tuftFits(t, 10.05, 0, 0.45)).toBe(false);
+    expect(tuftFits(t, 9.95, 0, 0.45)).toBe(false);
+    expect(tuftFits(t, -8, 0, 0.45)).toBe(false);
+    expect(tuftFits(t, 0, 0, 0.45)).toBe(true);
     grass.dispose();
   });
 });
