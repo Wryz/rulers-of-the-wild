@@ -1,5 +1,7 @@
 # Paused again: 2026-10-18 (owner asked to stop spending tokens)
 
+**Update:** Codex follow-ups (codex/m1-followups af34b28) reviewed and merged as b0b57d6: 99 files, 1,533 passed, 5 skipped; typecheck and build pass. Use Node 22 (Node 24 breaks the replay fixture). P28 has not been restarted.
+
 **State:** `claude/rulers-wild-setup-3p5iba` = verified integration head a1789cc + this note; `main` = ccf9ba7 (same
 tree as a1789cc). Waves 0–9 merged except P28, P29, P39, then P38 gate. AC-4, AC-5, AC-6, AC-7 pass and are verified.
 SIM-fix4 (spoil at repose) merged. Open follow-ups: `docs/work/ledger.md` (search "P38", "SIM-fix4").
