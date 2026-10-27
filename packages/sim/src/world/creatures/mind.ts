@@ -384,6 +384,9 @@ export abstract class CreatureMind implements Brain {
       if (w.tick - this.mark < s.ticks) {
         if (w.verbs.workTarget(self) !== s.entity) w.verbs.tug(self, s.entity);
         self.posture = { id: 'workLow', weight: 1 };
+        // P28 fix: it backs off along dirYaw facing what it hauls (before, it turned its back on it and walked away
+        // forward, stooped head first); the face point lasts this tick (Fighter.faceAt).
+        self.faceAt = { x: e!.pose.p.x, z: e!.pose.p.z };
         this.walk(self, Math.sin(s.dirYaw), Math.cos(s.dirYaw), this.gaitFor(self, VERB_TUNING.creatureHandSpeedMps, true), true);
         return;
       }

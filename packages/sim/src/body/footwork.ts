@@ -47,11 +47,13 @@ interface Body {
   scale?: number;
   /** The ground the feet plant on (terrain, or what rests on it); absent or null: a flat floor at y = 0. */
   ground?: GroundQuery | null;
+  /** P28: the half-side of a foot's sole a big foot plants with (its whole footprint is looked under); 0: a point. */
+  readonly soleM?: number;
 }
 
 /** Height of the ground a foot plants on at (x, z): what supports it below the body, else the terrain, else 0. */
 function groundY(body: Body, x: number, z: number): number {
-  return body.ground?.supportAt?.(x, z, body.pos.y) ?? body.ground?.heightAt(x, z) ?? 0;
+  return body.ground?.supportAt?.(x, z, body.pos.y, body.soleM) ?? body.ground?.heightAt(x, z) ?? 0;
 }
 
 /** Puts a foot target on the ground under it (only on uneven ground: a flat floor already has y = 0). */

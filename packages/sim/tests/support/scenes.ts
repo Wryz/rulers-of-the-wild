@@ -479,6 +479,9 @@ function shapeR(h: Harness, id: number): number {
 // AC-2(b), AC-3: the spike pit (§11.2(b), §11.3)
 // ---------------------------------------------------------------------------
 
+/** Ground this far below its original height is dug (the terrain's spoilUndugTolM, §4.13): the hole's edge. */
+const DUG_EDGE_M = 0.05;
+
 /** §11.2(b)'s pit numbers. */
 const PIT = {
   stake: { lengthM: 1.4, r: 0.05, sharpness: 0.6 },
@@ -491,7 +494,7 @@ const PIT = {
    * measured r ≤ 0.002 m failing at 4 m half-length). Reported for P17 (shrinkShape). 5.7 kg, holding 283 N (≥ 200 N).
    */
   /** 8 m across the 6 m width (overM beyond each long rim), spacingM apart along the length (20 on an 8 m pit). */
-  bearer: { overM: 1, r: 0.025, spacingM: 0.4 },
+  bearer: { overM: 1, r: 0.025, spacingM: 0.4, endOutM: 0.25 },
   /**
    * Up to `count` bundles (at least PIT_GRASS_MIN laid) in rows along the long rims (rowsInsetM inside each: |z| 2.5
    * and 3.0 m on the 6 m pit), each across the two neighbouring bearers nearest a spot of the row (spots every 0.2 m,
@@ -532,7 +535,7 @@ export function buildPit(h: Harness, o: { centre: XZ; lengthX: 8; widthZ: 6; dep
     { x: x0 - 1.5, z: c.z - o.widthZ / 2 - 2.2 },
     { x: c.x + o.lengthX / 2 + 1.5, z: c.z - o.widthZ / 2 - 2.2 },
   ]);
-  const furnished = furnishPit(h, { ...o, grass: { count: PIT.grass.count, minCount: PIT_GRASS_MIN } }, stick);
+  const furnished = furnishPit(h, { ...o, grass: { count: PIT.grass.count, minCount: PIT_GRASS_MIN }, coverDugRim: true }, stick);
   console.info(`buildPit: ${furnished.stakes.length} stakes, ${furnished.cover.length} cover; standAts ${JSON.stringify(h.standAts())}, tick ${h.w.tick}`);
   return { ...furnished, strikes: dug.strikes };
 }
@@ -544,7 +547,7 @@ export function buildPit(h: Harness, o: { centre: XZ; lengthX: 8; widthZ: 6; dep
  */
 export function furnishPit(
   h: Harness,
-  o: { centre: XZ; lengthX: number; widthZ: number; stakeSpacing: number; grass: { count: number; minCount: number } },
+  o: { centre: XZ; lengthX: number; widthZ: number; stakeSpacing: number; grass: { count: number; minCount: number }; coverDugRim?: boolean },
   stick: number,
 ): { cover: number[]; stakes: number[] } {
   const c = o.centre;
@@ -608,7 +611,31 @@ export function furnishPit(
 
   // The cover: bearers across the width, laid from the −z rim; grass bundles on them from the nearer long rim.
   const bearers: number[] = [];
-  const B = { ...PIT.bearer, lengthM: o.widthZ + 2 * PIT.bearer.overM, count: Math.round(o.lengthX / PIT.bearer.spacingM) };
+  // P28 (coverDugRim, the 8 × 6 m pit): the bearers span the hole as dug, not the planned footprint. The planner's cone
+  // strikes dig the rim out beyond the footprint (≈ ±4.3 m at an 8 m pit's ends, where 20 bearers 0.4 m apart reached
+  // ±3.8: a giant's front foot met the open strip and tripped `ledge`, not `cover`), so the bearers run from the dug
+  // edge at one end to the other, at most spacingM apart, each overM onto undug ground beyond both long rims.
+  const dug = (x: number, z: number): boolean => ground(h, { x, z }) < h.w.terrain.originalHeightAt(x, z) - DUG_EDGE_M;
+  let xMin = c.x;
+  let xMax = c.x;
+  let zHalf = o.widthZ / 2;
+  if (o.coverDugRim) {
+    for (let x = c.x; x > c.x - o.lengthX; x -= 0.05) if (dug(x, c.z)) xMin = x;
+    for (let x = c.x; x < c.x + o.lengthX; x += 0.05) if (dug(x, c.z)) xMax = x;
+    for (let x = xMin; x <= xMax + 1e-9; x += 0.1) {
+      for (let z = 0; z < o.widthZ; z += 0.05) if (dug(x, c.z + z) || dug(x, c.z - z)) zHalf = Math.max(zHalf, z);
+    }
+    // The end bearers on undug ground just beyond the ends as dug on the centre line (P28: one laid on the dug edge's
+    // slope rolled in under the giant's first step).
+    xMin -= PIT.bearer.endOutM;
+    xMax += PIT.bearer.endOutM;
+  }
+  const spanX = xMax - xMin;
+  const B = o.coverDugRim
+    ? { ...PIT.bearer, lengthM: 2 * (zHalf + PIT.bearer.overM), count: Math.ceil(spanX / PIT.bearer.spacingM - 1e-9) + 1 }
+    : { ...PIT.bearer, lengthM: o.widthZ + 2 * PIT.bearer.overM, count: Math.round(o.lengthX / PIT.bearer.spacingM) };
+  const bearerX = (i: number): number => (o.coverDugRim ? xMin + (spanX * i) / (B.count - 1) : c.x - ((B.count - 1) * B.spacingM) / 2 + i * B.spacingM);
+  if (o.coverDugRim) console.info(`furnishPit: bearers x ${xMin.toFixed(2)} … ${xMax.toFixed(2)}, dug |z| ≤ ${zHalf.toFixed(2)}: ${B.count} bearers ${B.lengthM.toFixed(2)} m long`);
   for (let i = 0; i < B.count; i++) {
     // Staged south-east of the pit (the player fetches them from the −z rim lane without crossing the pit).
     const q = { x: c.x + o.lengthX / 2 + 2, z: c.z - 9 - 0.4 * i };
@@ -619,7 +646,10 @@ export function furnishPit(
   const spots: { q: XZ; side: number }[] = [];
   const half = o.lengthX / 2 - 0.3;
   for (const side of [-1, 1]) {
-    for (const inset of G.rowsInsetM) for (let cx = -half; cx <= half + 1e-9; cx += 0.2) spots.push({ q: offVertex(h, { x: c.x + cx, z: c.z + side * (o.widthZ / 2 - inset) }), side });
+    // (coverDugRim: the rows inset from the hole's dug edge, as the bearers' ends are set from it, so the player laying
+    // them from beyond those ends still reaches both rows.)
+    const rowHalf = o.coverDugRim ? zHalf : o.widthZ / 2;
+    for (const inset of G.rowsInsetM) for (let cx = -half; cx <= half + 1e-9; cx += 0.2) spots.push({ q: offVertex(h, { x: c.x + cx, z: c.z + side * (rowHalf - inset) }), side });
   }
   Array.from({ length: o.grass.count }).forEach((_, gi) => {
     const q = { x: c.x + o.lengthX / 2 + 4 + 1.2 * (gi % 5), z: c.z - 19 - 1.0 * Math.floor(gi / 5) };
@@ -628,14 +658,17 @@ export function furnishPit(
   h.ticks(60);
   const rimY = (x: number): number => {
     let top = -Infinity;
-    for (const zz of [z0 - 0.5, z0 - 0.75, z0 - 1.0, z1 + 0.5, z1 + 0.75, z1 + 1.0]) top = Math.max(top, h.w.terrain.heightAt(x, zz));
+    const zs = o.coverDugRim
+      ? [0.1, 0.35, 0.6, 0.85].flatMap((d) => [c.z - zHalf - d, c.z + zHalf + d])
+      : [z0 - 0.5, z0 - 0.75, z0 - 1.0, z1 + 0.5, z1 + 0.75, z1 + 1.0];
+    for (const zz of zs) top = Math.max(top, h.w.terrain.heightAt(x, zz));
     return top;
   };
   // The dirt piles lie out beyond the long sides (digPit's pileSides 'z'), and a pile heaped on a pile rolls: between
   // the staging (south-east) and the −z rim the player goes by the pit's +x end, never past them.
   const southEast = { x: c.x + o.lengthX / 2 + 1.5, z: c.z - B.lengthM / 2 - PIT.rimM };
   for (let i = 0; i < B.count; i++) {
-    const x = offVertex(h, { x: c.x - ((B.count - 1) * B.spacingM) / 2 + i * B.spacingM, z: c.z }).x;
+    const x = offVertex(h, { x: bearerX(i), z: c.z }).x;
     route(h, [southEast]);
     if (!bring(h, bearers[i], [southEast, { x, z: c.z - B.lengthM / 2 - PIT.rimM }])) throw new Error(`buildPit: bearer ${bearers[i]} broke on the way`);
     h.must({ verb: 'place', target: 0, at: toCm({ x, y: rimY(x) + B.r + 0.05, z: c.z }), yaw: 0, pitch: 0 }, `lay bearer ${bearers[i]} at x ${x.toFixed(2)}`);

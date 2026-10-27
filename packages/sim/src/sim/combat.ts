@@ -574,6 +574,8 @@ export class CombatSim {
     for (const f of fs) this.retarget(f);
     for (const f of fs) this.tickTimers(f);
     for (const f of fs) this.advance(f);
+    // P28: a mind's face point lasts one tick (written in think, read by updateFacing): never state between ticks.
+    for (const f of fs) f.faceAt = null;
     for (const f of fs) this.ais.get(f)?.think(f, f.target, this.walkable);
     for (const f of fs) this.manualDefense(f);
     for (const f of fs) this.autoDefend(f);
@@ -1020,7 +1022,8 @@ export class CombatSim {
         const dot = (mi.x * fwd.x + mi.z * fwd.z) / raw;
         // Speed comes from the contextual motion profile (stance footwork in range,
         // full walking stride far away, slower when hurt...).
-        const locked = f.lockedOn;
+        // (A mind's face point walks like a lock-on: backing off is a backpedal, not a turn first, P28.)
+        const locked = f.lockedOn || f.faceAt !== null;
         // Locked on: backpedalling is slower. Free walking: turn first, then go.
         const turnFirst = locked ? 1 : Math.max(0.3, (1 + dot) / 2);
         const sp =
@@ -1119,6 +1122,10 @@ export class CombatSim {
       } else if (f.free) {
         deadzone = FACING.idleDeadzone;
       }
+    } else if (f.faceAt && f.free) {
+      // P28: a mind's face point (a creature backing off with what it hauls, §6.6 tug): it walks, facing that.
+      desired = Math.atan2(f.faceAt.x - f.pos.x, f.faceAt.z - f.pos.z);
+      rate = FACING.freeTurnRate;
     } else if (moving) {
       // Not in a fight: turn to face where you're going and walk there.
       desired = Math.atan2(mi.x, mi.z);

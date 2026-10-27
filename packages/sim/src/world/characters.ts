@@ -62,6 +62,9 @@ export const CHARACTER_TUNING = defineTuning(
     // Not §9.1 rows (core-fix): how the body shows a posture and bends in a work action (sim/fighter.ts, world mode).
     // A posture set or cleared at once ramps in or out over this many frames (no jump of the pose).
     postureRampFrames: 12,
+    // P28: a posture whose hips stand at most this high (its pose root, unscaled) is low: from one low posture to another
+    // the body cross-fades directly (the crouch to workLow), never rising through standing height on the way.
+    lowPostureRootM: 0.7,
     // A work action's bend moves the head (relative to the feet) at most this fast (× scale): DS's 9-frame pickup squat
     // swung it at up to 4.7 m/s, which with the step-in was a self-motion hit on anything in front.
     workHeadSpeedMps: 3,
@@ -106,6 +109,7 @@ export const CHARACTER_TUNING = defineTuning(
     landingKnockdownSpeed: { unit: 'm/s', source: 'NEW' },
     crouchHeightFrac: { unit: '× capsule height', source: 'NEW: a crouched ape is 1.39 m, so it fits under a deadfall log (RT-4)' },
     postureRampFrames: { unit: 'frames for a full posture', source: 'NEW: core-fix (a posture never jumps the pose; head ≤ ~1.5 m/s)', min: 1 },
+    lowPostureRootM: { unit: 'm (pose root height, unscaled)', source: 'NEW: P28 (crouch 0.6, workLow 0.6, guard 0.86: low to low cross-fades)', min: 0 },
     workHeadSpeedMps: { unit: 'm/s (world; the head, relative to the feet)', source: 'NEW: core-fix (a bend at ≤ 2-3 m/s, under v_safe with the step-in)', min: 0 },
     workRiseMargin: { unit: "× the head's way to the guard", source: 'NEW: core-fix (the rise after a work action at ≤ workHeadSpeedMps)', min: 1 },
     maxHipDropM: { unit: 'm × scale', source: 'NEW: core-fix (rule 3 on slopes: a planted ankle on its plant)', min: 0 },

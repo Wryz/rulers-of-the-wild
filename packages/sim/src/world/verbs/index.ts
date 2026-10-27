@@ -46,8 +46,11 @@ interface FighterVerbs {
   focus: { target: number; at: V3 | null } | null;
   /** A continuous verb that is on (pull, shape, hand-dig). */
   cont: ContinuousState | null;
-  /** A creature's tug (§6.6): the entity it hauls with the drag code at creature strength, and its grip (entity frame). */
-  tug: { entity: number; grip: V3 } | null;
+  /**
+   * A creature's tug (§6.6): the entity it hauls with the drag code at creature strength, its grip (entity frame), and
+   * how far in front of the hand it holds it (P28: the grip's distance when taken, at most dragHandOffsetM × scale).
+   */
+  tug: { entity: number; grip: V3; holdM: number } | null;
 }
 
 /** The verb system's save record, one per fighter with state (§8.3: `verbs`, by fighter id). */
@@ -56,7 +59,7 @@ export interface VerbStateRecord extends VerbStateRecV1 {
   focus: { target: number; at: V3 | null } | null;
   /** `data` as [key, value] pairs sorted by key. */
   cont: { verb: VerbId; cmd: VerbCommand; ticks: number; data: [string, number][] } | null;
-  tug: { entity: number; grip: V3 } | null;
+  tug: { entity: number; grip: V3; holdM: number } | null;
 }
 
 const isDown = (f: Fighter): boolean => f.state === 'knockdown' || f.state === 'ko' || f.state === 'tripped';
@@ -198,7 +201,7 @@ export class VerbSystem {
         if (imp) w.entities.queueImpulse(h.entity, imp.j, imp.at);
       }
       if (s?.tug) {
-        const imp = dragImpulse(w, f, s.tug.entity, s.tug.grip, t.pullForceN * t.creaturePullMul * f.scale * f.scale);
+        const imp = dragImpulse(w, f, s.tug.entity, s.tug.grip, t.pullForceN * t.creaturePullMul * f.scale * f.scale, s.tug.holdM);
         if (imp) w.entities.queueImpulse(s.tug.entity, imp.j, imp.at);
       }
       const c = s?.cont;
@@ -287,7 +290,12 @@ export class VerbSystem {
       return;
     }
     const near = e.collider ? this.world.queries.projectPoint(entity, chestPoint(f)).point : null;
-    s.tug = { entity, grip: near ? verbGeom.pointToLocal(e.pose, near) : dragGrip(this.world, f, entity) };
+    const grip = near ? verbGeom.pointToLocal(e.pose, near) : dragGrip(this.world, f, entity);
+    // P28 fix: held where it was gripped (never further than the drag's hand offset). With the drag's fixed 0.8 m, a
+    // bait gripped 0.45 m from the ape was first shoved 0.35 m away from it, into the deadfall's prop.
+    const gw = verbGeom.pointToWorld(e.pose, grip);
+    const holdM = Math.min(VERB_TUNING.dragHandOffsetM * f.scale, Math.hypot(gw.x - f.pos.x, gw.z - f.pos.z));
+    s.tug = { entity, grip, holdM };
   }
 
   // -------------------------------------------------------------------------
@@ -315,7 +323,7 @@ export class VerbSystem {
                 .map((k): [string, number] => [k, s.cont!.data[k]]),
             }
           : null,
-        tug: s.tug ? { entity: s.tug.entity, grip: copy3(s.tug.grip) } : null,
+        tug: s.tug ? { entity: s.tug.entity, grip: copy3(s.tug.grip), holdM: s.tug.holdM } : null,
       });
     }
     return out;
@@ -338,7 +346,7 @@ export class VerbSystem {
       this.byFighter.set(fighter, {
         focus: focus ? { target: focus.target, at: focus.at ? copy3(focus.at) : null } : null,
         cont: cont ? { verb: cont.verb, cmd: cloneCommand(cont.cmd), ticks: cont.ticks, data: Object.fromEntries(cont.data.map(([k, v]) => [k, v])) } : null,
-        tug: tug ? { entity: tug.entity, grip: copy3(tug.grip) } : null,
+        tug: tug ? { entity: tug.entity, grip: copy3(tug.grip), holdM: tug.holdM } : null,
       });
     }
   }

@@ -903,7 +903,8 @@ describe('the scene cache (§11.0)', () => {
       expect(ys[ys.length - 1]).toBeLessThan(-2.5 + FLOOR_BAND.shortM);
       expect(ys[0]).toBeGreaterThan(-2.5 - FLOOR_BAND.overM);
       const bearers = h.w.entities.all().filter((e) => e.material === 'rottenWood');
-      expect(bearers).toHaveLength(20);
+      // P28: furnishPit's coverDugRim spans the hole as dug (≈ ±4.3 m), so at least the planned 20.
+      expect(bearers.length).toBeGreaterThanOrEqual(20);
       for (const b of bearers) expect(b.pose.p.y).toBeGreaterThan(-0.3);
       const grassOn = h.w.entities.all().filter((e) => e.look === 'grass' && Math.abs(e.pose.p.x) < 4 && Math.abs(e.pose.p.z) < 3.2);
       expect(grassOn.length).toBeGreaterThanOrEqual(PIT_GRASS_MIN);

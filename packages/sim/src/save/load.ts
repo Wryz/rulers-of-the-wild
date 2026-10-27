@@ -1167,8 +1167,8 @@ function verbState(v: unknown, p: string): VerbStateRecord {
       return { verb, cmd, ticks: nat(c.ticks, `${q}.ticks`), data };
     }),
     tug: nullable(o.tug, `${p}.tug`, (x, q) => {
-      const t = exactKeys(obj(x, q), ['entity', 'grip'], q);
-      return { entity: nat(t.entity, `${q}.entity`), grip: v3(t.grip, `${q}.grip`) };
+      const t = exactKeys(obj(x, q), ['entity', 'grip', 'holdM'], q);
+      return { entity: nat(t.entity, `${q}.entity`), grip: v3(t.grip, `${q}.grip`), holdM: num(t.holdM, `${q}.holdM`) };
     }),
   };
 }

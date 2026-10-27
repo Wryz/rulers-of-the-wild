@@ -460,8 +460,11 @@ export interface Finish {
 export interface GroundQuery {
   /** Terrain only. */
   heightAt(x: number, z: number): number;
-  /** Terrain or a fixed/anchored/resting entity below fromY + 0.5. */
-  supportAt?(x: number, z: number, fromY: number): number;
+  /**
+   * Terrain or a fixed/anchored/resting entity below fromY + 0.5. `soleM` (P28): the half-side of a foot's sole, whose
+   * whole footprint is looked under (a giant's foot across a cover's thin bearers stands on them).
+   */
+  supportAt?(x: number, z: number, fromY: number, soleM?: number): number;
 }
 
 export interface FighterMover {
