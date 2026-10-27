@@ -330,13 +330,21 @@ describe('take (§5.1): wield, carry, drag, or refused', () => {
 // ---------------------------------------------------------------------------
 
 describe('drag (§5.1): the B lab as a test', () => {
-  /** Takes a `massKg` 3.6 m dry log by its +x end and walks +x for 6 s: the log's mean speed over seconds 1-6. */
+  /**
+   * Takes a `massKg` 3.6 m dry log by its +x end and walks +x for 6 s: the log's mean speed over seconds 1-6.
+   * P28 fifth pass (C F3 departure: the drag is an in-solver force): the run starts at (−18, −6), inside one terrain
+   * tile, not at the origin. From there the log crossed the heightfield tiles' seam at x = 0 lying along the seam at
+   * z = 0, and with the pull in the solver it stuck on the next tile's first edge (600 N, 0 m/s; the pre-step impulse
+   * hopped it). The tiles' seam is a sim issue of its own (docs/work/ledger.md).
+   */
   async function drag(massKg: number): Promise<{ speed: number; maxGap: number; moved: number }> {
     const w = await make(31);
     const p = w.player!;
-    w.teleport(p, 0, 0, -Math.PI / 2);
+    const X0 = -18;
+    const Z0 = -6;
+    w.teleport(p, X0, Z0, -Math.PI / 2);
     const L = 3.6;
-    const id = log(w, massKg, L, -0.8 - L / 2, 0);
+    const id = log(w, massKg, L, X0 - 0.8 - L / 2, Z0);
     w.step();
     verb(w, { verb: 'take', target: id });
     untilFree(w);

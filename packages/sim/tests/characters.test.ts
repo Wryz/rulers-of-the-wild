@@ -10,7 +10,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { MOVE_CROUCH, moveCommand } from '../src/sim/commands';
 import { createEnemy } from '../src/sim/enemies';
 import type { Fighter } from '../src/sim/fighter';
-import { DT, Rng } from '../src/sim/math';
+import { Rng } from '../src/sim/math';
 import { boneMass, DAMAGE_TUNING, impactEnergy, MOVE_TUNING } from '../src/sim/rules';
 import { SPECIES_BODY } from '../src/sim/species';
 import { resetTuning } from '../src/tuning/registry';
@@ -372,7 +372,10 @@ describe('the player push (SPEC:374, 881; AC-6 part 1)', () => {
     });
   }
 
-  it('queues pushN × DT along the horizontal −normal1 into the entity queue, once per entity per tick, applied in phase 4d', async () => {
+  // P28 (C F3 departure, docs/work/ledger.md fifth pass): the controller's lean is a sustained force (EntityStore.queueForce,
+  // pushN newtons for the tick's step, reset after it), no longer the impulse pushN × DT: the same per-tick momentum,
+  // integrated in every substep so friction holds what it should.
+  it('queues pushN along the horizontal −normal1 into the entity force queue, once per entity per tick, applied in phase 4d', async () => {
     const w = await make({ seed: 12 });
     const r = prismR(40, 'dryWood', 2.2, 6);
     const id = entity(w, 'dryWood', { kind: 'cylinder', halfHeight: 1.1, r, sides: 6 }, { x: 0, y: r + 0.02, z: 0 }, 'free', LYING_Z);
@@ -380,8 +383,8 @@ describe('the player push (SPEC:374, 881; AC-6 part 1)', () => {
     w.teleport(p, -0.6, 0, Math.PI / 2);
     for (let t = 0; t < 30; t++) w.step();
     const queued: { id: number; j: V3; at: V3 | null }[] = [];
-    const orig = w.entities.queueImpulse.bind(w.entities);
-    vi.spyOn(w.entities, 'queueImpulse').mockImplementation((eid, j, at) => {
+    const orig = w.entities.queueForce.bind(w.entities);
+    vi.spyOn(w.entities, 'queueForce').mockImplementation((eid, j, at) => {
       queued.push({ id: eid, j: { ...j }, at });
       orig(eid, j, at);
     });
@@ -396,7 +399,7 @@ describe('the player push (SPEC:374, 881; AC-6 part 1)', () => {
         pushes++;
         expect(q.at).toBeNull();
         expect(q.j.y).toBe(0);
-        expect(Math.hypot(q.j.x, q.j.z)).toBeCloseTo(CHARACTER_TUNING.pushN * DT, 9);
+        expect(Math.hypot(q.j.x, q.j.z)).toBeCloseTo(CHARACTER_TUNING.pushN, 6);
         expect(q.j.x).toBeGreaterThan(0); // away from the player
       }
     }

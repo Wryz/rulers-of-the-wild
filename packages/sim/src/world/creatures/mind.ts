@@ -387,7 +387,14 @@ export abstract class CreatureMind implements Brain {
         // P28 fix: it backs off along dirYaw facing what it hauls (before, it turned its back on it and walked away
         // forward, stooped head first); the face point lasts this tick (Fighter.faceAt).
         self.faceAt = { x: e!.pose.p.x, z: e!.pose.p.z };
-        this.walk(self, Math.sin(s.dirYaw), Math.cos(s.dirYaw), this.gaitFor(self, VERB_TUNING.creatureHandSpeedMps, true), true);
+        // P28: it backs off only as fast as the load comes (at most the hand speed): a load that holds is leaned on with
+        // the arms drawn in (VerbSystem's tug), feet planted; before, it walked back at the hand speed regardless and
+        // under the deadfall's log before the prop gave.
+        const ux = Math.sin(s.dirYaw);
+        const uz = Math.cos(s.dirYaw);
+        const comes = e!.vel.lin.x * ux + e!.vel.lin.z * uz;
+        const speed = Math.min(VERB_TUNING.creatureHandSpeedMps, Math.max(0, comes));
+        this.walk(self, ux, uz, this.gaitFor(self, speed, true), true);
         return;
       }
       w.verbs.tug(self, null);

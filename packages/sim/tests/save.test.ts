@@ -531,6 +531,8 @@ const INVENTORY: Record<string, Record<string, string>> = {
     snapshot: 'not saved: a cache of sorted',
     removedGen: 'saved: removed',
     queue: 'saved: impulses',
+    forces: 'not saved: P28, the sustained code forces of this tick\'s phase 4d, queued and applied in the same 4d (EntityStore.queueForce), never pending between ticks',
+    forced: 'not saved: P28, the bodies forced this tick, reset right after the step (EntityStore.resetForces), empty between ticks',
     applied: 'not saved: PHYSICS_TUNING values last applied (tuningOverrides)',
   },
   EntityRuntime: {

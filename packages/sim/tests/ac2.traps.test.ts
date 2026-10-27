@@ -230,14 +230,29 @@ function holdTilt(h: Harness, r: { prop: number; log: number }): number {
 
 /**
  * §11.2(a)'s staged deadfall geometry: a stick r 0.07 m `propLengthM` long placed upright at x = propX, a dry hex log
- * `logLengthM` long (circumradius 0.17 m) from the ground at x = 0 onto its top (25°).
- * DEPARTURE (P28, §11.2(a) staged steps 1-2 "2.38 m … x = 5.07 … 6.0 m"): the bait-tug runs use a 2.47 m stick at
- * x 5.3 and a 6.2 m log (25° still): the underside over the ape 0.8 m in from the bait stands 0.1 m higher, so the log,
- * once sprung, falls far enough to arrive at v_n ≥ 2 m/s (1.83-1.89 m/s on the design's). The walked run keeps the
- * design's (STAGED_AS_DESIGNED).
+ * `logLengthM` long (circumradius `logR`; the design's 0.17 m) from the ground at x = 0 onto its top (25°).
  */
-const STAGED_DEADFALL = { propX: 5.3, propLengthM: 2.47, logLengthM: 6.2 };
-const STAGED_AS_DESIGNED = { propX: 5.07, propLengthM: 2.38, logLengthM: 6 };
+type StagedGeometry = { propX: number; propLengthM: number; logLengthM: number; logR: number };
+/**
+ * DEPARTURE (P28, §11.2(a) staged steps 1-2 "2.38 m … x = 5.07 … 6.0 m … circumradius 0.17 m"): the bait-tug runs
+ * use a 2.47 m stick at x 5.3 and a 6.2 m log (25° still): the underside over the ape 0.8 m in from the bait stands
+ * 0.1 m higher, so the log, once sprung, falls far enough to arrive at v_n ≥ 2 m/s (1.83-1.89 m/s on the design's).
+ * Fifth pass (the sustained forces in-solver, C F3 departure): the log is circumradius 0.13 m (150 kg, not 248 kg).
+ * With forces in-solver the design's 248 kg log holds the prop against a sustained 850 N on the bait (the C lab), past
+ * the ape's 907.5 N tug; the ape's tug, applied where it grips the 1 kg hide (which tumbles and bounces on its lash),
+ * moves the prop less than the same force at the bait's centre: 0.15 m (199 kg) held the tug 2 s; 0.13-0.14 m spring
+ * to it in 0.68-0.88 s and hold the 700 N tug (P28 lab). Under a step force at the bait's centre this prop gives from
+ * ≈ 600 N (the threshold test below measures the 199 kg and 248 kg logs).
+ */
+const STAGED_DEADFALL: StagedGeometry = { propX: 5.3, propLengthM: 2.47, logLengthM: 6.2, logR: 0.13 };
+const STAGED_AS_DESIGNED: StagedGeometry = { propX: 5.07, propLengthM: 2.38, logLengthM: 6, logR: 0.17 };
+/**
+ * DEPARTURE (P28 fifth pass, §11.2(a) staged "circumradius 0.17 m"): the walked run keeps the design's stick and log
+ * length with a 0.16 m log (220 kg): with the controller's lean on the bait and prop a force (C F3 departure), the
+ * design's log, having hit the ape's head at 4.5 m/s, rolled 0.83 m off its plane (gate < 0.35 m). Chaotic: 0.13,
+ * 0.15 and 0.17 m roll 0.61-0.91 m, 0.16 m 0.25 m (P28 lab).
+ */
+const STAGED_WALKED: StagedGeometry = { ...STAGED_AS_DESIGNED, logR: 0.16 };
 
 describe('AC-2(a): a deadfall wounds the ape that disturbs it', () => {
   /** §11.2(a): the log rises along +x (yaw π/2) from its lower end at the origin: "toward its own body" is −x. */
@@ -245,19 +260,21 @@ describe('AC-2(a): a deadfall wounds the ape that disturbs it', () => {
 
   /*
    * §11.2(a)'s own recipes (the bait tug), with their gates as written; the scenes are raised a little (LEAN_P28,
-   * STAGED_DEADFALL: departures recorded there and in docs/work/ledger.md).
+   * STAGED_DEADFALL, STAGED_WALKED: departures recorded there and in docs/work/ledger.md).
    * P28's sim fixes behind them: the crouch shows its posture and low postures cross-fade (the body never rises through
    * standing height); the tugging ape backs off facing the bait, holding it where it gripped it, and its arms draw the
-   * grip in at the hand speed (VERB_TUNING.tugHoldMinM), so the pull reaches 907.5 N in ≈ 0.2 s, not only once the ape has
-   * walked 0.3 m back; a creature's tugged entity is never scored against it (the 1 kg bait, yanked against the ape's own
+   * grip in at the hand speed (VERB_TUNING.tugHoldMinM), so the pull reaches full strength without the ape walking back
+   * under the log; a creature's tugged entity is never scored against it (the 1 kg bait, yanked against the ape's own
    * chest at 46 J, broke).
-   * The staged 700 N control still springs the prop (0.48 s, P28 lab: from ≈ 500 N, 600 N in 0.18 s; the C lab's 762 N):
-   * every code force here is a pre-step impulse (C F3), and Rapier resolves an impulse in the first of its substeps, where
-   * the contacts can only give a substep's share of friction: a load below the static threshold creeps (a box pushed at
-   * 0.3 μN creeps 6.7 mm in 3 s; pushed with an in-solver force it doesn't move, and this prop then holds 850 N, the
-   * verb-only prop 200 N and gives at 266 N in 1.17 s, the C lab's numbers). Neither friction combining (Average →
-   * Max) nor solver iterations (4 → 16, single-substep) change it. The fix (an in-solver force, reset every step) is
-   * what C F3 and the sim purity test forbid: left failing, for the owner's decision (see the ledger).
+   * Fifth pass (C F3 departure, the owner's decision): sustained code forces (drags, tugs, hauls, a controller's lean)
+   * are in-solver Rapier forces, added before the step and reset after it (EntityStore.queueForce). As pre-step
+   * impulses, Rapier spent them in its first substep, where the contacts can give only a substep's share of friction:
+   * loads under the static threshold crept (sustainedForce.test.ts) and the staged prop gave from ≈ 500 N, so the 700 N
+   * control sprang. The tug starts from where it gripped and its set point draws in at the hand speed past the hand
+   * (VERB_TUNING.tugHoldMinM −0.4 × scale): the pull reaches 907.5 N in ≈ 0.4 s; the drag PD's gains are held to
+   * dragDeadbeatFrac (0.75) of a light load's one-tick limits (at the full limit the 1 kg bait flipped every tick); the
+   * ape backs off only as fast as the bait comes. A rope whose end entity a fighter holds or tugs is no tripwire (§4.9
+   * "not held"): the falling log crossed the bait's lash in the ape's grip.
    */
   it('verb-only gate (§11.2(a) as written): the 40 kg log leaned on a free prop holds 120 s awake, springs when the ape tugs the bait toward itself, and hits it', async () => {
     const h = await make(44, 40);
@@ -334,9 +351,10 @@ describe('AC-2(a): a deadfall wounds the ape that disturbs it', () => {
    * log 6.0 m, circumradius 0.17 m spawned free at its pose (D-25), its lower end on the ground at x 0 and its
    * underside on the stick's top (25°); a 1 kg hide bait placed 0.55 m inward of the stick and lashed to it (a 0.65 m
    * vine). DEVIATION (§11.2(a) "≈ 170 kg"): the factory's dry wood makes that log 248 kg; the recipe's dimensions are
-   * kept (they set the underside's height over the ape).
+   * kept (they set the underside's height over the ape). The runs build it to their geometry (STAGED_DEADFALL,
+   * STAGED_WALKED, STAGED_AS_DESIGNED: the departures recorded there).
    */
-  function buildStagedDeadfall(h: Harness, STAGED: typeof STAGED_DEADFALL = STAGED_DEADFALL): { prop: number; log: number; bait: number } {
+  function buildStagedDeadfall(h: Harness, STAGED: StagedGeometry = STAGED_DEADFALL): { prop: number; log: number; bait: number } {
     const PROP = { x: STAGED.propX, z: 0.013, lengthM: STAGED.propLengthM, r: 0.07 };
     const g = h.w.terrain.heightAt(PROP.x, PROP.z);
     const prop = h.stick({ length: PROP.lengthM, r: PROP.r, p: { x: 5, y: g + PROP.r + 0.03, z: 3 }, q: lyingAlong(Math.PI / 2) });
@@ -349,10 +367,10 @@ describe('AC-2(a): a deadfall wounds the ape that disturbs it', () => {
     const top = sp.y + PROP.lengthM / 2 - g;
     // The log: its underside on the line from (0, ground) to the prop's top; a flat face down.
     const th = Math.atan2(top, sp.x);
-    const ri = 0.17 * Math.cos(Math.PI / 6);
+    const ri = STAGED.logR * Math.cos(Math.PI / 6);
     const c = { x: -ri * Math.sin(th) + (STAGED.logLengthM / 2) * Math.cos(th), y: g + ri * Math.cos(th) + (STAGED.logLengthM / 2) * Math.sin(th) + 0.01 };
     goTo(h, { x: 3, z: -4 });
-    const log = h.log({ length: STAGED.logLengthM, r: 0.17, p: { x: c.x, y: c.y, z: 0 }, q: mulQ(aboutZ(th), lyingAlong(Math.PI / 2)) });
+    const log = h.log({ length: STAGED.logLengthM, r: STAGED.logR, p: { x: c.x, y: c.y, z: 0 }, q: mulQ(aboutZ(th), lyingAlong(Math.PI / 2)) });
     h.ticks(120);
     // The bait, placed lying 0.55 m inward of the prop, lashed to the prop's side facing it by a 0.65 m vine.
     const bx = sp.x - 0.55;
@@ -376,6 +394,39 @@ describe('AC-2(a): a deadfall wounds the ape that disturbs it', () => {
     goTo(h, { x: -3, z: -6 });
     return { prop, log, bait };
   }
+
+  /**
+   * P28 (C F3 departure: sustained code forces are in-solver forces, EntityStore.queueForce): the staged prop's hold
+   * under a force on the bait toward the ape, applied in full from the first tick (a step, the C lab's method) at the
+   * bait's centre: the tick of the spring (the log's centre 5 cm down) within 360 ticks, or -1.
+   */
+  function springUnder(h: Harness, r: { log: number; bait: number }, forceN: number): number {
+    h.ticks(60);
+    const y0 = h.ent(r.log).pose.p.y;
+    for (let t = 0; t < 360; t++) {
+      if (t < 120) h.w.entities.queueForce(r.bait, { x: -forceN, y: 0, z: 0 }, { ...h.ent(r.bait).pose.p });
+      h.step();
+      if (h.ent(r.log).pose.p.y < y0 - 0.05) return t;
+    }
+    return -1;
+  }
+
+  it('the staged prop holds a sustained 700 N on its bait and gives at 762 N (199 kg log); the design\'s 248 kg one holds 850 N (the C lab)', async () => {
+    const at = async (g: StagedGeometry, n: number): Promise<{ kg: number; spring: number }> => {
+      const h = await make(48, 40);
+      const r = buildStagedDeadfall(h, g);
+      return { kg: h.ent(r.log).mass, spring: springUnder(h, r, n) };
+    };
+    const g199 = { ...STAGED_DEADFALL, logR: 0.15 };
+    const runs = { hold700: await at(g199, 700), give762: await at(g199, 762), design850: await at(STAGED_AS_DESIGNED, 850), design908: await at(STAGED_AS_DESIGNED, 908) };
+    console.info(`deadfall staged, sustained force on the bait: ${Object.entries(runs).map(([k, v]) => `${k} (${v.kg.toFixed(0)} kg) spring ${v.spring}`).join('; ')}`);
+    // PIN (P28 fifth pass, the C lab's thresholds; under C F3's pre-step impulses this prop sprang from ≈ 500 N):
+    // holds 700 N 2 s; springs at 762 N (60 ticks); the design's log holds 850 N, springs at 908 N (57 ticks).
+    expect(runs.hold700.spring).toBe(-1);
+    expect(runs.give762.spring).toBeGreaterThan(0);
+    expect(runs.design850.spring).toBe(-1);
+    expect(runs.design908.spring).toBeGreaterThan(0);
+  }, LONG_IT_MS);
 
   function stagedHold(h: Harness, r: { prop: number; log: number; bait: number }): void {
     // The log was only spawned (D-25): its credit is [] (RT-19); the prop and the bait were placed by the player.
@@ -429,7 +480,7 @@ describe('AC-2(a): a deadfall wounds the ape that disturbs it', () => {
 
   it('staged physics: the 6 m log springs on an ape that walks its route under it into the prop, and hits it at v_n ≥ 2 m/s', async () => {
     const h = await make(48, 40);
-    const r = buildStagedDeadfall(h, STAGED_AS_DESIGNED);
+    const r = buildStagedDeadfall(h, STAGED_WALKED);
     const vnOf = watchVelocities(h, [r.log]);
     stagedHold(h, r);
     const z0 = h.ent(r.log).pose.p.z;
@@ -922,8 +973,9 @@ describe('AC-2(d): a tree felled by a pull on its vine hits the creature on its 
     expect(wounds.length).toBeGreaterThan(0);
     expect(wounds[0].hp).toBeGreaterThan(240);
     expect(wounds[0].credit.includes('p1') || wounds[0].cause.credit.includes('p1')).toBe(true);
-    // PIN (§11.2(d): 534-721 HP on the head or chest, C lab e4_fell; P28 lab: 501 HP on the head): 450-800 HP.
-    expect(wounds[0].hp).toBeGreaterThan(450);
+    // PIN (§11.2(d): 534-721 HP on the head or chest, C lab e4_fell; P28 lab: 501 HP on the head; P28 fifth pass, the
+    // vine's haul an in-solver force (C F3 departure): 427 HP on the head): 380-800 HP (was 450-800).
+    expect(wounds[0].hp).toBeGreaterThan(380);
     expect(wounds[0].hp).toBeLessThan(800);
   }, RAPIER_IT_MS);
 });

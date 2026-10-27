@@ -283,7 +283,7 @@ export class World implements WorldPort {
     this.zones.pose(this); // 4b
     this.verbs.syncHeld(this);
     this.rulers.preStep(this); // 4c
-    this.kcc.applyPushes(); // 4d: code forces as impulses, in this order
+    this.kcc.applyPushes(); // 4d: code forces (sustained ones as forces, P28; hits as impulses), in this order
     this.rulers.applyShoves();
     this.verbs.codeForces(this);
     this.joints.applyHeldEnds(this);
@@ -295,6 +295,8 @@ export class World implements WorldPort {
     // 6 (reserved: M2 buoyancy and drag)
     // 7 (SPEC:701)
     this.physics.step();
+    // P28: the sustained code forces of 4d acted in this step only (C F3 departure, EntityStore.queueForce).
+    this.entities.resetForces();
     // 8
     this.physics.snapshotPostStep();
     const pairs = this.physics.drain();

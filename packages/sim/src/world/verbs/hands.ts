@@ -353,9 +353,11 @@ export function dragImpulse(w: World, f: Fighter, entity: number, grip: V3, capN
   // dragKd 300 a load under 5 kg (a creature's tug on a 1 kg bait, §11.2(a)) flipped its velocity every tick and grew
   // until the cap, flinging the bait. The gains are held to the deadbeat limit of the load's mass (kd = m/DT kills the
   // grip's relative velocity in one tick, kp = m/DT² closes its offset in one), which leaves every load ≥ 5 kg as it was.
+  // (P28, now a force over the step: held to dragDeadbeatFrac of those limits, as the rope and the ground act on the
+  // load in the same step: at the full limit a 1 kg bait on its lash flipped sideways every tick.)
   const m = heldShape(w, entity).massKg;
-  const kp = Math.min(t.dragKp, m / (DT * DT));
-  const kd = Math.min(t.dragKd, m / DT);
+  const kp = Math.min(t.dragKp, (t.dragDeadbeatFrac * m) / (DT * DT));
+  const kd = Math.min(t.dragKd, (t.dragDeadbeatFrac * m) / DT);
   let fx = kp * (tx - g.x) - kd * (gv.x - f.walkVel.x / 2);
   let fz = kp * (tz - g.z) - kd * (gv.z - f.walkVel.z / 2);
   const fh = Math.hypot(fx, fz);

@@ -386,7 +386,8 @@ export class CharacterControllers implements FighterMover {
     this.pending = [];
     list.sort((a, b) => a.entity - b.entity); // stable: controller (fighter) order within one entity
     const entities = this.world.entities;
-    for (const p of list) if (entities.get(p.entity)) entities.queueImpulse(p.entity, p.j, null);
+    // P28: a controller leaning on a light body is a sustained force (EntityStore.queueForce), j / DT newtons.
+    for (const p of list) if (entities.get(p.entity)) entities.queueForce(p.entity, { x: p.j.x / DT, y: p.j.y / DT, z: p.j.z / DT }, null);
   }
 
   grounded(f: Fighter): boolean {

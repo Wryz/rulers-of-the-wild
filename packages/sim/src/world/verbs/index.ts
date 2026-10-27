@@ -199,16 +199,18 @@ export class VerbSystem {
       const h = f.inventory?.hands;
       if (h?.mode === 'drag') {
         const imp = dragImpulse(w, f, h.entity, h.grip, t.dragForceN);
-        if (imp) w.entities.queueImpulse(h.entity, imp.j, imp.at);
+        // P28: a drag is a sustained force (EntityStore.queueForce), the impulse's j / DT.
+        if (imp) w.entities.queueForce(h.entity, { x: imp.j.x / DT, y: imp.j.y / DT, z: imp.j.z / DT }, imp.at);
       }
       if (s?.tug) {
-        // P28: the arms draw the grip in at the creature's hand speed (§6.6 "hand ≤ 0.8 m/s"), to tugHoldMinM × scale
-        // from the hand, while the feet back off: the pull builds to full strength in a fraction of a second whatever the
-        // load does, not only as far as the creature has walked back (the drag's PD reached 907.5 N ≈ 0.3 m past the
-        // taut rope, so an ape tugging a deadfall's bait backed in under the falling log first).
+        // P28: the arms draw the grip's set point in at the creature's hand speed (§6.6 "hand ≤ 0.8 m/s"), to
+        // tugHoldMinM × scale from the hand (past it: < 0), while the feet back off only as fast as the load comes
+        // (CreatureMind's tug): the pull builds to full strength in ≈ 0.4 s on a load that holds, whatever the creature's
+        // feet do (the drag's PD, its stiffness held to a light load's mass, reached 907.5 N on the 1 kg bait only
+        // ≈ 0.34 m past it; with the set point stopped near the hand, the deadfall's bait on its lash got ≈ 500 N).
         s.tug.holdM = Math.max(t.tugHoldMinM * f.scale, s.tug.holdM - t.creatureHandSpeedMps * DT);
         const imp = dragImpulse(w, f, s.tug.entity, s.tug.grip, t.pullForceN * t.creaturePullMul * f.scale * f.scale, s.tug.holdM);
-        if (imp) w.entities.queueImpulse(s.tug.entity, imp.j, imp.at);
+        if (imp) w.entities.queueForce(s.tug.entity, { x: imp.j.x / DT, y: imp.j.y / DT, z: imp.j.z / DT }, imp.at);
       }
       const c = s?.cont;
       if (c) {
