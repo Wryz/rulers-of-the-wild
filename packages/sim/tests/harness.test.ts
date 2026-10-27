@@ -19,7 +19,7 @@ import { Terrain } from '../src/world/terrain';
 import type { ImpactCause, WorldEvent } from '../src/world/types';
 import { isDirtPile } from '../src/world/verbs/dig';
 import { currentSceneHash, dependencyFingerprint, ensureScene, readScene, SCENE_DIR, sceneHash, sceneOnce, scenePath } from './support/globalSetup';
-import { buildHauledLog, buildLeaningLog, buildNotchedTree, buildStakedLog, buildStakedWall, furnishPitAsync, lyingAlong, PIT_GRASS_MIN, PROBE_SCENE } from './support/scenes';
+import { buildHauledLog, buildLeaningLog, buildNotchedTree, buildStakedLog, buildStakedWall, furnishPit, furnishPitAsync, lyingAlong, PIT_GRASS_MIN, PROBE_SCENE } from './support/scenes';
 import { BACK_SLOT, cachedScene, DIG_PLAN, SCENE_BUILD_TIMEOUT_MS, type Harness, loadHarness, makeHarness, type StandAtWhy, steepestClimbDeg, wallOnPath } from './support/worldHarness';
 
 vi.setConfig({ testTimeout: 600_000 });
@@ -466,6 +466,8 @@ function sceneViolations(src: string): string[] {
 /** The small pit the planner test digs (its save bytes, for the furnishPit test after it). */
 const SMALL_PIT = { lengthX: 3, widthZ: 2, depth: 1.5 } as const;
 let smallPitDug: Uint8Array | null = null;
+/** The small pit as furnishPitAsync left it (the sync/async check below furnishes it again with furnishPit). */
+let smallPitFurnishedAsync: Uint8Array | null = null;
 
 describe('the dig planner (§11.0)', () => {
   // DEVIATION (§11.0 "a 2 × 1 m dig scaling check"): dropped. No spot inside a 1 m wide hole is 1 m from its middle,
@@ -593,6 +595,7 @@ describe('furnishPit (§11.2(b) steps 2-3 on the small pit)', () => {
     const pit = { centre: { x: 0, z: 0 }, ...SMALL_PIT, stakeSpacing: 0.6 };
     // A 3 × 2 m floor: a 4 × 2 grid; 8 bearers 4 m long; up to 12 bundles in the four rows.
     const r = await furnishPitAsync(h, { ...pit, grass: { count: 12, minCount: SMALL_PIT_GRASS_MIN } }, stick);
+    smallPitFurnishedAsync = h.saveBytes();
     const grass = r.cover.filter((id) => h.ent(id).look === 'grass');
     console.info(`furnishPit 3×2: ${r.stakes.length} stakes, ${grass.length} grass laid, tick ${h.w.tick}`);
     const moves = reportStandAts(h, 'furnishPit 3×2');
@@ -631,6 +634,42 @@ describe('furnishPit (§11.2(b) steps 2-3 on the small pit)', () => {
     // (walls); a standAt where the terrain has neither is a walk that failed (a body or a load in the way).
     expect(moves.drop + moves.wall).toBeGreaterThanOrEqual(2 * r.stakes.length);
     expect(moves.other).toBeLessThanOrEqual(OTHER_STANDATS.furnish);
+  });
+});
+
+/*
+ * P29: the scene builders are step generators run two ways, runSteps (synchronous) and runStepsAsync (yielding to the
+ * worker's event loop at each step; the cached pit is built this way). The yields carry nothing, so both must send
+ * the same commands on the same ticks: the same save bytes. (buildPit itself is the 8 × 6 m pit's ≈ 14 min; its
+ * async build was checked once against the synchronous build's cached file, byte for byte: docs/work/ledger.md P29.)
+ */
+describe('the step runners: synchronous and yielding builds are the same scene (P29)', () => {
+  const same = (a: Uint8Array, b: Uint8Array): boolean => a.length === b.length && a.every((x, i) => x === b[i]);
+
+  it('digPit and digPitAsync dig a 2 × 2 × 0.5 m pit to the same save bytes', async () => {
+    const dig = async (yielding: boolean): Promise<Uint8Array> => {
+      const h = await make(31, 40);
+      h.standAt({ x: -3, z: 0 });
+      h.give('diggingStick');
+      const o = { centre: { x: 0, z: 0 }, lengthX: 2, widthZ: 2, depth: 0.5, maxTicks: 60_000, pileSides: 'z' as const };
+      const r = yielding ? await h.digPitAsync(o) : h.digPit(o);
+      console.info(`step runners: dig 2×2×0.5 ${yielding ? 'async' : 'sync'}: ${r.strikes} strikes, ${r.ticks} ticks`);
+      return h.saveBytes();
+    };
+    const a = await dig(false);
+    const b = await dig(true);
+    // GATE: byte-identical saves.
+    expect(same(a, b)).toBe(true);
+  });
+
+  it('furnishPit furnishes the small pit to the same save bytes as furnishPitAsync (above)', async () => {
+    if (!smallPitDug || !smallPitFurnishedAsync) throw new Error('the dig planner and furnishPit tests (above, same file) did not leave their pits');
+    const h = await loadHarness(smallPitDug);
+    live.push(h);
+    const stick = h.p.inventory!.hands!.entity;
+    furnishPit(h, { centre: { x: 0, z: 0 }, ...SMALL_PIT, stakeSpacing: 0.6, grass: { count: 12, minCount: SMALL_PIT_GRASS_MIN } }, stick);
+    // GATE: byte-identical saves.
+    expect(same(h.saveBytes(), smallPitFurnishedAsync)).toBe(true);
   });
 });
 

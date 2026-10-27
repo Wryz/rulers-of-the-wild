@@ -252,6 +252,9 @@ interface HuntResult {
   /** The first break of a cover entity: the pit springs. */
   pitSpring: Distances;
   coverBreak: Extract<WorldEvent, { type: 'break' }>;
+  /** The first load break of a cover entity by the giant's weight (a `break` of 0 J whose `by` is the giant), if any. */
+  loadBreak: Extract<WorldEvent, { type: 'break' }> | null;
+  loadSpring: Distances | null;
   pullStart: Distances;
   fellSpring: Distances;
   fell: Extract<WorldEvent, { type: 'fell' }>;
@@ -278,6 +281,9 @@ async function hunt(h: Harness, s: Scene, g: Fighter, what: string): Promise<Hun
   let coverBreak: Extract<WorldEvent, { type: 'break' }> | null = null;
   let trip: Extract<WorldEvent, { type: 'trip' }> | null = null;
   let tripTick = -1;
+  let loadBreak: Extract<WorldEvent, { type: 'break' }> | null = null;
+  let loadSpring: Distances | null = null;
+  const tripNow = (): Extract<WorldEvent, { type: 'trip' }> | null => trip;
   const watch = (r: { world: WorldEvent[] }): void => {
     for (const e of r.world) {
       if (e.type === 'break' && s.cover.has(e.entity)) {
@@ -286,6 +292,10 @@ async function hunt(h: Harness, s: Scene, g: Fighter, what: string): Promise<Hun
           coverBreak = e;
           pitSpring = distances(h, s, g);
         }
+        if (!loadBreak && e.energy === 0 && e.by?.kind === 'fighter' && e.by.id === g.id) {
+          loadBreak = e;
+          loadSpring = distances(h, s, g);
+        }
       }
       if (e.type === 'trip' && e.f === g && !trip) {
         trip = e;
@@ -293,15 +303,19 @@ async function hunt(h: Harness, s: Scene, g: Fighter, what: string): Promise<Hun
       }
     }
   };
-  // Step 4: the lure, until the giant is tripped.
-  for (let t = 0; g.state !== 'tripped'; t++) {
+  // Step 4: the lure, until the giant trips (its first `trip` event, and it is `tripped`).
+  for (let t = 0; tripNow() === null || g.state !== 'tripped'; t++) {
     if (t >= LURE_MAX_TICKS) throw new Error(`${what}: the giant did not trip in ${LURE_MAX_TICKS} ticks; its states: ${states.join(', ')}; ${story(h, s, g)}`);
     watch(h.step());
     note();
     if (t % YIELD_TICKS === YIELD_TICKS - 1) await yieldToVitest();
   }
-  // Step 5: on the first tick it is tripped, the player stops pacing and pulls (one command tick: a zero move and the
-  // pull on). (reelIn with no slack limit only ends the pace; the pull is the verb command below.)
+  // The pull answers the pit's trap only: a trip for any other cause (a ledge, an obstacle) is not the weight-triggered
+  // pit springing, and the hunt stops there (the test fails).
+  const first = tripNow()!;
+  if (first.why !== 'cover') throw new Error(`${what}: the giant tripped '${first.why}', not on the cover (the pit's weight trigger); no pull. ${story(h, s, g)}; states ${states.join(', ')}`);
+  // Step 5: on the first tick it is tripped by the cover, the player stops pacing and pulls (one command tick: a zero
+  // move and the pull on). (reelIn with no slack limit only ends the pace; the pull is the verb command below.)
   h.reelIn(s.joint, Number.POSITIVE_INFINITY);
   h.w.commands.push(moveCommand(h.w.tick + 1, 1, 0, 0));
   const on = h.verb({ verb: 'pull', target: 0, charge: 255 });
@@ -346,6 +360,7 @@ async function hunt(h: Harness, s: Scene, g: Fighter, what: string): Promise<Hun
     `AC-3 ${what}: states ${states.join(' → ')}\n` +
       `  trip tick ${tripTick} why ${tripT?.why} cause ${JSON.stringify(tripT?.cause ?? null)}\n` +
       `  pit springs (first cover break, entity ${coverBreak ? (coverBreak as { entity: number }).entity : '?'}): ${pitSpring ? fmt(pitSpring) : 'never'}\n` +
+      `  first cover load break by the giant: ${loadBreak ? `entity ${(loadBreak as { entity: number }).entity} by ${JSON.stringify((loadBreak as { by?: unknown }).by)}: ${loadSpring ? fmt(loadSpring) : '?'}` : 'none'}\n` +
       `  pull starts: ${fmt(pullStart)}\n` +
       `  the tree falls ${(fellTick - pullStart.tick) / 60} s after the pull starts: ${fellSpring ? fmt(fellSpring) : 'never'}\n` +
       `  trunk on the giant: ${trunkHit && trunkHit.type === 'impact' ? `tick ${trunkHit.tick} (${((trunkHit.tick - tripTick) / 60).toFixed(2)} s after the trip) ${trunkHit.rulerZone ?? trunkHit.zone} ${trunkHit.energy.toFixed(0)} J ${trunkHit.damage.toFixed(0)} HP; giant ${g.state}, inPit ${g.ruler?.inPit}, down ${rulerDown(g)}` : 'no impact'}\n` +
@@ -354,16 +369,25 @@ async function hunt(h: Harness, s: Scene, g: Fighter, what: string): Promise<Hun
       `  fixtures after the giant: ${h.fixtures.filter((f) => f.op === 'spawn' || f.op === 'stage' || f.op === 'unstage').map((f) => `${f.op} ${f.what}`).join(', ') || 'none'}`,
   );
   if (!pitSpring || !coverBreak || !trip || !fellSpring || !fell) throw new Error(`${what}: a spring is missing`);
-  return { trip, tripTick, pitSpring, coverBreak, pullStart, fellSpring, fell, aliveAfterPit, stakeWounds, trunkWounds, states };
+  return { trip, tripTick, pitSpring, coverBreak, loadBreak, loadSpring, pullStart, fellSpring, fell, aliveAfterPit, stakeWounds, trunkWounds, states };
 }
 
 /** The criterion's gates on one hunt. */
-function gate(r: HuntResult, s: Scene): void {
+function gate(r: HuntResult, s: Scene, g: Fighter): void {
+  // GATE: the pit springs by weight (SPEC:900 "a weight-triggered spike pit"): the giant's trip is the cover's
+  // ('cover': a support that bore its load was lost, the lost-support rule), and a cover entity load-broke under the
+  // giant (0 J, `by` the giant's loading leg) at or before the trip.
+  expect(r.trip.why).toBe('cover');
+  expect(r.loadBreak, 'a cover load break by the giant').not.toBeNull();
+  expect(r.loadBreak!.energy).toBe(0);
+  expect(r.loadBreak!.by?.kind).toBe('fighter');
+  expect(r.loadBreak!.by?.kind === 'fighter' ? r.loadBreak!.by.id : null).toBe(g.id);
+  expect(r.loadSpring!.tick).toBeLessThanOrEqual(r.tripTick);
   // GATE: the pit springs (a cover entity breaks) before the pull, the tree falls after it.
   expect(r.pitSpring.tick).toBeLessThanOrEqual(r.tripTick);
   expect(r.fellSpring.tick).toBeGreaterThanOrEqual(r.pullStart.tick);
   // GATE: the player is never within 10 m of either trap, or of the giant, when it springs; the tie ≥ 15 m away.
-  for (const d of [r.pitSpring, r.fellSpring]) {
+  for (const d of [r.pitSpring, r.loadSpring!, r.fellSpring]) {
     expect(d.cover).toBeGreaterThanOrEqual(MIN_SPRING_DIST_M);
     expect(d.pit).toBeGreaterThanOrEqual(MIN_SPRING_DIST_M);
     expect(d.giant).toBeGreaterThanOrEqual(MIN_SPRING_DIST_M);
@@ -371,6 +395,9 @@ function gate(r: HuntResult, s: Scene): void {
   }
   expect(r.pullStart.tie).toBeGreaterThanOrEqual(MIN_PULL_DIST_M);
   expect(r.fellSpring.tie).toBeGreaterThanOrEqual(MIN_PULL_DIST_M);
+  // GATE (the stricter reading of SPEC:900 "pulls a rope from at least 15 m away to drop a log on it"): the player is
+  // ≥ 15 m from the giant, too, when the trunk falls.
+  expect(r.fellSpring.giant).toBeGreaterThanOrEqual(MIN_PULL_DIST_M);
   // GATE: the giant is alive after the pit (the second trap has something to fall on).
   expect(r.aliveAfterPit).toBe(true);
   // GATE: both traps wound, credited to the player.
@@ -410,7 +437,7 @@ describe('AC-3: the solo hunt (SPEC:900, §11.3)', () => {
       { x: ROUTE_END_X, z: z0 },
     ]);
     const r = await hunt(h, s, g, `brain on, z0 ${z0}`);
-    gate(r, s);
+    gate(r, s, g);
   });
 
   it('brain off: the same physics with a scripted 7 m/s charge from (−30, 0) at P (tells a mind failure from a physics one)', async () => {
@@ -421,6 +448,6 @@ describe('AC-3: the solo hunt (SPEC:900, §11.3)', () => {
     const g = h.creature('giantApe', from, heading, { brain: 'off' });
     h.script(g, { kind: 'charge', heading, speed: 7 });
     const r = await hunt(h, s, g, 'brain off, scripted charge');
-    gate(r, s);
+    gate(r, s, g);
   });
 });
