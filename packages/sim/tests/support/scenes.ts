@@ -296,57 +296,71 @@ const LEAN = {
   ropeM: 0.65,
 } as const;
 
+/** The leaning log's geometry (buildLeaningLog's `lean`): §11.2(a)'s by default. */
+export type LeanGeometry = { logLengthM: number; propNearM: number; pitchDeg: number };
+
+/**
+ * DEPARTURE (P28, §11.2(a) gate step 2 "5.0 m … 4.4 m along … 32.9°"), for AC-2(a)'s bait-tug runs: the 40 kg log 5.6 m
+ * long leaning at 30° on the same 2.4 m prop, 4.16 m out (4.8 m along it): the underside over the crouched, tugging ape
+ * stands ≈ 0.1 m higher (the prop is no taller: a 2.5 m or 2.55 m one left no place for the sloped log, `noSupport`).
+ * At 32.9° the ape backing off with the bait was under the log (clearance 0.017 m) and the 200 N control sprang it
+ * (P28 lab; nearby geometries, 29-32° and 5.5-5.8 m, are as chaotic: see the ledger).
+ */
+export const LEAN_P28: LeanGeometry = { logLengthM: 5.6, propNearM: 4.16, pitchDeg: 30 };
+
 /**
  * §11.2(a) gate (verb-only): from the log's lower end at `at`, rising along `yaw`: a dry stick r 0.07 × 2.4 m carried
  * and placed upright, not driven (a free prop); a 40 kg, 5 m dry hex log carried and placed sloped, its lower end on the
  * ground and its underside on the prop's top 4.4 m along (32.9°); a 1 kg hide bait placed lying 0.55 m inward of the
  * prop's base and lashed to the prop with vine, anchors 0.65 m apart (a 0.65 m rope).
  */
-export function buildLeaningLog(h: Harness, o: { at: XZ; yaw: number }): { prop: number; log: number; bait: number } {
+export function buildLeaningLog(h: Harness, o: { at: XZ; yaw: number; lean?: LeanGeometry }): { prop: number; log: number; bait: number } {
+  const g0 = o.lean ?? { logLengthM: LEAN.log.lengthM, propNearM: LEAN.propNearM, pitchDeg: LEAN.pitchDeg };
+  const L = { ...LEAN, log: { ...LEAN.log, lengthM: g0.logLengthM }, propNearM: g0.propNearM, pitchDeg: g0.pitchDeg };
   const A = offVertex(h, o.at);
   const u = dirOf(o.yaw);
   const n = { x: u.z, z: -u.x };
   const g = ground(h, A);
   coilToBelt(h, add(A, n, -3), 3);
   // The prop, upright, free.
-  const propBase = add(A, u, LEAN.propNearM + octIn(LEAN.prop.r));
-  const prop = stickAt(h, add(propBase, n, 3), LEAN.prop.lengthM, LEAN.prop.r);
+  const propBase = add(A, u, L.propNearM + octIn(L.prop.r));
+  const prop = stickAt(h, add(propBase, n, 3), L.prop.lengthM, L.prop.r);
   h.ticks(1);
-  placeUpright(h, prop, propBase, LEAN.prop.lengthM, { drive: 0, from: n, standOff: 1.2 });
+  placeUpright(h, prop, propBase, L.prop.lengthM, { drive: 0, from: n, standOff: 1.2 });
   h.ticks(60);
   // The log, sloped onto the prop (the place test's command: the lower-end underside corner placeDropM over the ground).
   const logSpot = add(add(A, u, 2), n, 3.5);
-  const logId = h.log({ mass: LEAN.log.massKg, length: LEAN.log.lengthM, r: 0.1, p: { x: logSpot.x, y: ground(h, logSpot) + 0.1, z: logSpot.z }, q: lyingAlong(o.yaw) });
+  const logId = h.log({ mass: L.log.massKg, length: L.log.lengthM, r: 0.1, p: { x: logSpot.x, y: ground(h, logSpot) + 0.1, z: logSpot.z }, q: lyingAlong(o.yaw) });
   h.ticks(30);
   take(h, logId, 'take the deadfall log');
   goTo(h, add(add(A, u, 2.0), n, 1.2));
   const r = h.ent(logId).shape.kind === 'cylinder' ? (h.ent(logId).shape as { r: number }).r : 0.075;
-  const steps = Math.round((LEAN.pitchDeg / 360) * COMMAND_STEPS);
+  const steps = Math.round((L.pitchDeg / 360) * COMMAND_STEPS);
   const th = (steps / COMMAND_STEPS) * 2 * Math.PI;
   const rho = hexIn(r);
   const lowH = -rho * Math.sin(th);
   const lowY = g + 0.02 + rho * Math.cos(th);
-  const centre = add(A, u, lowH + (Math.cos(th) * LEAN.log.lengthM) / 2);
-  h.must({ verb: 'place', target: 0, at: toCm({ x: centre.x, y: lowY + (Math.sin(th) * LEAN.log.lengthM) / 2, z: centre.z }), yaw: yawSteps(o.yaw), pitch: steps }, 'place the log sloped onto the prop');
+  const centre = add(A, u, lowH + (Math.cos(th) * L.log.lengthM) / 2);
+  h.must({ verb: 'place', target: 0, at: toCm({ x: centre.x, y: lowY + (Math.sin(th) * L.log.lengthM) / 2, z: centre.z }), yaw: yawSteps(o.yaw), pitch: steps }, 'place the log sloped onto the prop');
   h.ticks(30);
   // The bait, lying 0.55 m inward of the prop's base.
-  const baitAt = offVertex(h, add(propBase, u, -LEAN.bait.inwardM));
+  const baitAt = offVertex(h, add(propBase, u, -L.bait.inwardM));
   const spot = add(baitAt, n, 2.5);
-  const bait = h.box({ p: { x: spot.x, y: ground(h, spot) + LEAN.bait.size[1] / 2 + 0.01, z: spot.z }, size: [...LEAN.bait.size], material: 'hide', state: 'free', look: 'hide' });
+  const bait = h.box({ p: { x: spot.x, y: ground(h, spot) + L.bait.size[1] / 2 + 0.01, z: spot.z }, size: [...L.bait.size], material: 'hide', state: 'free', look: 'hide' });
   h.ticks(10);
   take(h, bait, 'take the bait');
   goTo(h, add(baitAt, n, 1.0));
-  const baitY = g + LEAN.bait.size[1] / 2 + 0.02;
+  const baitY = g + L.bait.size[1] / 2 + 0.02;
   h.must({ verb: 'place', target: 0, at: toCm({ x: baitAt.x, y: baitY, z: baitAt.z }), yaw: yawSteps(o.yaw), pitch: 0 }, 'place the bait');
   h.ticks(20);
   // The lash: bait top to the prop's side facing it, 0.65 m apart.
   const b = h.ent(bait).pose.p;
-  const top = { x: b.x, y: b.y + LEAN.bait.size[1] / 2, z: b.z };
+  const top = { x: b.x, y: b.y + L.bait.size[1] / 2, z: b.z };
   const pe = h.ent(prop).pose.p;
   const toward = unit({ x: top.x - pe.x, z: top.z - pe.z });
-  const face = add({ x: pe.x, z: pe.z }, toward, octIn(LEAN.prop.r));
+  const face = add({ x: pe.x, z: pe.z }, toward, octIn(L.prop.r));
   const dh = Math.hypot(face.x - top.x, face.z - top.z);
-  const up = dh < LEAN.ropeM ? Math.sqrt(LEAN.ropeM * LEAN.ropeM - dh * dh) : 0.15 * LEAN.prop.lengthM;
+  const up = dh < L.ropeM ? Math.sqrt(L.ropeM * L.ropeM - dh * dh) : 0.15 * L.prop.lengthM;
   h.must({ verb: 'lash', target: bait, second: prop, at: toCm(top), at2: toCm({ x: face.x, y: top.y + up, z: face.z }) }, 'lash the bait to the prop');
   h.ticks(30);
   return { prop, log: logId, bait };
@@ -355,6 +369,85 @@ export function buildLeaningLog(h: Harness, o: { at: XZ; yaw: number }): { prop:
 // ---------------------------------------------------------------------------
 // AC-2(c): the hauled log (§11.2(c) gate)
 // ---------------------------------------------------------------------------
+
+const flatXZ = (a: XZ, b: XZ): number => Math.hypot(a.x - b.x, a.z - b.z);
+const aboutZ = (a: number): Quat => ({ x: 0, y: 0, z: Math.sin(a / 2), w: Math.cos(a / 2) });
+
+/**
+ * §11.2(a)'s staged deadfall geometry: a stick r 0.07 m `propLengthM` long placed upright at x = propX, a dry hex log
+ * `logLengthM` long (circumradius `logR`; the design's 0.17 m) from the ground at x = 0 onto its top (25°).
+ */
+export type ProppedGeometry = { propX: number; propLengthM: number; logLengthM: number; logR: number };
+/**
+ * DEPARTURE (P28, §11.2(a) staged steps 1-2 "2.38 m … x = 5.07 … 6.0 m … circumradius 0.17 m"): the bait-tug runs
+ * use a 2.47 m stick at x 5.3 and a 6.2 m log (25° still): the underside over the ape 0.8 m in from the bait stands
+ * 0.1 m higher, so the log, once sprung, falls far enough to arrive at v_n ≥ 2 m/s (1.83-1.89 m/s on the design's).
+ * Fifth pass (the sustained forces in-solver, C F3 departure): the log is circumradius 0.13 m (150 kg, not 248 kg).
+ * With forces in-solver the design's 248 kg log holds the prop against a sustained 850 N on the bait (the C lab), past
+ * the ape's 907.5 N tug; the ape's tug, applied where it grips the 1 kg hide (which tumbles and bounces on its lash),
+ * moves the prop less than the same force at the bait's centre: 0.15 m (199 kg) held the tug 2 s; 0.13-0.14 m spring
+ * to it in 0.68-0.88 s and hold the 700 N tug (P28 lab). Under a step force at the bait's centre this prop gives from
+ * ≈ 600 N (tests/proppedLog.lab.test.ts measures the 199 kg and 248 kg logs).
+ */
+export const PROPPED_P28: ProppedGeometry = { propX: 5.3, propLengthM: 2.47, logLengthM: 6.2, logR: 0.13 };
+export const PROPPED_AS_DESIGNED: ProppedGeometry = { propX: 5.07, propLengthM: 2.38, logLengthM: 6, logR: 0.17 };
+/**
+ * DEPARTURE (P28 fifth pass, §11.2(a) staged "circumradius 0.17 m"): the walked run keeps the design's stick and log
+ * length with a 0.16 m log (220 kg): with the controller's lean on the bait and prop a force (C F3 departure), the
+ * design's log, having hit the ape's head at 4.5 m/s, rolled 0.83 m off its plane (gate < 0.35 m). Chaotic: 0.13,
+ * 0.15 and 0.17 m roll 0.61-0.91 m, 0.16 m 0.25 m (P28 lab).
+ */
+export const PROPPED_WALKED: ProppedGeometry = { ...PROPPED_AS_DESIGNED, logR: 0.16 };
+
+/**
+ * §11.2(a)'s staged scene: a dry stick r 0.07 × 2.38 m carried and placed upright, not driven, at x 5.07; a dry hex
+ * log 6.0 m, circumradius 0.17 m spawned free at its pose (D-25), its lower end on the ground at x 0 and its
+ * underside on the stick's top (25°); a 1 kg hide bait placed 0.55 m inward of the stick and lashed to it (a 0.65 m
+ * vine). DEVIATION (§11.2(a) "≈ 170 kg"): the factory's dry wood makes that log 248 kg; the recipe's dimensions are
+ * kept (they set the underside's height over the ape). The runs build it to their geometry (PROPPED_P28,
+ * PROPPED_WALKED, PROPPED_AS_DESIGNED: the departures recorded there).
+ */
+export function buildProppedLog(h: Harness, STAGED: ProppedGeometry = PROPPED_P28): { prop: number; log: number; bait: number } {
+  const PROP = { x: STAGED.propX, z: 0.013, lengthM: STAGED.propLengthM, r: 0.07 };
+  const g = h.w.terrain.heightAt(PROP.x, PROP.z);
+  const prop = h.stick({ length: PROP.lengthM, r: PROP.r, p: { x: 5, y: g + PROP.r + 0.03, z: 3 }, q: lyingAlong(Math.PI / 2) });
+  h.ticks(20);
+  take(h, prop, 'take the prop');
+  goTo(h, { x: PROP.x, z: -1.2 });
+  h.must({ verb: 'place', target: 0, at: toCm({ x: PROP.x, y: g + PROP.lengthM / 2, z: PROP.z }), yaw: 0, pitch: 64, drive: 0 }, 'place the prop upright');
+  h.ticks(60);
+  const sp = h.ent(prop).pose.p;
+  const top = sp.y + PROP.lengthM / 2 - g;
+  // The log: its underside on the line from (0, ground) to the prop's top; a flat face down.
+  const th = Math.atan2(top, sp.x);
+  const ri = STAGED.logR * Math.cos(Math.PI / 6);
+  const c = { x: -ri * Math.sin(th) + (STAGED.logLengthM / 2) * Math.cos(th), y: g + ri * Math.cos(th) + (STAGED.logLengthM / 2) * Math.sin(th) + 0.01 };
+  goTo(h, { x: 3, z: -4 });
+  const log = h.log({ length: STAGED.logLengthM, r: STAGED.logR, p: { x: c.x, y: c.y, z: 0 }, q: mulQuat(aboutZ(th), lyingAlong(Math.PI / 2)) });
+  h.ticks(120);
+  // The bait, placed lying 0.55 m inward of the prop, lashed to the prop's side facing it by a 0.65 m vine.
+  const bx = sp.x - 0.55;
+  const bait = h.box({ p: { x: bx, y: g + 0.03, z: -2.5 }, size: [0.25, 0.04, 1 / 1100 / (0.25 * 0.04)], material: 'hide', state: 'free', look: 'hide' });
+  h.ticks(10);
+  take(h, bait, 'take the bait');
+  goTo(h, { x: bx, z: -1.0 });
+  h.must({ verb: 'place', target: 0, at: toCm({ x: bx, y: g + 0.04, z: PROP.z }), yaw: 64, pitch: 0 }, 'place the bait');
+  h.ticks(20);
+  const coil = h.coil({ material: 'vine', lengthM: 3, at: { x: 2, y: g, z: -2 } });
+  h.ticks(5);
+  take(h, coil, 'take the vine coil');
+  h.must({ verb: 'stow', target: 0, slot: 0 }, 'the coil to the belt');
+  goTo(h, { x: bx + 0.2, z: -0.9 });
+  const bp = h.ent(bait).pose.p;
+  const btop = { x: bp.x, y: bp.y + 0.02, z: bp.z };
+  const face = { x: sp.x - PROP.r * Math.cos(Math.PI / 8), z: sp.z };
+  const dh = flatXZ(face, btop);
+  h.must({ verb: 'lash', target: bait, second: prop, at: toCm(btop), at2: toCm({ x: face.x, y: btop.y + Math.sqrt(0.65 * 0.65 - dh * dh), z: face.z }) }, 'lash the bait to the prop');
+  h.ticks(30);
+  goTo(h, { x: -3, z: -6 });
+  return { prop, log, bait };
+}
+
 
 /**
  * §11.2(c) gate (verb-only), at `at`: two trees (d 0.4 m, h 14 m) at ±2.6 m in z, each with a 9 m hanging vine anchored
@@ -479,6 +572,9 @@ function shapeR(h: Harness, id: number): number {
 // AC-2(b), AC-3: the spike pit (§11.2(b), §11.3)
 // ---------------------------------------------------------------------------
 
+/** Ground this far below its original height is dug (the terrain's spoilUndugTolM, §4.13): the hole's edge. */
+const DUG_EDGE_M = 0.05;
+
 /** §11.2(b)'s pit numbers. */
 const PIT = {
   stake: { lengthM: 1.4, r: 0.05, sharpness: 0.6 },
@@ -491,7 +587,7 @@ const PIT = {
    * measured r ≤ 0.002 m failing at 4 m half-length). Reported for P17 (shrinkShape). 5.7 kg, holding 283 N (≥ 200 N).
    */
   /** 8 m across the 6 m width (overM beyond each long rim), spacingM apart along the length (20 on an 8 m pit). */
-  bearer: { overM: 1, r: 0.025, spacingM: 0.4 },
+  bearer: { overM: 1, r: 0.025, spacingM: 0.4, endOutM: 0.25, minOnRimM: 0.5, bermGapM: 0.1 },
   /**
    * Up to `count` bundles (at least PIT_GRASS_MIN laid) in rows along the long rims (rowsInsetM inside each: |z| 2.5
    * and 3.0 m on the 6 m pit), each across the two neighbouring bearers nearest a spot of the row (spots every 0.2 m,
@@ -501,6 +597,9 @@ const PIT = {
    */
   grass: { masses: [3], rowsInsetM: [0.5, 0], count: 30 },
   grassLaneM: 1.2,
+  /** coverDugRim: the outer grass row lies this far in from the longest nearby bearer's end; bearers within grassNearM count. */
+  grassRowInM: 0.5,
+  grassNearM: 0.6,
   /** Where the player stands to lay a bearer: this far beyond its end. */
   rimM: 0.6,
 } as const;
@@ -532,7 +631,7 @@ export function buildPit(h: Harness, o: { centre: XZ; lengthX: 8; widthZ: 6; dep
     { x: x0 - 1.5, z: c.z - o.widthZ / 2 - 2.2 },
     { x: c.x + o.lengthX / 2 + 1.5, z: c.z - o.widthZ / 2 - 2.2 },
   ]);
-  const furnished = furnishPit(h, { ...o, grass: { count: PIT.grass.count, minCount: PIT_GRASS_MIN } }, stick);
+  const furnished = furnishPit(h, { ...o, grass: { count: PIT.grass.count, minCount: PIT_GRASS_MIN }, coverDugRim: true }, stick);
   console.info(`buildPit: ${furnished.stakes.length} stakes, ${furnished.cover.length} cover; standAts ${JSON.stringify(h.standAts())}, tick ${h.w.tick}`);
   return { ...furnished, strikes: dug.strikes };
 }
@@ -544,7 +643,7 @@ export function buildPit(h: Harness, o: { centre: XZ; lengthX: 8; widthZ: 6; dep
  */
 export function furnishPit(
   h: Harness,
-  o: { centre: XZ; lengthX: number; widthZ: number; stakeSpacing: number; grass: { count: number; minCount: number } },
+  o: { centre: XZ; lengthX: number; widthZ: number; stakeSpacing: number; grass: { count: number; minCount: number }; coverDugRim?: boolean },
   stick: number,
 ): { cover: number[]; stakes: number[] } {
   const c = o.centre;
@@ -608,37 +707,94 @@ export function furnishPit(
 
   // The cover: bearers across the width, laid from the −z rim; grass bundles on them from the nearer long rim.
   const bearers: number[] = [];
-  const B = { ...PIT.bearer, lengthM: o.widthZ + 2 * PIT.bearer.overM, count: Math.round(o.lengthX / PIT.bearer.spacingM) };
-  for (let i = 0; i < B.count; i++) {
+  // P28 (coverDugRim, the 8 × 6 m pit): the bearers span the hole as dug, not the planned footprint. The planner's cone
+  // strikes dig the rim out beyond the footprint (≈ ±4.3 m at an 8 m pit's ends, where 20 bearers 0.4 m apart reached
+  // ±3.8: a giant's front foot met the open strip and tripped `ledge`, not `cover`), so the bearers run from the dug
+  // edge at one end to the other, at most spacingM apart, each overM onto undug ground beyond both long rims.
+  const dug = (x: number, z: number): boolean => ground(h, { x, z }) < h.w.terrain.originalHeightAt(x, z) - DUG_EDGE_M;
+  let xMin = c.x;
+  let xMax = c.x;
+  if (o.coverDugRim) {
+    for (let x = c.x; x > c.x - o.lengthX; x -= 0.05) if (dug(x, c.z)) xMin = x;
+    for (let x = c.x; x < c.x + o.lengthX; x += 0.05) if (dug(x, c.z)) xMax = x;
+    // The end bearers on undug ground just beyond the ends as dug on the centre line (P28: one laid on the dug edge's
+    // slope rolled in under the giant's first step).
+    xMin -= PIT.bearer.endOutM;
+    xMax += PIT.bearer.endOutM;
+  }
+  const spanX = xMax - xMin;
+  const count = o.coverDugRim ? Math.ceil(spanX / PIT.bearer.spacingM - 1e-9) + 1 : Math.round(o.lengthX / PIT.bearer.spacingM);
+  const bearerX = (i: number): number => (o.coverDugRim ? xMin + (spanX * i) / (count - 1) : c.x - ((count - 1) * PIT.bearer.spacingM) / 2 + i * PIT.bearer.spacingM);
+  // Each bearer's half-length. coverDugRim (P28 third pass): its own line's dug width + overM, so both ends lie on the
+  // undug ground of the rim, but short of the spoil's berm (the ring spoilSetbackM wide that holds no spoil): one long
+  // enough for the widest dug point (±4.25 m at the cone-dug corners) lay with its ends up on the berm's flanks, a pole
+  // 0.4 m up across the giant's path at the pit's end (at its ankle), not a cover lying on the rim.
+  const raised = (x: number, z: number): boolean => ground(h, { x, z }) > h.w.terrain.originalHeightAt(x, z) + DUG_EDGE_M;
+  const halfZ = (x: number): number => {
+    if (!o.coverDugRim) return o.widthZ / 2 + PIT.bearer.overM;
+    let w = 0;
+    for (let z = 0; z < o.widthZ; z += 0.05) if (dug(x, c.z + z) || dug(x, c.z - z)) w = Math.max(w, z);
+    let hz = w + PIT.bearer.overM;
+    for (let z = w; z <= w + PIT.bearer.overM + 1e-9; z += 0.05) {
+      if (raised(x, c.z + z) || raised(x, c.z - z)) {
+        hz = Math.max(w + PIT.bearer.minOnRimM, z - PIT.bearer.bermGapM);
+        break;
+      }
+    }
+    return hz;
+  };
+  const hzs = Array.from({ length: count }, (_, i) => halfZ(offVertex(h, { x: bearerX(i), z: c.z }).x));
+  const maxHz = Math.max(...hzs);
+  /** The shortest and longest half-length of the bearers within grassNearM of x. */
+  const hzNear = (x: number): { min: number; max: number } => {
+    const hs = hzs.filter((_, i) => Math.abs(bearerX(i) - x) <= PIT.grassNearM);
+    return hs.length > 0 ? { min: Math.min(...hs), max: Math.max(...hs) } : { min: zHalf, max: maxHz };
+  };
+  const zHalf = o.widthZ / 2;
+  if (o.coverDugRim) console.info(`furnishPit: bearers x ${xMin.toFixed(2)} … ${xMax.toFixed(2)}: ${count} bearers ${hzs.map((z) => (2 * z).toFixed(2)).join(', ')} m long`);
+  for (let i = 0; i < count; i++) {
     // Staged south-east of the pit (the player fetches them from the −z rim lane without crossing the pit).
     const q = { x: c.x + o.lengthX / 2 + 2, z: c.z - 9 - 0.4 * i };
-    bearers.push(h.stick({ length: B.lengthM, r: B.r, material: 'rottenWood', p: { x: q.x + B.lengthM / 2 - 1, y: ground(h, q) + B.r + 0.05, z: q.z }, q: lyingAlong(Math.PI / 2) }));
+    const L = 2 * hzs[i];
+    bearers.push(h.stick({ length: L, r: PIT.bearer.r, material: 'rottenWood', p: { x: q.x + L / 2 - 1, y: ground(h, q) + PIT.bearer.r + 0.05, z: q.z }, q: lyingAlong(Math.PI / 2) }));
   }
   const grassIds: number[] = [];
   const G = PIT.grass;
   const spots: { q: XZ; side: number }[] = [];
   const half = o.lengthX / 2 - 0.3;
   for (const side of [-1, 1]) {
-    for (const inset of G.rowsInsetM) for (let cx = -half; cx <= half + 1e-9; cx += 0.2) spots.push({ q: offVertex(h, { x: c.x + cx, z: c.z + side * (o.widthZ / 2 - inset) }), side });
+    // (coverDugRim: the rows inset from the hole's dug edge, as the bearers' ends are set from it, so the player laying
+    // them from beyond those ends still reaches both rows.)
+    // (coverDugRim: the rows set in from the nearest bearers' ends, each grassRowInM in, so the player laying them from
+    // beyond those ends still reaches both rows.)
+    for (const inset of G.rowsInsetM) {
+      for (let cx = -half; cx <= half + 1e-9; cx += 0.2) {
+        const rowHalf = o.coverDugRim ? hzNear(c.x + cx).max - PIT.grassRowInM : zHalf;
+        spots.push({ q: offVertex(h, { x: c.x + cx, z: c.z + side * (rowHalf - inset) }), side });
+      }
+    }
   }
   Array.from({ length: o.grass.count }).forEach((_, gi) => {
     const q = { x: c.x + o.lengthX / 2 + 4 + 1.2 * (gi % 5), z: c.z - 19 - 1.0 * Math.floor(gi / 5) };
     grassIds.push(h.grass({ p: { x: q.x, y: ground(h, q) + 0.06, z: q.z }, mass: G.masses[gi % G.masses.length] }));
   });
   h.ticks(60);
-  const rimY = (x: number): number => {
+  const rimY = (x: number, hz: number): number => {
     let top = -Infinity;
-    for (const zz of [z0 - 0.5, z0 - 0.75, z0 - 1.0, z1 + 0.5, z1 + 0.75, z1 + 1.0]) top = Math.max(top, h.w.terrain.heightAt(x, zz));
+    const zs = o.coverDugRim
+      ? [0.1, 0.35, 0.6, 0.85].flatMap((d) => [c.z - hz + PIT.bearer.overM - d, c.z + hz - PIT.bearer.overM + d]).filter((zz) => Math.abs(zz - c.z) <= hz)
+      : [z0 - 0.5, z0 - 0.75, z0 - 1.0, z1 + 0.5, z1 + 0.75, z1 + 1.0];
+    for (const zz of zs) top = Math.max(top, h.w.terrain.heightAt(x, zz));
     return top;
   };
   // The dirt piles lie out beyond the long sides (digPit's pileSides 'z'), and a pile heaped on a pile rolls: between
   // the staging (south-east) and the −z rim the player goes by the pit's +x end, never past them.
-  const southEast = { x: c.x + o.lengthX / 2 + 1.5, z: c.z - B.lengthM / 2 - PIT.rimM };
-  for (let i = 0; i < B.count; i++) {
-    const x = offVertex(h, { x: c.x - ((B.count - 1) * B.spacingM) / 2 + i * B.spacingM, z: c.z }).x;
+  const southEast = { x: c.x + o.lengthX / 2 + 1.5, z: c.z - maxHz - PIT.rimM };
+  for (let i = 0; i < count; i++) {
+    const x = offVertex(h, { x: bearerX(i), z: c.z }).x;
     route(h, [southEast]);
-    if (!bring(h, bearers[i], [southEast, { x, z: c.z - B.lengthM / 2 - PIT.rimM }])) throw new Error(`buildPit: bearer ${bearers[i]} broke on the way`);
-    h.must({ verb: 'place', target: 0, at: toCm({ x, y: rimY(x) + B.r + 0.05, z: c.z }), yaw: 0, pitch: 0 }, `lay bearer ${bearers[i]} at x ${x.toFixed(2)}`);
+    if (!bring(h, bearers[i], [southEast, { x, z: c.z - hzs[i] - PIT.rimM }])) throw new Error(`buildPit: bearer ${bearers[i]} broke on the way`);
+    h.must({ verb: 'place', target: 0, at: toCm({ x, y: rimY(x, hzs[i]) + PIT.bearer.r + 0.05, z: c.z }), yaw: 0, pitch: 0 }, `lay bearer ${bearers[i]} at x ${x.toFixed(2)}`);
   }
   h.ticks(60);
   // Each bundle across two neighbouring bearers as they lie now (a light 8-gon pole settles and rolls a little on a
@@ -660,7 +816,7 @@ export function furnishPit(
     let pick: { x: number; y: number } | null = null;
     for (let k = 0; k + 1 < at.length; k++) {
       if (at[k + 1].x - at[k].x > 0.65 || at[k + 1].x - at[k].x < 0.15) continue;
-      const m = { x: (at[k].x + at[k + 1].x) / 2, y: Math.max(at[k].y, at[k + 1].y) + B.r };
+      const m = { x: (at[k].x + at[k + 1].x) / 2, y: Math.max(at[k].y, at[k + 1].y) + PIT.bearer.r };
       if (Math.abs(m.x - q.x) > 0.15 || laid.some((l) => Math.abs(l.z - q.z) < 0.3 && Math.abs(l.x - m.x) < 0.77)) continue;
       if (!pick || Math.abs(m.x - q.x) < Math.abs(pick.x - q.x)) pick = m;
     }
@@ -672,7 +828,7 @@ export function furnishPit(
     if (!pairAt(q)) continue;
     const id = grassIds[next++];
     // To the +z rim round the pit's +x end, and back the same way (never across the pit).
-    const lane = B.lengthM / 2 + PIT.grassLaneM;
+    const lane = maxHz + PIT.grassLaneM;
     const corner = (z: number): XZ => ({ x: c.x + o.lengthX / 2 + 1.5, z });
     if (h.p.pos.z > c.z + o.widthZ / 2) route(h, [corner(c.z + lane), corner(c.z - lane)]);
     else route(h, [corner(c.z - lane)]);
@@ -682,7 +838,8 @@ export function furnishPit(
     const gx = offVertex(h, { x: pick.x, z: q.z });
     // From the lane, or (out of reach: the berm there stood him higher or further off) a step nearer the bearers' ends.
     let placed: string | null = 'outOfReach';
-    for (const d of [lane, lane - 0.25]) {
+    const near = o.coverDugRim ? hzNear(gx.x).max + PIT.grassLaneM : lane;
+    for (const d of [near, near - 0.25]) {
       if (!bring(h, id, [{ x: gx.x, z: c.z + side * d }])) break;
       const r = h.verb({ verb: 'place', target: 0, at: toCm({ x: gx.x, y: pick.y + 0.07, z: gx.z }), yaw: 64, pitch: 0 });
       placed = r.ok ? null : r.reason;
@@ -693,7 +850,7 @@ export function furnishPit(
     laid.push(gx);
     laidIds.push(id);
   }
-  if (h.p.pos.z > c.z + o.widthZ / 2) route(h, [{ x: c.x + o.lengthX / 2 + 1.5, z: c.z + B.lengthM / 2 + PIT.grassLaneM }, { x: c.x + o.lengthX / 2 + 1.5, z: c.z - B.lengthM / 2 - PIT.grassLaneM }]);
+  if (h.p.pos.z > c.z + o.widthZ / 2) route(h, [{ x: c.x + o.lengthX / 2 + 1.5, z: c.z + maxHz + PIT.grassLaneM }, { x: c.x + o.lengthX / 2 + 1.5, z: c.z - maxHz - PIT.grassLaneM }]);
   if (laidIds.length < o.grass.minCount) throw new Error(`buildPit: only ${laidIds.length} of ${grassIds.length} grass bundles laid on two bearers`);
   h.ticks(120);
   return { cover: [...bearers, ...laidIds], stakes };

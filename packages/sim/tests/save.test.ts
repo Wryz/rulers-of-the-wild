@@ -531,6 +531,8 @@ const INVENTORY: Record<string, Record<string, string>> = {
     snapshot: 'not saved: a cache of sorted',
     removedGen: 'saved: removed',
     queue: 'saved: impulses',
+    forces: 'not saved: P28, the sustained code forces of this tick\'s phase 4d, queued and applied in the same 4d (EntityStore.queueForce), never pending between ticks',
+    forced: 'not saved: P28, the bodies forced this tick, reset right after the step (EntityStore.resetForces), empty between ticks',
     applied: 'not saved: PHYSICS_TUNING values last applied (tuningOverrides)',
   },
   EntityRuntime: {
@@ -1394,7 +1396,7 @@ describe('save → load → save', () => {
     // A continuous verb as P16's pull would leave it (hand-made, as P14's own test does), its command's keys out of order.
     const cmd = { charge: 255, verb: 'pull', kind: 'verb', target: ids.coil, player: 1, tick: 5 } as VerbCommand;
     const grip = { x: 0.5, y: 0, z: 0.1 };
-    w.verbs.restoreRecord([{ fighter: 1, focus: { target: ids.log, at: null }, cont: { verb: 'pull', cmd, ticks: 7, data: [['strokes', 2], ['yank', 3]] }, tug: { entity: ids.log, grip } }]);
+    w.verbs.restoreRecord([{ fighter: 1, focus: { target: ids.log, at: null }, cont: { verb: 'pull', cmd, ticks: 7, data: [['strokes', 2], ['yank', 3]] }, tug: { entity: ids.log, grip, holdM: 0.5 } }]);
     const a = serializeWorld(w);
     const rec = (parsed(a) as unknown as SaveV1).verbs;
     expect(rec).toHaveLength(1);
@@ -1960,7 +1962,7 @@ describe('broken saves', () => {
     refuse(rec({ cont: pull({}, { verb: 'cut' }) }), 'save record: verbs[0].cont.cmd.verb is "cut", not the continuous verb "pull"');
     refuse(rec({ cont: pull({ data: [['yank', 3], ['a', 1]] }) }), 'save record: verbs[0].cont.data[1][0] is "a", not a key after the one before it');
     refuse(rec({ fighter: 7 }), "save record: verbs[0] names fighter 7, who isn't among the fighters");
-    refuse(rec({ tug: { entity: 999, grip: { x: 0, y: 0, z: 0 } } }), 'save record: verbs[0].tug.entity names entity 999, which is not below counters.entity');
+    refuse(rec({ tug: { entity: 999, grip: { x: 0, y: 0, z: 0 }, holdM: 0.5 } }), 'save record: verbs[0].tug.entity names entity 999, which is not below counters.entity');
     refuse(
       (s) =>
         (s.verbs = [

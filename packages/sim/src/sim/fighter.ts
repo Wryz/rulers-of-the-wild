@@ -61,8 +61,9 @@ import type {
 import { bladeFrame, gripSlide, heft, sampleOffsets, SECOND_HAND, WEAPON_MOVES, WEAPONS, type WeaponDef, type WeaponId, weaponTempo, type Wound } from './weapons';
 import { bodyCapsules, type Capsule, closestOnSegment } from './bodyShapes';
 import type { Drop, HurtZone } from './combat';
-import { cloneCommand, type VerbCommand, type VerbId } from './commands';
+import { cloneCommand, MOVE_CROUCH, type VerbCommand, type VerbId } from './commands';
 import { getTuningValue } from '../tuning/registry';
+import { SPECIES_BODY } from './species';
 
 export interface FighterStyle {
   footwork: FootworkStyle;
@@ -365,9 +366,17 @@ export class Fighter {
    * ramped out first, by 1/CHARACTER_TUNING.postureRampFrames of full weight a tick, so a posture set or cleared at once
    * (the hands' carry and drag, a mind's sniff) never jumps the pose: a jump moves the head up to 0.2 m in one tick, a
    * 12 m/s self-motion contact (§4.3). Saved (FighterRecord.postureShown). DEVIATION (§1.5.3 and §8.3's FighterRecV1
-   * list no such field): the ramp has to survive a load.
+   * list no such field): the ramp has to survive a load. P28: between two low postures (root height ≤
+   * CHARACTER_TUNING.lowPostureRootM, e.g. the crouch and workLow) the asked one is cross-faded in over the one shown,
+   * which is kept in `from` until the new one is in full: the body never rises to standing height on the way.
    */
-  private postureShown: Posture | null = null;
+  private postureShown: ShownPosture | null = null;
+  /**
+   * P28: a world point a free walker faces while it walks (a creature backing off with what it hauls, §6.6 `tug`):
+   * written by its mind in phase 3 (think) and cleared at the start of every stepBody, so it is never state between
+   * ticks (not saved).
+   */
+  faceAt: { x: number; z: number } | null = null;
   /**
    * A world point the near hand reaches for over the posture, as far as the arm allows: the grip of a dragged load.
    * Written by the world in every phase 3 before updatePose (CharacterControllers.resolve); null without one. Not
@@ -448,6 +457,17 @@ export class Fighter {
 
   get forward(): Vector3 {
     return new Vector3(Math.sin(this.yaw), 0, Math.cos(this.yaw));
+  }
+
+  /**
+   * P28: the half-side of the sole a ruler's feet plant with (its footwork looks under the whole footprint: a giant's
+   * foot across a pit cover's bearers stands on them, and its foot load reaches them, §4.11): the D-39 footprint ×
+   * RULER_BODY_TUNING.footProbeFrac. 0 for anyone else (a point, as before).
+   */
+  get soleM(): number {
+    if (!this.ruler) return 0;
+    const frac = getTuningValue('RULER_BODY_TUNING', 'footProbeFrac');
+    return (SPECIES_BODY[this.species ?? 'giantApe']?.footRadiusM ?? 0) * this.scale * (typeof frac === 'number' ? frac : 0);
   }
 
   /** Frames remaining until the current attack becomes active (negative once active). */
@@ -1061,18 +1081,29 @@ export class Fighter {
    * setters' to replace).
    */
   private rampPosture(): void {
-    const want = this.posture && this.posture.weight > 0 ? this.posture : null;
-    const shown = this.postureShown;
+    // P28 fix (§5.5 "Crouch: … posture `crouch`"): crouch held (MOVE_CROUCH) with no other posture asked shows the
+    // `crouch` posture. Before, crouching lowered only the controller (§4.2) and the body stood at full height above
+    // it: a crouched ape's head was 1.93 m up in a 1.39 m capsule, and touched the deadfall log it was routed under.
+    const want = this.posture && this.posture.weight > 0 ? this.posture : (this.moveFlags & MOVE_CROUCH) !== 0 ? CROUCHED : null;
+    let shown = this.postureShown;
     if (!want && !shown) return;
     const step = 1 / Math.max(1, characterTuning('postureRampFrames'));
+    // P28: low to low (the crouch to workLow, a stoop to a crouch) is a cross-fade, never a rise through standing:
+    // the shown posture is kept as `from` while the asked one ramps in over it.
+    if (shown && want && shown.id !== want.id && !shown.from && want.weight >= 1 && isLowPosture(shown.id) && isLowPosture(want.id)) {
+      shown = { id: want.id, weight: 0, from: { id: shown.id, weight: shown.weight } };
+    }
     if (shown && shown.id !== want?.id) {
       const w = shown.weight - step;
-      this.postureShown = w > 0 ? { id: shown.id, weight: w } : null;
+      // Ramped out over a cross-fade's `from`: that one is shown again, as it was, and goes on from there.
+      this.postureShown = w > 0 ? { ...shown, weight: w } : (shown.from ?? null);
       return;
     }
     const cur = shown?.weight ?? 0;
     const to = want!.weight;
-    this.postureShown = { id: want!.id, weight: to > cur ? Math.min(to, cur + step) : Math.max(to, cur - step) };
+    const weight = to > cur ? Math.min(to, cur + step) : Math.max(to, cur - step);
+    // The cross-fade ends once the asked posture is in full.
+    this.postureShown = shown?.from && weight < 1 ? { id: want!.id, weight, from: shown.from } : { id: want!.id, weight };
   }
 
   /**
@@ -1083,25 +1114,19 @@ export class Fighter {
    */
   private applyPosture(spec: PoseSpec): void {
     const shown = this.postureShown;
-    if (!shown || !(shown.weight > 0)) return;
-    const k = Math.min(1, shown.weight);
-    const P: PoseSpec = POSE_SPECS[shown.id];
-    const mix = (a: V3, b: V3): V3 => [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k];
-    const r = spec.root ?? [0, GUARD.root![1], 0];
-    const pr = P.root ?? GUARD.root!;
-    const gr = GUARD.root!;
-    spec.root = [r[0] + (pr[0] - gr[0]) * k, r[1] + (pr[1] - gr[1]) * k, r[2] + (pr[2] - gr[2]) * k];
-    for (const b of ['pelvis', 'abdomen', 'chest', 'head'] as const) spec[b] = mix(spec[b] ?? [0, 0, 0], P[b] ?? [0, 0, 0]);
-    for (const h of ['handL', 'handR'] as const) {
-      const a = spec[h];
-      const t = P[h];
-      if (!a || !t) continue;
-      const side = h === 'handL' ? 1 : -1;
-      const hint: V3 = [side * 0.35, -1, 0];
-      spec[h] = { at: mix(a.at, t.at), hint: mix(a.hint ?? hint, t.hint ?? hint) };
+    if (!shown) return;
+    const k = Math.min(1, Math.max(0, shown.weight));
+    // A cross-fade (P28): the posture fading out at its weight, then the one fading in over it by k (its hips' offset
+    // shared out between the two, so they sum to a straight blend and never pass the guard's height).
+    if (shown.from) {
+      const f = Math.min(1, Math.max(0, shown.from.weight));
+      blendPosture(spec, shown.from.id, f, f * (1 - k));
     }
+    if (k > 0) blendPosture(spec, shown.id, k, k);
     const reach = this.reachAt;
-    if (reach) {
+    const kr = Math.max(k, shown.from ? Math.min(1, shown.from.weight) : 0);
+    if (reach && kr > 0) {
+      const mix = (a: V3, b: V3): V3 => [a[0] + (b[0] - a[0]) * kr, a[1] + (b[1] - a[1]) * kr, a[2] + (b[2] - a[2]) * kr];
       // Fighter-local, unscaled: (reach − pos) turned by −yaw, ÷ scale (+x is the left).
       const dx = reach.x - this.pos.x;
       const dz = reach.z - this.pos.z;
@@ -1517,7 +1542,7 @@ export class Fighter {
       load: this.load ? { massKg: this.load.massKg, mode: this.load.mode } : null,
       drive: this.drive ? { heading: this.drive.heading, speed: this.drive.speed, accel: this.drive.accel, climb: this.drive.climb } : null,
       posture: this.posture ? { id: this.posture.id, weight: this.posture.weight } : null,
-      postureShown: this.postureShown ? { id: this.postureShown.id, weight: this.postureShown.weight } : null,
+      postureShown: this.postureShown ? shownRecord(this.postureShown) : null,
       work: w
         ? { kind: w.kind, frames: w.frames, actAt: w.actAt, faceAt: v3Record(w.faceAt), keys: w.keys.map(trackKeyToRecord), cmd: w.cmd ? cloneCommand(w.cmd) : null }
         : null,
@@ -1665,8 +1690,13 @@ export class Fighter {
     const dr = r.drive;
     this.drive = dr ? { heading: n(dr.heading, 'drive.heading'), speed: n(dr.speed, 'drive.speed'), accel: n(dr.accel, 'drive.accel'), climb: b(dr.climb, 'drive.climb') } : null;
     this.posture = r.posture ? { id: enumFromRecord(r.posture.id, POSTURES, 'posture.id'), weight: n(r.posture.weight, 'posture.weight') } : null;
-    this.postureShown = r.postureShown
-      ? { id: enumFromRecord(r.postureShown.id, POSTURES, 'postureShown.id'), weight: n(r.postureShown.weight, 'postureShown.weight') }
+    const ps = r.postureShown;
+    this.postureShown = ps
+      ? {
+          id: enumFromRecord(ps.id, POSTURES, 'postureShown.id'),
+          weight: n(ps.weight, 'postureShown.weight'),
+          ...(ps.from ? { from: { id: enumFromRecord(ps.from.id, POSTURES, 'postureShown.from.id'), weight: n(ps.from.weight, 'postureShown.from.weight') } } : {}),
+        }
       : null;
     this.work = r.work ? workFromRecord(r.work) : null;
     // (A command is checked by the verb system when it is used, as every command is: §5.0.)
@@ -1786,11 +1816,50 @@ const _com = new Vector3();
 /** m/s². */
 export const GRAVITY = 9.81;
 
+/** A shown posture; `from` is a low posture being cross-faded out under it (rampPosture, P28). */
+export type ShownPosture = Posture & { from?: Posture };
+
+function shownRecord(p: ShownPosture): ShownPosture {
+  return p.from ? { id: p.id, weight: p.weight, from: { id: p.from.id, weight: p.from.weight } } : { id: p.id, weight: p.weight };
+}
+
+/** A low posture (its root at most CHARACTER_TUNING.lowPostureRootM up, unscaled): low to low is a cross-fade (P28). */
+function isLowPosture(id: Posture['id']): boolean {
+  const root = POSE_SPECS[id].root ?? GUARD.root!;
+  return root[1] <= characterTuning('lowPostureRootM');
+}
+
+/**
+ * Posture `id` over the spec by k (§1.5.3): the spine's angles and the hands' targets toward the posture's by k, the
+ * hips raised or lowered (and shifted) by the posture's root against the guard's by `rootK`, the feet left to the
+ * footwork (so the legs keep walking under it).
+ */
+function blendPosture(spec: PoseSpec, id: Posture['id'], k: number, rootK: number): void {
+  const P: PoseSpec = POSE_SPECS[id];
+  const mix = (a: V3, b: V3): V3 => [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k];
+  const r = spec.root ?? [0, GUARD.root![1], 0];
+  const pr = P.root ?? GUARD.root!;
+  const gr = GUARD.root!;
+  spec.root = [r[0] + (pr[0] - gr[0]) * rootK, r[1] + (pr[1] - gr[1]) * rootK, r[2] + (pr[2] - gr[2]) * rootK];
+  for (const b of ['pelvis', 'abdomen', 'chest', 'head'] as const) spec[b] = mix(spec[b] ?? [0, 0, 0], P[b] ?? [0, 0, 0]);
+  for (const h of ['handL', 'handR'] as const) {
+    const a = spec[h];
+    const t = P[h];
+    if (!a || !t) continue;
+    const side = h === 'handL' ? 1 : -1;
+    const hint: V3 = [side * 0.35, -1, 0];
+    spec[h] = { at: mix(a.at, t.at), hint: mix(a.hint ?? hint, t.hint ?? hint) };
+  }
+}
+
+/** The posture crouch shows when nothing else is asked (rampPosture, §5.5). */
+const CROUCHED: Readonly<Posture> = Object.freeze({ id: 'crouch', weight: 1 });
+
 /**
  * A CHARACTER_TUNING value (world/characters.ts, P08), read through the registry by name at use time: the body's
  * posture ramp and work-bend limit are world mode's (a fighter on a world's ground), and the sim imports no world module.
  */
-function characterTuning(key: 'postureRampFrames' | 'workHeadSpeedMps' | 'workRiseMargin'): number {
+function characterTuning(key: 'postureRampFrames' | 'workHeadSpeedMps' | 'workRiseMargin' | 'lowPostureRootM'): number {
   const v = getTuningValue('CHARACTER_TUNING', key);
   if (typeof v !== 'number') throw new Error(`CHARACTER_TUNING.${key} is not a number`);
   return v;
@@ -2101,8 +2170,8 @@ export type FighterRecord = {
   load: { massKg: number; mode: 'carry' | 'drag' | 'rope' } | null;
   drive: Drive | null;
   posture: Posture | null;
-  /** The posture as shown (ramped toward `posture`, §1.5.3). */
-  postureShown: Posture | null;
+  /** The posture as shown (ramped toward `posture`, §1.5.3); `from` while a low posture is cross-faded out (P28). */
+  postureShown: ShownPosture | null;
   work: { kind: Work['kind']; frames: number; actAt: number; faceAt: WorldV3; keys: TrackKeyRecord[]; cmd: VerbCommand | null } | null;
   verbRequest: { cmd: VerbCommand; frames: number } | null;
   verbAim: WorldV3 | null;

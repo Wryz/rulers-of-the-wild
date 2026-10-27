@@ -521,6 +521,8 @@ export class JointStore implements TripwireSink {
     const j = this.byId.get(joint);
     if (!j || j.kind !== 'rope' || !j.rope) return;
     if (isFree(j.a) || isFree(j.b)) return;
+    // P28: an end held through its entity (in someone's hands, or a creature's tug) is held too (§4.9 "not held").
+    if (endEntityHeld(w, j)) return;
     const ends = this.endPoints(j);
     if (!ends) return;
     let M: number;
@@ -1195,7 +1197,8 @@ export class JointStore implements TripwireSink {
       const com = b.worldCom();
       const va = dot(add(copy3(lv), cross(copy3(av), sub(A, copy3(com)))), u);
       const F = j.pullN * clamp01((V.pullHandSpeedMps - va) / V.haulRampMps);
-      if (F > 0) w.entities.queueImpulse(e.id, scale(u, F * DT), A);
+      // P28: a hauled rope's pull is a sustained force (EntityStore.queueForce).
+      if (F > 0) w.entities.queueForce(e.id, scale(u, F), A);
       return;
     }
     if (e.plant?.phase === 'notched') {
@@ -1570,6 +1573,23 @@ function leastSquares(cols: readonly (readonly number[])[], b: readonly number[]
 const UP: Readonly<V3> = Object.freeze({ x: 0, y: 1, z: 0 });
 
 const isFree = (a: Anchor): boolean => a.fighter !== undefined || a.loose === true;
+
+/**
+ * P28 fix (§4.9: a tripwire is a rope whose both ends are attached, "not loose, not held"): whether an end entity of `j`
+ * is held: in a fighter's hands (held or dragged) or hauled by a creature's tug. Before, only a rope end gripped itself
+ * (an anchor on a fighter) counted, so the deadfall's bait, lashed to the prop and in the tugging ape's grip, made its
+ * lash a tripwire the falling log crossed; a rope whose end is in someone's grip is pulled along, it trips nothing.
+ */
+function endEntityHeld(w: World, j: JointRecord): boolean {
+  const a = j.a.entity;
+  const b = j.b.entity;
+  for (const f of w.combat.fighters) {
+    const h = f.inventory?.hands?.entity ?? null;
+    const t = w.verbs.tugTarget(f);
+    for (const e of [h, t]) if (e !== null && (e === a || e === b)) return true;
+  }
+  return false;
+}
 
 /** The end a fighter's hand holds, or null. */
 function heldEndOf(j: JointRecord): 'a' | 'b' | null {

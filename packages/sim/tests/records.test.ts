@@ -591,6 +591,7 @@ const FIGHTER_NOT_SAVED: Record<string, string> = {
   ruler: "the save's rulers (§8.3)",
   ground: 'the world, set again when the fighter joins a sim',
   reachAt: "written by the world's controller in every phase 3 before updatePose reads it (core-fix: a dragged grip)",
+  faceAt: "P28: cleared at the start of every stepBody, written by a mind's think and read by updateFacing in that tick",
 };
 
 const ANIMATOR_KEYS = ['snapshot', 'keys', 'mode', 'fadeLen', 'procT'];

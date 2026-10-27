@@ -842,11 +842,15 @@ describe('pull (§5.12): reel in, then the yank, then the steady haul', () => {
     // Pulled for 5 s. (The gate pulls 8 s, but at pullStaminaPerS with no rest regen a fresh hauler is spent at 6.7 s and
     // then pulls 300 N: the log sags to 27° by 8 s, and a tie made while he is spent lands mid-swing. Tied off while he can
     // still pull, it holds.)
+    // P28 fifth pass (C F3 departure: the haul is an in-solver force): pulled 5.5 s, not 5 s. The haul now carries the
+    // log to 47.6° by 5 s (it peaks 49.6°, the lab's 38-52°), past the angle 500 N holds, so it swings back while the tie
+    // is made (1 s), and the tie landed at 36° with the log running out at 1.9 m/s: the vine snapped. Tied 0.5 s later
+    // (still pulling: 6.5 s < 6.7 s) it lands as the log comes back in (P28 lab: 4.5 s and 5 s snap, 5.5 s and 6 s hold).
     verb(w, { verb: 'pull', target: 0, charge: 255 });
     let peak = 0;
     let yanks = 0;
     let moved = 0;
-    const hauled = run(w, 300, () => {
+    const hauled = run(w, 330, () => {
       peak = Math.max(peak, swingDeg(ent(w, log), 8));
       moved = Math.max(moved, Math.abs(p.pos.x - -8.4));
       if (joint(w, j).pullN === VERB_TUNING.pullYankN) yanks++;

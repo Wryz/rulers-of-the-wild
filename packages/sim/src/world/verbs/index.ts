@@ -24,6 +24,7 @@ import type { World } from '../world';
 import { dragGrip, dragImpulse, forcedRelease, letGo as letGoHands, type LetGo, putInHands as putIn, refreshHands as refresh, syncHands, tetherHands, tetherTo } from './hands';
 import { chestPoint, checkVerb, cmdPoint, type ContinuousState, registerVerb, ropeNearest, targetDistance, verbEvent, verbHandler, type WorkSpec } from './targets';
 import { verbGeom } from './tools';
+import { DT } from '../../sim/math';
 import { VERB_TUNING } from './tuning';
 // The verb modules register their handlers when they load (targets.ts): importing them here registers every verb a
 // World can run.
@@ -46,8 +47,11 @@ interface FighterVerbs {
   focus: { target: number; at: V3 | null } | null;
   /** A continuous verb that is on (pull, shape, hand-dig). */
   cont: ContinuousState | null;
-  /** A creature's tug (§6.6): the entity it hauls with the drag code at creature strength, and its grip (entity frame). */
-  tug: { entity: number; grip: V3 } | null;
+  /**
+   * A creature's tug (§6.6): the entity it hauls with the drag code at creature strength, its grip (entity frame), and
+   * how far in front of the hand it holds it (P28: the grip's distance when taken, at most dragHandOffsetM × scale).
+   */
+  tug: { entity: number; grip: V3; holdM: number } | null;
 }
 
 /** The verb system's save record, one per fighter with state (§8.3: `verbs`, by fighter id). */
@@ -56,7 +60,7 @@ export interface VerbStateRecord extends VerbStateRecV1 {
   focus: { target: number; at: V3 | null } | null;
   /** `data` as [key, value] pairs sorted by key. */
   cont: { verb: VerbId; cmd: VerbCommand; ticks: number; data: [string, number][] } | null;
-  tug: { entity: number; grip: V3 } | null;
+  tug: { entity: number; grip: V3; holdM: number } | null;
 }
 
 const isDown = (f: Fighter): boolean => f.state === 'knockdown' || f.state === 'ko' || f.state === 'tripped';
@@ -195,11 +199,18 @@ export class VerbSystem {
       const h = f.inventory?.hands;
       if (h?.mode === 'drag') {
         const imp = dragImpulse(w, f, h.entity, h.grip, t.dragForceN);
-        if (imp) w.entities.queueImpulse(h.entity, imp.j, imp.at);
+        // P28: a drag is a sustained force (EntityStore.queueForce), the impulse's j / DT.
+        if (imp) w.entities.queueForce(h.entity, { x: imp.j.x / DT, y: imp.j.y / DT, z: imp.j.z / DT }, imp.at);
       }
       if (s?.tug) {
-        const imp = dragImpulse(w, f, s.tug.entity, s.tug.grip, t.pullForceN * t.creaturePullMul * f.scale * f.scale);
-        if (imp) w.entities.queueImpulse(s.tug.entity, imp.j, imp.at);
+        // P28: the arms draw the grip's set point in at the creature's hand speed (§6.6 "hand ≤ 0.8 m/s"), to
+        // tugHoldMinM × scale from the hand (past it: < 0), while the feet back off only as fast as the load comes
+        // (CreatureMind's tug): the pull builds to full strength in ≈ 0.4 s on a load that holds, whatever the creature's
+        // feet do (the drag's PD, its stiffness held to a light load's mass, reached 907.5 N on the 1 kg bait only
+        // ≈ 0.34 m past it; with the set point stopped near the hand, the deadfall's bait on its lash got ≈ 500 N).
+        s.tug.holdM = Math.max(t.tugHoldMinM * f.scale, s.tug.holdM - t.creatureHandSpeedMps * DT);
+        const imp = dragImpulse(w, f, s.tug.entity, s.tug.grip, t.pullForceN * t.creaturePullMul * f.scale * f.scale, s.tug.holdM);
+        if (imp) w.entities.queueForce(s.tug.entity, { x: imp.j.x / DT, y: imp.j.y / DT, z: imp.j.z / DT }, imp.at);
       }
       const c = s?.cont;
       if (c) {
@@ -240,6 +251,11 @@ export class VerbSystem {
    * What the fighter is working on (§4.9's tripwire exemption): its work action's target while in 'pickup', else the
    * entity it tugs; null otherwise.
    */
+  /** The entity a creature's tug hauls (§6.6), or null. */
+  tugTarget(f: Fighter): number | null {
+    return this.byFighter.get(f.id)?.tug?.entity ?? null;
+  }
+
   workTarget(f: Fighter): number | null {
     const t = f.state === 'pickup' ? f.work?.cmd?.target : undefined;
     if (t && t > 0) return t;
@@ -287,7 +303,12 @@ export class VerbSystem {
       return;
     }
     const near = e.collider ? this.world.queries.projectPoint(entity, chestPoint(f)).point : null;
-    s.tug = { entity, grip: near ? verbGeom.pointToLocal(e.pose, near) : dragGrip(this.world, f, entity) };
+    const grip = near ? verbGeom.pointToLocal(e.pose, near) : dragGrip(this.world, f, entity);
+    // P28 fix: held where it was gripped (never further than the drag's hand offset). With the drag's fixed 0.8 m, a
+    // bait gripped 0.45 m from the ape was first shoved 0.35 m away from it, into the deadfall's prop.
+    const gw = verbGeom.pointToWorld(e.pose, grip);
+    const holdM = Math.min(VERB_TUNING.dragHandOffsetM * f.scale, Math.hypot(gw.x - f.pos.x, gw.z - f.pos.z));
+    s.tug = { entity, grip, holdM };
   }
 
   // -------------------------------------------------------------------------
@@ -315,7 +336,7 @@ export class VerbSystem {
                 .map((k): [string, number] => [k, s.cont!.data[k]]),
             }
           : null,
-        tug: s.tug ? { entity: s.tug.entity, grip: copy3(s.tug.grip) } : null,
+        tug: s.tug ? { entity: s.tug.entity, grip: copy3(s.tug.grip), holdM: s.tug.holdM } : null,
       });
     }
     return out;
@@ -338,7 +359,7 @@ export class VerbSystem {
       this.byFighter.set(fighter, {
         focus: focus ? { target: focus.target, at: focus.at ? copy3(focus.at) : null } : null,
         cont: cont ? { verb: cont.verb, cmd: cloneCommand(cont.cmd), ticks: cont.ticks, data: Object.fromEntries(cont.data.map(([k, v]) => [k, v])) } : null,
-        tug: tug ? { entity: tug.entity, grip: copy3(tug.grip) } : null,
+        tug: tug ? { entity: tug.entity, grip: copy3(tug.grip), holdM: tug.holdM } : null,
       });
     }
   }

@@ -42,7 +42,7 @@ import { Loads } from './loads';
 import { NavSystem, NavWalkable } from './nav';
 import { isPhysicsReady, PHYSICS_TUNING, PhysicsWorld, physicsReady } from './physics';
 import { WorldQueries } from './queries';
-import { RulerBodies } from './rulerBody';
+import { RULER_BODY_TUNING, RulerBodies, steadyGround } from './rulerBody';
 import { WorldRngs } from './rngs';
 import { Terrain } from './terrain';
 import type { Finish, FighterMover, GroundQuery, ProjectileWorldHit, WorldEvent, WorldPort, WorldStrike } from './types';
@@ -210,7 +210,7 @@ export class World implements WorldPort {
     const terrain = this.terrain;
     this.ground = {
       heightAt: (x, z) => terrain.heightAt(x, z),
-      supportAt: (x, z, fromY) => this.supportAt(x, z, fromY),
+      supportAt: (x, z, fromY, soleM) => this.supportAt(x, z, fromY, soleM ? { soleM } : undefined),
     };
 
     // The seams (§1.5.2): set before any fighter is added, so every fighter gets the ground.
@@ -283,7 +283,7 @@ export class World implements WorldPort {
     this.zones.pose(this); // 4b
     this.verbs.syncHeld(this);
     this.rulers.preStep(this); // 4c
-    this.kcc.applyPushes(); // 4d: code forces as impulses, in this order
+    this.kcc.applyPushes(); // 4d: code forces (sustained ones as forces, P28; hits as impulses), in this order
     this.rulers.applyShoves();
     this.verbs.codeForces(this);
     this.joints.applyHeldEnds(this);
@@ -295,6 +295,8 @@ export class World implements WorldPort {
     // 6 (reserved: M2 buoyancy and drag)
     // 7 (SPEC:701)
     this.physics.step();
+    // P28: the sustained code forces of 4d acted in this step only (C F3 departure, EntityStore.queueForce).
+    this.entities.resetForces();
     // 8
     this.physics.snapshotPostStep();
     const pairs = this.physics.drain();
@@ -416,12 +418,32 @@ export class World implements WorldPort {
    * taller entities are obstacles, never ground); `excludeEntities` leaves entities out (a cover that just broke and its
    * pieces, §4.7 step 8). Like every query it sees entities as of the last physics step.
    */
-  supportAt(x: number, z: number, fromY: number, o?: { maxAboveTerrainM?: number; excludeEntities?: readonly number[] }): number {
+  supportAt(x: number, z: number, fromY: number, o?: { maxAboveTerrainM?: number; excludeEntities?: readonly number[]; soleM?: number }): number {
     const ground = this.terrain.heightAt(x, z);
     const top = fromY + WORLD_TUNING.supportReachM;
     if (!(top > ground)) return ground;
     const exclude = [...(o?.excludeEntities ?? [])];
     const maxAbove = o?.maxAboveTerrainM ?? Infinity;
+    // P28: a sole (half-side soleM) looks under its whole footprint: a flat box cast down onto the entities, the first
+    // support it meets (resting, or holding up a ruler now, RulerBodies.holdsUp); the terrain stays the centre's.
+    const sole = o?.soleM ?? 0;
+    if (sole > 0) {
+      const ex = [...exclude];
+      for (let k = 0; k < 64; k++) {
+        const hit = this.queries.castShape({ kind: 'box', hx: sole, hy: RULER_BODY_TUNING.soleProbeHalfM, hz: sole }, { p: { x, y: top, z }, q: { x: 0, y: 0, z: 0, w: 1 } }, { x: 0, y: -1, z: 0 }, top - ground, {
+          terrain: false,
+          entities: 'all',
+          exclude: { entities: ex },
+        });
+        if (!hit || hit.owner.kind !== 'entity') break;
+        const id = hit.owner.id;
+        const e = this.entities.get(id);
+        const y = top - hit.toi - RULER_BODY_TUNING.soleProbeHalfM;
+        const resting = !!e && (e.state === 'fixed' || e.state === 'anchored' || e.restTicks >= PHYSICS_TUNING.restTicks || (e.body?.isSleeping() ?? false) || this.rulers.holdsUp(id) || steadyGround(e));
+        if (hit.toi > 0 && resting && y - ground <= maxAbove) return Math.max(ground, y);
+        ex.push(id);
+      }
+    }
     for (;;) {
       const hit = this.queries.castRay({ x, y: top, z }, { x: 0, y: -1, z: 0 }, top - ground, {
         terrain: false,

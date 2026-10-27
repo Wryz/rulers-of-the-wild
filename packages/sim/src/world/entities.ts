@@ -124,6 +124,10 @@ export class EntityStore {
   /** Generated ids no longer present. */
   private readonly removedGen = new Set<number>();
   private queue: QueuedImpulse[] = [];
+  /** P28: this phase 4d's sustained code forces (N), applied in entity id order and reset after the step. */
+  private forces: QueuedImpulse[] = [];
+  /** P28: the bodies forced this tick, reset by resetForces after phase 7. */
+  private forced: RAPIER.RigidBody[] = [];
   /** The PHYSICS_TUNING body values every dynamic body has (bodies made later read the table when they are made). */
   private applied: BodyTuning;
 
@@ -408,6 +412,32 @@ export class EntityStore {
     this.queue.push({ id, j: copyV3(j), at: at ? copyV3(at) : null });
   }
 
+  /**
+   * P28, DEPARTURE (C F3 "code forces are impulses, never addForce"): a sustained code force (a drag, a creature's tug, a
+   * hauled rope's pull, a controller leaning on a light body) of `f` newtons on entity `id` at the world point `at` (null:
+   * at the centre of mass), queued in phase 4d and added to the body before this tick's step, then reset after it
+   * (resetForces), so nothing persists or accumulates between ticks (C F3's concern). Rapier spends an impulse given
+   * before the step in its first substep, where a contact holds only a substep's share of friction, so a sustained load
+   * under the static threshold crept (a box pushed at 0.3 μN moved 6.7 mm in 3 s; a deadfall's prop sprang at 500 N
+   * where the C lab's held 762 N); a force is integrated in every substep. Instantaneous hits (strikes, impact
+   * reactions, tripwire shares, shoves) stay impulses (queueImpulse). Applied only to a dynamic, enabled body, as an
+   * impulse is; never pending between ticks (it is queued and applied in the same phase 4d), so nothing of it is saved.
+   */
+  queueForce(id: number, f: V3, at: V3 | null): void {
+    if (!this.byId.has(id)) throw new Error(`EntityStore.queueForce: no entity ${id}`);
+    if (!finiteV3(f) || (at !== null && !finiteV3(at))) throw new Error(`EntityStore.queueForce: a non-finite force or point for entity ${id}`);
+    this.forces.push({ id, j: copyV3(f), at: at ? copyV3(at) : null });
+  }
+
+  /** P28: phase 7's end: every force added this tick is taken off its body again (C F3: none persists). */
+  resetForces(): void {
+    for (const b of this.forced) {
+      b.resetForces(false);
+      b.resetTorques(false);
+    }
+    this.forced = [];
+  }
+
   /** Drop, throw, place: no contact between e and that fighter's bodies is scored until they have been apart 2 ticks. */
   release(e: Entity, byFighter: number): void {
     this.own(e, 'release');
@@ -439,6 +469,19 @@ export class EntityStore {
         rt.ccd = ccd;
       }
       if (rt.keepAwake) b.wakeUp();
+    }
+    // P28: this phase's sustained forces, in entity id order (queue order within one), added for this tick's step only.
+    if (this.forces.length > 0) {
+      const fq = this.forces;
+      this.forces = [];
+      fq.sort((a, b) => a.id - b.id);
+      for (const it of fq) {
+        const b = this.byId.get(it.id)?.body;
+        if (!b || !b.isEnabled() || !b.isDynamic()) continue;
+        if (it.at) b.addForceAtPoint(it.j, it.at, true);
+        else b.addForce(it.j, true);
+        this.forced.push(b);
+      }
     }
     if (this.queue.length === 0) return;
     const q = this.queue;

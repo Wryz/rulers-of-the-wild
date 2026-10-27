@@ -325,7 +325,7 @@ export function putInHands(w: World, f: Fighter, entity: number): boolean {
  * velocity, capped at `capN`; vertically a lift toward liftHandM above the feet, capped at dragLiftFrac of the held
  * object's weight. Null when the entity has no awake-able dynamic body.
  */
-export function dragImpulse(w: World, f: Fighter, entity: number, grip: V3, capN: number): { j: V3; at: V3 } | null {
+export function dragImpulse(w: World, f: Fighter, entity: number, grip: V3, capN: number, offsetM?: number): { j: V3; at: V3 } | null {
   const e = w.entities.get(entity);
   const b = e?.body;
   if (!e || !b || !b.isEnabled() || !b.isDynamic()) return null;
@@ -345,16 +345,27 @@ export function dragImpulse(w: World, f: Fighter, entity: number, grip: V3, capN
     ux = Math.sin(f.yaw);
     uz = Math.cos(f.yaw);
   }
-  const tx = hand.x - ux * t.dragHandOffsetM * s;
-  const tz = hand.z - uz * t.dragHandOffsetM * s;
-  let fx = t.dragKp * (tx - g.x) - t.dragKd * (gv.x - f.walkVel.x / 2);
-  let fz = t.dragKp * (tz - g.z) - t.dragKd * (gv.z - f.walkVel.z / 2);
+  // The point the grip is drawn to: dragHandOffsetM × scale in front of the hand, or a creature tug's own hold (P28).
+  const off = offsetM ?? t.dragHandOffsetM * s;
+  const tx = hand.x - ux * off;
+  const tz = hand.z - uz * off;
+  // P28 fix: the PD is applied as an explicit impulse, so it is stable only while kd·DT < 2m (and kp·DT² < m): with
+  // dragKd 300 a load under 5 kg (a creature's tug on a 1 kg bait, §11.2(a)) flipped its velocity every tick and grew
+  // until the cap, flinging the bait. The gains are held to the deadbeat limit of the load's mass (kd = m/DT kills the
+  // grip's relative velocity in one tick, kp = m/DT² closes its offset in one), which leaves every load ≥ 5 kg as it was.
+  // (P28, now a force over the step: held to dragDeadbeatFrac of those limits, as the rope and the ground act on the
+  // load in the same step: at the full limit a 1 kg bait on its lash flipped sideways every tick.)
+  const m = heldShape(w, entity).massKg;
+  const kp = Math.min(t.dragKp, (t.dragDeadbeatFrac * m) / (DT * DT));
+  const kd = Math.min(t.dragKd, (t.dragDeadbeatFrac * m) / DT);
+  let fx = kp * (tx - g.x) - kd * (gv.x - f.walkVel.x / 2);
+  let fz = kp * (tz - g.z) - kd * (gv.z - f.walkVel.z / 2);
   const fh = Math.hypot(fx, fz);
   if (fh > capN) {
     fx *= capN / fh;
     fz *= capN / fh;
   }
-  const weight = heldShape(w, entity).massKg * -WORLD_TUNING.gravityY;
+  const weight = m * -WORLD_TUNING.gravityY;
   const fy = Math.max(0, Math.min(t.dragLiftFrac * weight, t.liftKp * (hand.y - g.y) - t.liftKd * gv.y));
   return { j: { x: fx * DT, y: fy * DT, z: fz * DT }, at: g };
 }

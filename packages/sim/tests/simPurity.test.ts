@@ -1,5 +1,6 @@
 // The sim's purity (docs/M1-DESIGN.md §8.1, §13.0; package P05): nothing in packages/sim/src reads wall-clock time,
-// draws unseeded randomness, applies a persistent Rapier force (code forces are impulses, C F3) or snapshots the Rapier
+// draws unseeded randomness, applies a persistent Rapier force (code forces are impulses, C F3, except the sustained ones
+// world/entities.ts adds and resets every step, P28) or snapshots the Rapier
 // world (saves are records, §8.3), and nothing uses a Node API (the sim must move to a browser or a server unchanged).
 // Comments don't count: every source file is parsed with the TypeScript compiler and only code is checked.
 // Importing the index initialises neither Rapier nor recast (legacy tests pay only the module import).
@@ -34,6 +35,17 @@ const FORBIDDEN_NAMES = new Set([
   'Buffer',
   'require',
 ]);
+/**
+ * P28, DEPARTURE (C F3 "code forces are impulses, never addForce"): the one place a Rapier force may be added, for the
+ * sustained code forces (EntityStore.queueForce: drags, tugs, hauls, a controller's lean), added in phase 4d and reset
+ * after the step every tick (EntityStore.resetForces), so none persists. A pre-step impulse is spent in Rapier's first
+ * substep, where a contact holds only a substep's share of friction, and a sustained load under the static threshold
+ * crept (docs/work/ledger.md, P28 fifth pass). Only these names, only in this file, which must also reset them (below);
+ * addTorque and every other check stay as they were.
+ */
+const ALLOWED_FORCE_FILE = 'world/entities.ts';
+const ALLOWED_FORCE_NAMES = new Set(['addForce', 'addForceAtPoint']);
+
 /** Node built-in modules (also forbidden with the `node:` prefix). */
 const NODE_BUILTINS = new Set(['fs', 'path', 'os', 'url', 'util', 'crypto', 'child_process', 'worker_threads', 'module', 'events', 'stream', 'process', 'buffer', 'timers', 'perf_hooks', 'vm', 'http', 'https', 'net']);
 
@@ -52,7 +64,7 @@ function violations(file: string, text: string): string[] {
       if (FORBIDDEN_MEMBERS.has(`${obj}.${n.name.text}`)) at(n, `${obj}.${n.name.text}`);
       else if (ts.isIdentifier(n.expression) && FORBIDDEN_OBJECTS.has(obj)) at(n, `${obj}.${n.name.text}`);
     }
-    if (ts.isIdentifier(n) && FORBIDDEN_NAMES.has(n.text)) at(n, n.text);
+    if (ts.isIdentifier(n) && FORBIDDEN_NAMES.has(n.text) && !(file === ALLOWED_FORCE_FILE && ALLOWED_FORCE_NAMES.has(n.text))) at(n, n.text);
     if (ts.isNewExpression(n) && n.expression.getText(sf) === 'Date') at(n, 'new Date');
     if (ts.isCallExpression(n) && n.expression.getText(sf) === 'Date') at(n, 'Date()');
     if ((ts.isImportDeclaration(n) || ts.isExportDeclaration(n)) && n.moduleSpecifier && ts.isStringLiteral(n.moduleSpecifier) && moduleForbidden(n.moduleSpecifier.text)) {
@@ -85,6 +97,24 @@ describe('sim purity', () => {
     expect(files.length).toBeGreaterThan(40);
     const found = files.flatMap((f) => violations(relative(SRC, f), readFileSync(f, 'utf8')));
     expect(found).toEqual([]);
+  });
+
+  it('the force file adds forces only alongside their per-step reset (P28: the add-then-reset pattern)', () => {
+    const text = readFileSync(join(SRC, ALLOWED_FORCE_FILE), 'utf8');
+    const sf = ts.createSourceFile(ALLOWED_FORCE_FILE, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    const calls = new Set<string>();
+    const visit = (n: typescript.Node): void => {
+      if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression)) calls.add(n.expression.name.text);
+      ts.forEachChild(n, visit);
+    };
+    visit(sf);
+    expect(calls.has('addForce') || calls.has('addForceAtPoint')).toBe(true);
+    expect(calls.has('resetForces')).toBe(true);
+    expect(calls.has('resetTorques')).toBe(true);
+    // Allowed only there, and only those two: addTorque is still caught in it, and addForce anywhere else.
+    expect(violations(ALLOWED_FORCE_FILE, 'body.addTorque(t, true);').length).toBeGreaterThan(0);
+    expect(violations('world/joints.ts', 'body.addForce(f, true);').length).toBeGreaterThan(0);
+    expect(violations(ALLOWED_FORCE_FILE, 'body.addForceAtPoint(f, p, true);')).toEqual([]);
   });
 
   it('catches every forbidden form in code and ignores comments (the check is not vacuous)', () => {
