@@ -24,6 +24,7 @@ import type { World } from '../world';
 import { dragGrip, dragImpulse, forcedRelease, letGo as letGoHands, type LetGo, putInHands as putIn, refreshHands as refresh, syncHands, tetherHands, tetherTo } from './hands';
 import { chestPoint, checkVerb, cmdPoint, type ContinuousState, registerVerb, ropeNearest, targetDistance, verbEvent, verbHandler, type WorkSpec } from './targets';
 import { verbGeom } from './tools';
+import { DT } from '../../sim/math';
 import { VERB_TUNING } from './tuning';
 // The verb modules register their handlers when they load (targets.ts): importing them here registers every verb a
 // World can run.
@@ -201,6 +202,11 @@ export class VerbSystem {
         if (imp) w.entities.queueImpulse(h.entity, imp.j, imp.at);
       }
       if (s?.tug) {
+        // P28: the arms draw the grip in at the creature's hand speed (§6.6 "hand ≤ 0.8 m/s"), to tugHoldMinM × scale
+        // from the hand, while the feet back off: the pull builds to full strength in a fraction of a second whatever the
+        // load does, not only as far as the creature has walked back (the drag's PD reached 907.5 N ≈ 0.3 m past the
+        // taut rope, so an ape tugging a deadfall's bait backed in under the falling log first).
+        s.tug.holdM = Math.max(t.tugHoldMinM * f.scale, s.tug.holdM - t.creatureHandSpeedMps * DT);
         const imp = dragImpulse(w, f, s.tug.entity, s.tug.grip, t.pullForceN * t.creaturePullMul * f.scale * f.scale, s.tug.holdM);
         if (imp) w.entities.queueImpulse(s.tug.entity, imp.j, imp.at);
       }
@@ -243,6 +249,11 @@ export class VerbSystem {
    * What the fighter is working on (§4.9's tripwire exemption): its work action's target while in 'pickup', else the
    * entity it tugs; null otherwise.
    */
+  /** The entity a creature's tug hauls (§6.6), or null. */
+  tugTarget(f: Fighter): number | null {
+    return this.byFighter.get(f.id)?.tug?.entity ?? null;
+  }
+
   workTarget(f: Fighter): number | null {
     const t = f.state === 'pickup' ? f.work?.cmd?.target : undefined;
     if (t && t > 0) return t;

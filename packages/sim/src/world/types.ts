@@ -658,7 +658,11 @@ export type WorldEvent =
   | { type: 'deflect'; ruler: Fighter; along: V3 }
   /** Thud, dust, shake ∝ mass (SPEC:581). */
   | { type: 'land'; entity: number | null; f: Fighter | null; point: V3; energy: number; mass: number }
-  | { type: 'break'; entity: number; pieces: number[]; point: V3; energy: number }
+  /**
+   * `by` (P28): what delivered the break, the impact's other side (an entity, terrain, a fighter's zone or bone) or the
+   * loader of a load break (energy 0); null or absent when nothing is known (a break before P28's events).
+   */
+  | { type: 'break'; entity: number; pieces: number[]; point: V3; energy: number; by?: Owner | null }
   /**
    * SIM-fix3: a break Rapier failed (a WASM error making a piece, or releasing or removing the parent): `stage` says
    * where, `kept` whether the entity is still there (whole, integrity 1). A diagnostic for the harness and the dev panel.

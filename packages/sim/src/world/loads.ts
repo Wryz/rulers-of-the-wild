@@ -81,6 +81,8 @@ interface Foot {
   side: 'L' | 'R';
   at: V3;
   via: Set<number>;
+  /** N: the foot's whole load (P28: the share each support carried, for the ruler's lost-support rule). */
+  n: number;
 }
 
 export class Loads {
@@ -125,13 +127,14 @@ export class Loads {
       const planted = (['L', 'R'] as const).filter((s) => !f.footwork.foot(s).stepping);
       if (planted.length === 0) continue;
       const share = (f.mass * g) / planted.length;
-      const loader: Owner = { kind: 'fighter', id: f.id, part: f.ruler ? 'ruler' : 'zone' };
       for (const side of planted) {
+        // P28: the loader names the leg the foot ends (a break's source, `break.by`: the support a foot's load broke).
+        const loader: Owner = { kind: 'fighter', id: f.id, part: f.ruler ? 'ruler' : 'zone', bone: side === 'L' ? 'shinL' : 'shinR' };
         const fp = f.footwork.foot(side).pos;
         const at = { x: fp.x, y: fp.y, z: fp.z };
         const e = this.underFoot(w, f, at, loader);
         if (!e) continue;
-        const foot: Foot = { f, side, at, via: new Set() };
+        const foot: Foot = { f, side, at, via: new Set(), n: share };
         feet.push(foot);
         deliver(e, share, at, loader, foot, 0, new Set());
       }
@@ -141,6 +144,20 @@ export class Loads {
       if (!dynamicBody(e) || !resting(e)) continue;
       const com = e.body!.worldCom();
       deliver(e, e.mass * g, { x: com.x, y: com.y, z: com.z }, { kind: 'entity', id: e.id }, null, 0, new Set());
+    }
+
+    // P28 (§4.7 steps 7-8, the lost-support rule): each entity that carried a share of a ruler's planted foot joins its
+    // support set (RulerBodies.noteFootLoad): the coverings the load passed through, and what received it.
+    for (const foot of feet) {
+      if (!foot.f.ruler || !(foot.n > 0)) continue;
+      const carried = new Map<number, number>();
+      for (const id of foot.via) carried.set(id, 1);
+      for (const [id, shares] of received) {
+        let n = 0;
+        for (const sh of shares) if (sh.foot === foot) n += sh.n;
+        if (n > 0) carried.set(id, Math.max(carried.get(id) ?? 0, n / foot.n));
+      }
+      for (const id of [...carried.keys()].sort((a, b) => a - b)) w.rulers.noteFootLoad(foot.f, id, carried.get(id)!);
     }
 
     // Tested loads, the averages, load breaks (entity id order).

@@ -1260,8 +1260,8 @@ function rulerBody(v: unknown, p: string): RulerBodyRecV1 {
   if (history.length !== 0 && history.length !== 6 * BONES.length) fail(`${p}.history`, history.length, `0 or ${6 * BONES.length} numbers`);
   const supports = arr(o.supports, `${p}.supports`).map((x, i) => {
     const q = `${p}.supports[${i}]`;
-    const s = exactKeys(obj(x, q), ['entity', 'tick', 'credit'], q);
-    return { entity: pos(s.entity, `${q}.entity`), tick: int(s.tick, `${q}.tick`), credit: strs(s.credit, `${q}.credit`) };
+    const s = exactKeys(obj(x, q), ['entity', 'tick', 'credit'], q, ['at']);
+    return { entity: pos(s.entity, `${q}.entity`), tick: int(s.tick, `${q}.tick`), credit: strs(s.credit, `${q}.credit`), ...(s.at === undefined ? {} : { at: v3(s.at, `${q}.at`) }) };
   });
   supports.forEach((s, i) => {
     if (i > 0 && !(s.entity > supports[i - 1].entity)) fail(`${p}.supports[${i}].entity`, s.entity, 'an entity after the one before it (increasing, no repeats)');

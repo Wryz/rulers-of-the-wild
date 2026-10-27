@@ -26,7 +26,7 @@ import type { Fighter } from '../src/sim/fighter';
 import { getTuningValue, setTuningValue } from '../src/tuning/registry';
 import { RULER_BODY_TUNING } from '../src/world/rulerBody';
 import type { Quat, V3, WorldEvent } from '../src/world/types';
-import { buildHauledLog, buildLeaningLog, buildNotchedTree, lyingAlong } from './support/scenes';
+import { buildHauledLog, buildLeaningLog, buildNotchedTree, LEAN_P28, lyingAlong } from './support/scenes';
 import { BACK_SLOT, cachedScene, type Harness, loadHarness, makeHarness, SCENE_BUILD_TIMEOUT_MS, type XZ } from './support/worldHarness';
 
 /** §11: anything with Rapier gets 120 s. */
@@ -226,6 +226,17 @@ function holdTilt(h: Harness, r: { prop: number; log: number }): number {
   return tilt;
 }
 
+/**
+ * §11.2(a)'s staged deadfall geometry: a stick r 0.07 m `propLengthM` long placed upright at x = propX, a dry hex log
+ * `logLengthM` long (circumradius 0.17 m) from the ground at x = 0 onto its top (25°).
+ * DEPARTURE (P28, §11.2(a) staged steps 1-2 "2.38 m … x = 5.07 … 6.0 m"): the bait-tug runs use a 2.47 m stick at
+ * x 5.3 and a 6.2 m log (25° still): the underside over the ape 0.8 m in from the bait stands 0.1 m higher, so the log,
+ * once sprung, falls far enough to arrive at v_n ≥ 2 m/s (1.83-1.89 m/s on the design's). The walked run keeps the
+ * design's (STAGED_AS_DESIGNED).
+ */
+const STAGED_DEADFALL = { propX: 5.3, propLengthM: 2.47, logLengthM: 6.2 };
+const STAGED_AS_DESIGNED = { propX: 5.07, propLengthM: 2.38, logLengthM: 6 };
+
 describe('AC-2(a): a deadfall wounds the ape that disturbs it', () => {
   /** §11.2(a): the log rises along +x (yaw π/2) from its lower end at the origin: "toward its own body" is −x. */
   const TOWARD_BODY = -Math.PI / 2;
@@ -252,7 +263,7 @@ describe('AC-2(a): a deadfall wounds the ape that disturbs it', () => {
    */
   it('verb-only gate (§11.2(a) as written): the 40 kg log leaned on a free prop holds 120 s awake, springs when the ape tugs the bait toward itself, and hits it', async () => {
     const h = await make(44, 40);
-    const r = buildLeaningLog(h, { at: { x: 0, z: 0 }, yaw: Math.PI / 2 });
+    const r = buildLeaningLog(h, { at: { x: 0, z: 0 }, yaw: Math.PI / 2, lean: LEAN_P28 });
     const vnOf = watchVelocities(h, [r.log]);
     h.walk({ x: -4, z: -6 });
     const tilt = holdTilt(h, r);
@@ -278,7 +289,7 @@ describe('AC-2(a): a deadfall wounds the ape that disturbs it', () => {
 
   it('verb-only negative control: a 200 N tug does not spring it', async () => {
     const h = await make(44, 40);
-    const r = buildLeaningLog(h, { at: { x: 0, z: 0 }, yaw: Math.PI / 2 });
+    const r = buildLeaningLog(h, { at: { x: 0, z: 0 }, yaw: Math.PI / 2, lean: LEAN_P28 });
     const vnOf = watchVelocities(h, [r.log]);
     h.walk({ x: -4, z: -6 });
     h.ticks(60);
@@ -327,8 +338,8 @@ describe('AC-2(a): a deadfall wounds the ape that disturbs it', () => {
    * vine). DEVIATION (§11.2(a) "≈ 170 kg"): the factory's dry wood makes that log 248 kg; the recipe's dimensions are
    * kept (they set the underside's height over the ape).
    */
-  function buildStagedDeadfall(h: Harness): { prop: number; log: number; bait: number } {
-    const PROP = { x: 5.07, z: 0.013, lengthM: 2.38, r: 0.07 };
+  function buildStagedDeadfall(h: Harness, STAGED: typeof STAGED_DEADFALL = STAGED_DEADFALL): { prop: number; log: number; bait: number } {
+    const PROP = { x: STAGED.propX, z: 0.013, lengthM: STAGED.propLengthM, r: 0.07 };
     const g = h.w.terrain.heightAt(PROP.x, PROP.z);
     const prop = h.stick({ length: PROP.lengthM, r: PROP.r, p: { x: 5, y: g + PROP.r + 0.03, z: 3 }, q: lyingAlong(Math.PI / 2) });
     h.ticks(20);
@@ -341,9 +352,9 @@ describe('AC-2(a): a deadfall wounds the ape that disturbs it', () => {
     // The log: its underside on the line from (0, ground) to the prop's top; a flat face down.
     const th = Math.atan2(top, sp.x);
     const ri = 0.17 * Math.cos(Math.PI / 6);
-    const c = { x: -ri * Math.sin(th) + 3 * Math.cos(th), y: g + ri * Math.cos(th) + 3 * Math.sin(th) + 0.01 };
+    const c = { x: -ri * Math.sin(th) + (STAGED.logLengthM / 2) * Math.cos(th), y: g + ri * Math.cos(th) + (STAGED.logLengthM / 2) * Math.sin(th) + 0.01 };
     goTo(h, { x: 3, z: -4 });
-    const log = h.log({ length: 6, r: 0.17, p: { x: c.x, y: c.y, z: 0 }, q: mulQ(aboutZ(th), lyingAlong(Math.PI / 2)) });
+    const log = h.log({ length: STAGED.logLengthM, r: 0.17, p: { x: c.x, y: c.y, z: 0 }, q: mulQ(aboutZ(th), lyingAlong(Math.PI / 2)) });
     h.ticks(120);
     // The bait, placed lying 0.55 m inward of the prop, lashed to the prop's side facing it by a 0.65 m vine.
     const bx = sp.x - 0.55;
@@ -392,6 +403,7 @@ describe('AC-2(a): a deadfall wounds the ape that disturbs it', () => {
     h.ticks(240);
     const zEnd = h.ent(r.log).pose.p.z;
     console.info(`deadfall staged: the log came to rest ${Math.abs(zEnd - z0).toFixed(3)} m from its vertical plane`);
+    console.info(`deadfall staged: tripwires ${JSON.stringify(h.tripwires().map((t) => ({ by: t.by, loadN: t.loadN, snapped: t.snapped, point: t.point })))}; grip tick ${res.grip}, now ${h.w.tick}`);
     // GATE: springs within 1.0 s of the grip.
     expect(res.spring).toBeGreaterThan(0);
     expect((res.spring - res.grip) / 60).toBeLessThanOrEqual(1.0);
@@ -419,7 +431,7 @@ describe('AC-2(a): a deadfall wounds the ape that disturbs it', () => {
 
   it('staged physics: the 6 m log springs on an ape that walks its route under it into the prop, and hits it at v_n ≥ 2 m/s', async () => {
     const h = await make(48, 40);
-    const r = buildStagedDeadfall(h);
+    const r = buildStagedDeadfall(h, STAGED_AS_DESIGNED);
     const vnOf = watchVelocities(h, [r.log]);
     stagedHold(h, r);
     const z0 = h.ent(r.log).pose.p.z;

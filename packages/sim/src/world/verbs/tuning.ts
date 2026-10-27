@@ -94,6 +94,7 @@ export const VERB_TUNING = defineTuning(
     pullTiredMul: 0.6,
     creaturePullMul: 1.5,
     creatureHandSpeedMps: 0.8,
+    tugHoldMinM: 0.25,
     haulTautM: 0.05,
     haulRampMps: 0.2,
     // P14: values the design gives in prose (§5.0, §5.1, §5.4) or not at all.
@@ -185,6 +186,7 @@ export const VERB_TUNING = defineTuning(
     pullTiredMul: { unit: '×', source: 'NEW: C §5' },
     creaturePullMul: { unit: '× pullForceN × scale²', source: 'NEW: C §5 (ape 907.5 N)' },
     creatureHandSpeedMps: { unit: 'm/s', source: 'NEW: C §5 (ape 907.5 N)' },
+    tugHoldMinM: { unit: 'm × scale (from the hand)', source: 'NEW: P28 (a tug draws its grip in at creatureHandSpeedMps to this near the hand)', min: 0 },
     haulTautM: { unit: 'm', source: 'NEW: the haul model (I-2) [I-rev ran: swing_light.out]' },
     haulRampMps: { unit: 'm/s', source: 'NEW: the haul model (I-2) [I-rev ran: swing_light.out]' },
     heldJoinDepth: { unit: 'joints', source: 'NEW: §5.0 (a held object is the entity in the hands plus every entity lash-joined to it, depth ≤ 3)', min: 0, step: 1 },

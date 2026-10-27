@@ -62,7 +62,7 @@ import { defineTuning } from '../tuning/registry';
 import { collisionGroups, solverGroups } from './groups';
 import { compareOwners, ownerKey, PHYSICS_TUNING } from './physics';
 import { cylinderPoints, principalAxis } from './shapes';
-import type { Entity, FighterMover, ImpactCause, Pose3, Quat, RulerState, Shape, TripWhy, V3 } from './types';
+import type { Entity, FighterMover, ImpactCause, Owner, Pose3, Quat, RulerState, Shape, TripWhy, V3, WorldEvent } from './types';
 
 /** The sole cast's direction (P28, soleGround). */
 const SOLE_DOWN: V3 = Object.freeze({ x: 0, y: -1, z: 0 });
@@ -96,6 +96,11 @@ export const RULER_BODY_TUNING = defineTuning(
     climbMaxM: 4.5,
     pitDownDepthFrac: 0.5,
     coverTripWindowTicks: 30,
+    // P28: the lost-support trip rule (§4.7 steps 7-8, see supportLoss): an entity that carried at least this share of a
+    // planted foot's load is in that foot's support set for coverTripWindowTicks; one that moved this far since it last
+    // held the ruler up was displaced from under it.
+    supportMinShare: 0.1,
+    supportDisplaceM: 0.25,
     // Not §9.1 rows (P11): values §4.7 gives in prose or leaves open, kept here so the file holds no bare constants.
     climbLookM: 3,
     pitOutDepthFrac: 0.15,
@@ -132,7 +137,9 @@ export const RULER_BODY_TUNING = defineTuning(
     climbWalkMps: { unit: 'm/s', source: 'NEW: climbing out of a pit (RR-1)' },
     climbMaxM: { unit: 'm', source: 'NEW: climbing out of a pit (3 m max dig + 1 m berm < 4.5 m) (RR-1)' },
     pitDownDepthFrac: { unit: '× knee height (1.4 m)', source: 'NEW: "in a pit" (SPEC:504), the ledge threshold (RR-1)' },
-    coverTripWindowTicks: { unit: 'ticks', source: "NEW: a ledge trip this soon after a cover load break is a 'cover' trip (RT-1)" },
+    coverTripWindowTicks: { unit: 'ticks', source: "NEW: a ledge trip this soon after a cover load break is a 'cover' trip (RT-1); P28: the support set's window" },
+    supportMinShare: { unit: "× the foot's load", source: "NEW: P28 (lost-support trip rule: a support carried at least this share of a foot's load; the WardedMMO session's ~10%)", min: 0, max: 1 },
+    supportDisplaceM: { unit: 'm', source: 'NEW: P28 (lost-support trip rule: a support moved this far from where it held the ruler up is displaced)', min: 0 },
     climbLookM: { unit: 'm', source: 'NEW: §4.7 step 3 ("a support no more than climbMaxM above the pit floor within 3 m ahead")' },
     pitOutDepthFrac: {
       unit: '× knee height (0.41 m)',
@@ -203,7 +210,7 @@ interface RulerBody {
   /** The obstacle it last deflected along, and when (a `deflect` event marks the start of a slide, not every tick). */
   deflect: { entity: number; tick: number } | null;
   /** Entities that held up its root or a foot lately, by id: the tick last seen and their credit (cover failure, step 8). */
-  readonly supports: Map<number, { tick: number; credit: string[] }>;
+  readonly supports: Map<number, Support>;
   /** The last support that vanished under it (a load break): a ledge trip this soon after it is a 'cover' trip. */
   coverBreak: { tick: number; cause: ImpactCause } | null;
   /**
@@ -211,6 +218,14 @@ interface RulerBody {
    * the sweep), and that tick: legStrike reads it in phase 9 of the same tick (any other tick's reads as still).
    */
   move: { tick: number; x: number; z: number };
+}
+
+/** An entity that held a ruler up lately (its root, or a foot's load): when, its credit, and where it was then (P28). */
+interface Support {
+  tick: number;
+  credit: string[];
+  /** Its position when it last held the ruler up (P28: displaced beyond supportDisplaceM, it was lost from under it). */
+  at?: V3;
 }
 
 /** A shove queued in phase 3 for phase 4d (§4.7 step 5). */
@@ -316,21 +331,25 @@ export class RulerBodies {
   }
 
   /**
-   * A trip for the next phase 4c (this tick's, when asked in phase 3). Ignored while tripped or out, and while another
-   * trip is pending (the first one stands). A 'ledge' within coverTripWindowTicks of a support breaking under this ruler
-   * is that cover's trip (`'cover'`, with its cause; RT-1).
+   * A trip for the next phase 4c (this tick's, when asked in phase 3). Ignored while tripped or out. P28, the lost-support
+   * rule's precedence (support > ledge > obstacle): a pending trip asked this same tick gives way to one of higher rank
+   * ('cover' over 'ledge' over 'obstacle' and 'impact'); one pending from an earlier tick stands. A 'ledge' or 'obstacle'
+   * within coverTripWindowTicks of a support lost from under this ruler (rb.coverBreak: one that broke under its own
+   * weight or legs, or was displaced, supportLoss) is that support's trip (`'cover'`, with its cause; RT-1).
    */
   requestTrip(f: Fighter, why: TripWhy, cause: ImpactCause | null): void {
     const r = f.ruler;
-    if (!r || f.state === 'tripped' || f.state === 'ko' || r.pendingTrip) return;
+    if (!r || f.state === 'tripped' || f.state === 'ko') return;
     const tick = this.world.tick;
     let w = why;
     let c = cause;
     const cb = this.byId.get(f.id)?.coverBreak;
-    if (why === 'ledge' && cb && tick - cb.tick <= RULER_BODY_TUNING.coverTripWindowTicks) {
+    if ((why === 'ledge' || why === 'obstacle') && cb && tick - cb.tick <= RULER_BODY_TUNING.coverTripWindowTicks) {
       w = 'cover';
       c = cb.cause;
     }
+    const p = r.pendingTrip;
+    if (p && (p.tick !== tick || tripRank(p.why) >= tripRank(w))) return;
     r.pendingTrip = { why: w, tick, cause: c ? copyCause(c) : null };
   }
 
@@ -550,7 +569,7 @@ export class RulerBodies {
           deflect: rb.deflect ? { entity: rb.deflect.entity, tick: rb.deflect.tick } : null,
           supports: [...rb.supports]
             .sort((x, y) => x[0] - y[0])
-            .map(([entity, s]) => ({ entity, tick: s.tick, credit: [...s.credit] })),
+            .map(([entity, s]) => ({ entity, tick: s.tick, credit: [...s.credit], ...(s.at ? { at: { ...s.at } } : {}) })),
           coverBreak: rb.coverBreak ? { tick: rb.coverBreak.tick, cause: copyCause(rb.coverBreak.cause) } : null,
         };
         return { fighter: rb.f.id, ruler };
@@ -583,12 +602,16 @@ export class RulerBodies {
       rb.deflect = d === null ? null : { entity: numFromRecord(d.entity, `${at}.deflect.entity`), tick: numFromRecord(d.tick, `${at}.deflect.tick`) };
       rb.supports.clear();
       readList(rec.supports, `${at}.supports`).forEach((x, i) => {
-        const s = x as { entity: unknown; tick: unknown; credit: unknown };
+        const s = x as { entity: unknown; tick: unknown; credit: unknown; at?: unknown };
         const credit = readList(s.credit, `${at}.supports[${i}].credit`).map((c, k) => {
           if (typeof c !== 'string') throw new Error(`${at}.supports[${i}].credit[${k}] is not a string`);
           return c;
         });
-        rb.supports.set(numFromRecord(s.entity, `${at}.supports[${i}].entity`), { tick: numFromRecord(s.tick, `${at}.supports[${i}].tick`), credit });
+        rb.supports.set(numFromRecord(s.entity, `${at}.supports[${i}].entity`), {
+          tick: numFromRecord(s.tick, `${at}.supports[${i}].tick`),
+          credit,
+          ...(s.at === undefined ? {} : { at: readVec(s.at, `${at}.supports[${i}].at`) }),
+        });
       });
       const cb = rec.coverBreak as { tick: unknown; cause: ImpactCause } | null | undefined;
       if (cb === undefined) throw new Error(`${at}.coverBreak is missing`);
@@ -922,7 +945,7 @@ export class RulerBodies {
           !!e &&
           (e.state === 'fixed' || e.state === 'anchored' || e.restTicks >= PHYSICS_TUNING.restTicks || (e.body?.isSleeping() ?? false) || this.heldUp(rb, id));
         if (e && resting && hit.point.y <= cap) {
-          if (rb) rb.supports.set(id, { tick: w.tick, credit: [...e.credit] });
+          if (rb) rb.supports.set(id, { tick: w.tick, credit: [...e.credit], at: { ...e.pose.p } });
           return { y: Math.max(terrain, hit.point.y), entity: id };
         }
       }
@@ -936,6 +959,17 @@ export class RulerBodies {
    * tick it took the weight: the foot read the hole under it as a ledge). It stops holding when it breaks (a 'cover'
    * trip, vanishedSupports) or is gone, or after the window.
    */
+  /**
+   * P28 (lost-support rule): phase 11's foot loads: entity `id` carried `share` (0-1) of a planted foot of ruler `f`;
+   * one that carried at least supportMinShare joins that ruler's support set.
+   */
+  noteFootLoad(f: Fighter, id: number, share: number): void {
+    const rb = this.byId.get(f.id);
+    const e = this.world.entities.get(id);
+    if (!rb || !e || !(share >= RULER_BODY_TUNING.supportMinShare)) return;
+    rb.supports.set(id, { tick: this.world.tick, credit: [...e.credit], at: { ...e.pose.p } });
+  }
+
   /** Does entity `id` hold up any ruler now (heldUp)? World.supportAt asks for a ruler's sole (its footwork, P28). */
   holdsUp(id: number): boolean {
     for (const rb of this.byId.values()) if (this.heldUp(rb, id)) return true;
@@ -976,7 +1010,7 @@ export class RulerBodies {
       const resting = !!e && (e.state === 'fixed' || e.state === 'anchored' || e.restTicks >= PHYSICS_TUNING.restTicks || (e.body?.isSleeping() ?? false) || this.heldUp(rb, id));
       const y = top - hit.toi - T.soleProbeHalfM;
       if (hit.toi > 0 && e && resting && y <= cap) {
-        if (rb) rb.supports.set(id, { tick: w.tick, credit: [...e.credit] });
+        if (rb) rb.supports.set(id, { tick: w.tick, credit: [...e.credit], at: { ...e.pose.p } });
         return y > best.y ? { y, entity: id } : best;
       }
       ex.push(id);
@@ -1020,8 +1054,11 @@ export class RulerBodies {
     const vx = (x - prev.x) / DT;
     const vz = (z - prev.z) / DT;
     if (!(Math.hypot(vx, vz) > TINY)) return;
+    // P28 fix: the capsule's straight part, from the ankle to the hip (§4.7 "its straight part from the ankle to the
+    // hip"), as an upright prism: the capsule's round foot dipped a radius (1.65 m at 5.5) below the ankle and shoved
+    // whatever lay on the ground ahead, a pit cover's bearers included.
     const owners = w.queries.overlaps(
-      { kind: 'capsule', halfHeight: (hip - ankle) / 2, r: radius },
+      { kind: 'cylinder', halfHeight: (hip - ankle) / 2, r: radius, sides: PHYSICS_TUNING.cylinderFacets },
       { p: { x, y: y + (ankle + hip) / 2, z }, q: { ...IDENTITY } },
       { terrain: false, entities: 'all' },
     );
@@ -1030,7 +1067,10 @@ export class RulerBodies {
       const e = w.entities.get(o.id);
       const b = e?.body;
       if (!e || !b || !b.isDynamic() || !b.isEnabled() || e.grace || e.mass >= T.shoveLimitKg || w.entities.isAnchored(e)) continue;
-      if (entityTop(e) <= y + ankle) continue;
+      // P28 fix: stepped over (step 4) when it is no higher than the ankle where the capsule meets it. Its highest point
+      // anywhere was used: a 10.5 m pit-cover bearer whose ends lie up on the spoil berm was shoved by the giant's capsule
+      // (whose round foot dips below the ankle) at 4 m/s before the giant ever stood on it, and the cover was gone.
+      if (entityTopNear(e, x, z, radius) <= y + ankle) continue;
       let nx = e.pose.p.x - x;
       let nz = e.pose.p.z - z;
       const nl = Math.hypot(nx, nz);
@@ -1397,17 +1437,29 @@ export class RulerBodies {
     const out: { id: number; cause: ImpactCause; recent: boolean }[] = [];
     for (const id of [...rb.supports.keys()].sort((a, b) => a - b)) {
       const s = rb.supports.get(id)!;
-      if (w.entities.get(id)) {
+      const e = w.entities.get(id);
+      if (e) {
         if (tick - s.tick > T.coverTripWindowTicks) rb.supports.delete(id);
+        // P28: displaced from under it (pushed or rolled away, or sunk) since it last held the ruler up.
+        else if (s.at && s.tick < tick && Math.hypot(e.pose.p.x - s.at.x, e.pose.p.y - s.at.y, e.pose.p.z - s.at.z) > T.supportDisplaceM) {
+          rb.supports.delete(id);
+          const cause: ImpactCause = { kind: 'entity', entityId: id, fighterId: null, credit: [...s.credit], held: false, feature: 'cover' };
+          rb.coverBreak = { tick, cause };
+          out.push({ id, cause, recent: tick - s.tick <= 1 });
+        }
         continue;
       }
       rb.supports.delete(id);
+      // P28: a support lost to a blow (a forearm's, a weapon's, a thrown or falling thing's) is not lost to the ruler's
+      // weight: no cover trip comes of it (supportLoss).
+      if (!supportLoss(rb.f.id, breakOf(w, id))) continue;
       const cause: ImpactCause = { kind: 'entity', entityId: id, fighterId: null, credit: [...s.credit], held: false, feature: 'cover' };
       rb.coverBreak = { tick, cause };
       out.push({ id, cause, recent: tick - s.tick <= 1 });
     }
     return out;
   }
+
 }
 
 // ---------------------------------------------------------------------------
@@ -1521,6 +1573,35 @@ function longAxisXZ(e: Entity): { x: number; z: number } | null {
   return long && h >= RULER_BODY_TUNING.deflectAxisMinXZ ? { x: _a.x / h, z: _a.z / h } : null;
 }
 
+/**
+ * m: the highest point of an elongated entity's shape within `reach` m (horizontally) of (x, z), at its record pose: a
+ * long pole lying across a pit with one end up on the spoil is as high as its axis where the ruler meets it (its
+ * section's half-width above the axis), not as high as its far end. Anything else, or a pole standing up: entityTop.
+ */
+export function entityTopNear(e: Entity, x: number, z: number, reach: number): number {
+  const ax = principalAxis(e.shape);
+  if (e.shape.kind === 'ball' || !(ax.max - ax.min > 2 * ax.crossHalf)) return entityTop(e);
+  const q = e.pose.q;
+  _q.set(q.x, q.y, q.z, q.w);
+  _a.set(ax.dir.x, ax.dir.y, ax.dir.z).applyQuaternion(_q);
+  const p = e.pose.p;
+  // The axis points P(t) = p + a·t (t in [min, max]) whose horizontal distance to (x, z) is at most reach + the section.
+  const r = reach + ax.crossHalf;
+  const dx = p.x - x;
+  const dz = p.z - z;
+  const A = _a.x * _a.x + _a.z * _a.z;
+  const B = 2 * (dx * _a.x + dz * _a.z);
+  const C = dx * dx + dz * dz - r * r;
+  if (!(A > TINY)) return entityTop(e);
+  const disc = B * B - 4 * A * C;
+  if (disc < 0) return entityTop(e);
+  const s = Math.sqrt(disc);
+  const t1 = Math.max(ax.min, (-B - s) / (2 * A));
+  const t2 = Math.min(ax.max, (-B + s) / (2 * A));
+  if (t1 > t2) return entityTop(e);
+  return p.y + Math.max(_a.y * t1, _a.y * t2) + ax.crossHalf;
+}
+
 /** m: the highest point of an entity's shape at its record pose (the pose as of the last physics step). */
 export function entityTop(e: Entity): number {
   const s = e.shape;
@@ -1602,4 +1683,28 @@ function readPose(v: unknown, at: string): Pose3 {
     p: readVec(o.p, `${at}.p`),
     q: { x: numFromRecord(o.q.x, `${at}.q.x`), y: numFromRecord(o.q.y, `${at}.q.y`), z: numFromRecord(o.q.z, `${at}.q.z`), w: numFromRecord(o.q.w, `${at}.q.w`) },
   };
+}
+
+/** P28: the precedence of trip causes (the lost-support rule): support ('cover') > 'ledge' > 'obstacle' and 'impact'. */
+function tripRank(w: TripWhy): number {
+  return w === 'cover' ? 3 : w === 'ledge' ? 2 : 1;
+}
+
+/** This tick's `break` event of entity `id` (phase 12's), or null. */
+function breakOf(w: World, id: number): Extract<WorldEvent, { type: 'break' }> | null {
+  for (const ev of w.events) if (ev.type === 'break' && ev.entity === id) return ev;
+  return null;
+}
+
+/**
+ * P28, the lost-support trip rule: whether a support of ruler `rulerId` that broke as `ev` was lost to the ruler's own
+ * weight or legs, so that the drop that follows is the cover's trip. A load break (energy 0: a sustained load, whoever's)
+ * counts; an impact break counts when the ruler's own leg delivered it (a foot landing on it, its shin across it); a
+ * break by anything else (its forearm or head, a player's axe, a falling log) does not. No event (gone some other way,
+ * or broken before the events this tick holds): it counts, as before P28.
+ */
+export function supportLoss(rulerId: number, ev: { energy: number; by?: Owner | null } | null): boolean {
+  if (!ev || ev.energy === 0 || !ev.by) return true;
+  const by = ev.by;
+  return by.kind === 'fighter' && by.id === rulerId && (by.bone === 'shinL' || by.bone === 'shinR' || by.bone === 'thighL' || by.bone === 'thighR');
 }

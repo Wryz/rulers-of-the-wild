@@ -173,7 +173,8 @@ export interface RulerBodyRecV1 {
   /** The obstacle it last deflected along, and when. */
   deflect: { entity: number; tick: number } | null;
   /** Entities that held up its root or a foot lately, by entity id: the tick last seen and their credit. */
-  supports: { entity: number; tick: number; credit: string[] }[];
+  /** `at` (P28, optional): where it was when it last held the ruler up (the lost-support rule's displacement). */
+  supports: { entity: number; tick: number; credit: string[]; at?: { x: number; y: number; z: number } }[];
   /** The last support that vanished under it (a load break), and its cause. */
   coverBreak: { tick: number; cause: ImpactCause } | null;
 }

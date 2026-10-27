@@ -37,6 +37,7 @@ export const BREAK_TUNING = defineTuning(
     pieceGraceMaxTicks: 600,
     loadPointSplitM: 0.5,
     pieceMinVolumeM3: 1e-6,
+    loadBreakMinKg: 0.25,
   },
   {
     integrityPerExcess: { unit: '—', source: 'D-17' },
@@ -48,6 +49,12 @@ export const BREAK_TUNING = defineTuning(
     pieceGraceMaxTicks: { unit: 'ticks', source: 'NEW: a piece still inside its breaker after 10 s is crushed (RF-7)' },
     loadPointSplitM: { unit: 'm along the axis', source: 'NEW: §4.10 (3 pieces "when two load points are more than 0.5 m apart", RT-7)' },
     pieceMinVolumeM3: { unit: 'm³', source: 'NEW (SIM-fix3): a smaller piece (a sliver cut at an end) is merged into its nearest neighbour' },
+    loadBreakMinKg: {
+      unit: 'kg',
+      source:
+        "NEW (P28): a load break of anything lighter crumbles it to nothing (rule 10) instead of snapping it in two: leaves (1 J/kg) carry 1.02 × their own weight, so a heap of grass-bundle pieces in a pit load-broke itself into ever smaller pieces, ≈ 200 a tick",
+      min: 0,
+    },
   },
 );
 
@@ -133,6 +140,20 @@ export class Breaking {
   // -------------------------------------------------------------------------
 
   private split(w: World, e: Entity, p: PendingBreak): void {
+    // P28: a light thing that gives way under a load crumbles: removed, its joints released, a `break` with no pieces.
+    if (p.kind === 'load' && e.mass < BREAK_TUNING.loadBreakMinKg) {
+      const at = { ...p.point };
+      for (const jid of [...e.joints]) {
+        const j = w.joints.get(jid);
+        if (!j) continue;
+        const end = j.a.entity === e.id && j.a.fighter === undefined && !j.a.loose ? 'a' : j.b.entity === e.id && j.b.fighter === undefined && !j.b.loose ? 'b' : null;
+        if (j.kind === 'rope' && end) w.joints.loosen(jid, end, at);
+        else w.joints.remove(jid, 'release');
+      }
+      w.entities.remove(e.id);
+      w.events.push({ type: 'break', entity: e.id, pieces: [], point: at, energy: 0, by: p.breaker ? copyOwner(p.breaker) : null });
+      return;
+    }
     // The parent's pose and motion: the body's, as this tick's step left it (the record still holds the pose from
     // before the step until phase 18 mirrors it; pieces placed there would sit a tick behind their velocities).
     const b = e.body;
@@ -217,7 +238,7 @@ export class Breaking {
     }
     w.entities.remove(e.id);
     w.events.push(...spawned);
-    w.events.push({ type: 'break', entity: e.id, pieces: ids, point: { ...p.point }, energy: p.energy });
+    w.events.push({ type: 'break', entity: e.id, pieces: ids, point: { ...p.point }, energy: p.energy, by: p.breaker ? copyOwner(p.breaker) : null });
   }
 
   /** A piece's grace (RF-7): over once it is clear of its breaker (from minUntil); crushed at maxUntil if never clear. */
@@ -232,7 +253,7 @@ export class Breaking {
     if (tick >= g.maxUntil) {
       const at = { ...e.pose.p };
       w.entities.remove(e.id);
-      w.events.push({ type: 'break', entity: e.id, pieces: [], point: at, energy: 0 });
+      w.events.push({ type: 'break', entity: e.id, pieces: [], point: at, energy: 0, by: copyOwner(g.from) });
     }
   }
 

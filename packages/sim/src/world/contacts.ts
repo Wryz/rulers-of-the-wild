@@ -45,6 +45,8 @@ import type { Limb } from '../sim/moves';
 import { classifyRulerZone, rulerToughness } from '../sim/ruler';
 import { boneMass, DAMAGE_TUNING, impactEnergy, zoneToughness } from '../sim/rules';
 import { safeLandingSpeed } from './characters';
+import { BREAK_TUNING } from './breaking';
+import { breakEnergyJ, MATERIALS } from './materials';
 import { contactEnergy, contactMeff, dot, impactDv, integrityMeff, len, leadingSharpness, type MeffSide, pointMass, rotate, selfMotion, sideMass } from './damage';
 import { FELL_TUNING } from './felling';
 import { compareOwners, type ContactPair, ownerKey, PHYSICS_TUNING } from './physics';
@@ -128,6 +130,12 @@ interface CreatureHit {
   readonly impactor: Side;
   /** The impactor is a dynamic entity whose body takes the reaction. */
   readonly reactionEntity: number | null;
+  /**
+   * P28: scored only because the entity it met breaks in the same episode (a brush otherwise): its impact is applied and
+   * recorded before the break (SPEC:344), but it trips nothing (the impact trip is a blow's, not the creature's own
+   * motion's).
+   */
+  readonly brushBreak?: boolean;
 }
 
 /** A scored hit on an entity's integrity. */
@@ -587,10 +595,18 @@ export class ContactSystem {
         }
       }
     }
-    for (const b of best) {
+    for (const [k, b] of best.entries()) {
       if (!b) continue;
       if (b.E < DAMAGE_TUNING.minImpactJ && b.dv < IMPACT_TUNING.flinchDv) {
-        this.unscored.brush++;
+        // P28: unless the entity it met breaks in this episode (a stake a falling giant's shin snaps side-on): the
+        // creature's side of that contact is applied and recorded first, whatever its energy (SPEC:344: "an impact's
+        // damage is applied before it breaks"), so no break comes without its impact.
+        const o = ent[1 - k];
+        if (!o || !breaks(o)) {
+          this.unscored.brush++;
+          continue;
+        }
+        fr.creature.push({ ...this.finishHit(b.hit), brushBreak: true });
         continue;
       }
       fr.creature.push(this.finishHit(b.hit));
@@ -785,7 +801,7 @@ export class ContactSystem {
     // a brush (v_safe 14.07 m/s takes its energy) and the obstacle trip (§4.7 step 6.2: RulerBodies.legStrike for the
     // shin that meets it, RulerMover's sweep for the body) is what trips on it; a sharp one keeps its energy (SPEC:415),
     // is scored, and trips here.
-    if (standingRuler && f.state !== 'ko' && shinBand(f, i.bone, i.point)) {
+    if (standingRuler && !h.brushBreak && f.state !== 'ko' && shinBand(f, i.bone, i.point)) {
       const T = RULER_BODY_TUNING;
       if ((i.impactorMass === Infinity || i.impactorMass >= T.impactTripMinKg) && i.vn > T.tripSpeed) w.rulers.requestTrip(f, 'impact', i.cause);
     }
@@ -959,13 +975,19 @@ function subjectOf(ep: Episode): [number, Merged] {
   throw new Error(`ContactSystem: a group with neither a fighter nor an entity (${mergedKey(ep.a)}|${mergedKey(ep.b)})`);
 }
 
-/** Fighter id → the entities its hands hold, drag or tow by a held rope (never scored against its colliders). */
+/**
+ * Fighter id → the entities its hands hold, drag or tow by a held rope, or (P28) a creature's tug hauls (never scored
+ * against its colliders: the 1 kg bait a tugging ape grips was scored against its own hands and chest, 46 J, and broke).
+ */
 function heldEntities(w: World): Map<number, Set<number>> {
   const out = new Map<number, Set<number>>();
   for (const f of w.combat.fighters) {
+    const tug = w.verbs.tugTarget(f);
+    if (tug !== null) out.set(f.id, new Set([tug]));
     const h = f.inventory?.hands;
     if (!h) continue;
     const s = new Set<number>([h.entity]);
+    if (tug !== null) s.add(tug);
     if (h.joint !== null) {
       const j = w.joints.get(h.joint);
       if (j) for (const end of [j.a, j.b]) if (end.entity !== null) s.add(end.entity);
@@ -973,6 +995,13 @@ function heldEntities(w: World): Map<number, Set<number>> {
     out.set(f.id, s);
   }
   return out;
+}
+
+/** P28: whether an entity hit of this energy takes the entity's integrity to 0 (Breaking.hit's rule, SPEC:344). */
+function breaks(h: EntityHit): boolean {
+  const Eb = breakEnergyJ(MATERIALS[h.e.material], h.e.mass);
+  if (!(Eb > 0) || !Number.isFinite(Eb) || !(h.energy > Eb)) return false;
+  return ((h.energy - Eb) / Eb) * BREAK_TUNING.integrityPerExcess >= h.e.integrity;
 }
 
 /** The bones of the move's limb chain while a fighter is in 'attack' (both arms for a two-handed weapon), else null. */
