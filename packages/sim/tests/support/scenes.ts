@@ -13,7 +13,7 @@
 // Every number below is a recipe constant of §11 (or of the lab it cites), never tuning.
 import { COMMAND_STEPS, toCm } from '../../src/sim/commands';
 import type { Quat, V3 } from '../../src/world/types';
-import { BACK_SLOT, type Harness, makeHarness, type XZ } from './worldHarness';
+import { BACK_SLOT, type Harness, makeHarness, runSteps, runStepsAsync, type XZ } from './worldHarness';
 
 // ---------------------------------------------------------------------------
 // Small geometry
@@ -618,12 +618,28 @@ export const PIT_GRASS_MIN = 24;
  * the width 0.4 m apart from the rim, and up to 30 grass bundles (3 kg) lying on them (at least PIT_GRASS_MIN). Into and out of the pit the player goes by logged
  * standAt (its walls are steeper than he climbs).
  */
-export function buildPit(h: Harness, o: { centre: XZ; lengthX: 8; widthZ: 6; depth: 2.5; stakeSpacing: 0.6 }): { cover: number[]; stakes: number[]; strikes: number } {
+export function buildPit(h: Harness, o: PitOptions): PitBuilt {
+  return runSteps(buildPitSteps(h, o));
+}
+
+/**
+ * buildPit, yielding to the worker's event loop between strikes, stakes, bearers and bundles (runStepsAsync): the same
+ * commands on the same ticks, so the same scene. The cached pit is built this way (pitScene): ≈ 12 min of synchronous
+ * work in a test worker otherwise blocks Vitest's RPC past its 60 s timeout.
+ */
+export function buildPitAsync(h: Harness, o: PitOptions): Promise<PitBuilt> {
+  return runStepsAsync(buildPitSteps(h, o));
+}
+
+type PitOptions = { centre: XZ; lengthX: 8; widthZ: 6; depth: 2.5; stakeSpacing: 0.6 };
+type PitBuilt = { cover: number[]; stakes: number[]; strikes: number };
+
+function* buildPitSteps(h: Harness, o: PitOptions): Generator<void, PitBuilt> {
   const c = o.centre;
   const x0 = c.x - o.lengthX / 2;
   goTo(h, { x: x0 - 2, z: c.z });
   const stick = h.give('diggingStick');
-  const dug = h.digPit({ centre: c, lengthX: o.lengthX, widthZ: o.widthZ, depth: o.depth, maxTicks: PIT.maxTicks, maxStrikes: PIT.maxStrikes, pileSides: 'z' });
+  const dug = yield* h.digPitSteps({ centre: c, lengthX: o.lengthX, widthZ: o.widthZ, depth: o.depth, maxTicks: PIT.maxTicks, maxStrikes: PIT.maxStrikes, pileSides: 'z' });
   console.info(`buildPit: dig ${JSON.stringify(dug)}`);
   h.ticks(60);
   // Out of the pit at its −x end: round its −z side (between it and the piles) to the staging off its +x end.
@@ -631,7 +647,7 @@ export function buildPit(h: Harness, o: { centre: XZ; lengthX: 8; widthZ: 6; dep
     { x: x0 - 1.5, z: c.z - o.widthZ / 2 - 2.2 },
     { x: c.x + o.lengthX / 2 + 1.5, z: c.z - o.widthZ / 2 - 2.2 },
   ]);
-  const furnished = furnishPit(h, { ...o, grass: { count: PIT.grass.count, minCount: PIT_GRASS_MIN }, coverDugRim: true }, stick);
+  const furnished = yield* furnishPitSteps(h, { ...o, grass: { count: PIT.grass.count, minCount: PIT_GRASS_MIN }, coverDugRim: true }, stick);
   console.info(`buildPit: ${furnished.stakes.length} stakes, ${furnished.cover.length} cover; standAts ${JSON.stringify(h.standAts())}, tick ${h.w.tick}`);
   return { ...furnished, strikes: dug.strikes };
 }
@@ -641,11 +657,18 @@ export function buildPit(h: Harness, o: { centre: XZ; lengthX: 8; widthZ: 6; dep
  * with the digging stick the player wields and placed, then the cover. The pit is the dug footprint at `centre`; the
  * grid, the bearers (widthZ + 2 overM long, lengthX / spacingM of them) and the grass rows scale with it.
  */
-export function furnishPit(
-  h: Harness,
-  o: { centre: XZ; lengthX: number; widthZ: number; stakeSpacing: number; grass: { count: number; minCount: number }; coverDugRim?: boolean },
-  stick: number,
-): { cover: number[]; stakes: number[] } {
+export function furnishPit(h: Harness, o: FurnishOptions, stick: number): { cover: number[]; stakes: number[] } {
+  return runSteps(furnishPitSteps(h, o, stick));
+}
+
+/** furnishPit, yielding to the worker's event loop between stakes, bearers and bundles (see buildPitAsync). */
+export function furnishPitAsync(h: Harness, o: FurnishOptions, stick: number): Promise<{ cover: number[]; stakes: number[] }> {
+  return runStepsAsync(furnishPitSteps(h, o, stick));
+}
+
+type FurnishOptions = { centre: XZ; lengthX: number; widthZ: number; stakeSpacing: number; grass: { count: number; minCount: number }; coverDugRim?: boolean };
+
+function* furnishPitSteps(h: Harness, o: FurnishOptions, stick: number): Generator<void, { cover: number[]; stakes: number[] }> {
   const c = o.centre;
   const x0 = c.x - o.lengthX / 2;
   const z0 = c.z - o.widthZ / 2;
@@ -669,6 +692,7 @@ export function furnishPit(
   h.ticks(60);
   const sharp = (id: number): number => Math.max(0, ...h.ent(id).sharpPoints.map((sp) => sp.sharpness));
   for (const id of sticks) {
+    yield;
     // Standing off its +x end, in the 1.6 m lane between the columns (never among the sticks). A stick on the uneven
     // ground of the staging can shift under the strokes; the player follows its end and goes on (up to 4 times).
     for (let attempt = 0; sharp(id) < PIT.stake.sharpness - 1e-9; attempt++) {
@@ -690,6 +714,7 @@ export function furnishPit(
   let k = 0;
   for (let i = nx - 1; i >= 0; i--) {
     for (const q of grid[i]) {
+      yield;
       const id = sticks[k++];
       const sx = Math.max(x0 + 0.15, q.x - 0.75);
       take(h, id, `take stake ${id}`);
@@ -791,6 +816,7 @@ export function furnishPit(
   // the staging (south-east) and the −z rim the player goes by the pit's +x end, never past them.
   const southEast = { x: c.x + o.lengthX / 2 + 1.5, z: c.z - maxHz - PIT.rimM };
   for (let i = 0; i < count; i++) {
+    yield;
     const x = offVertex(h, { x: bearerX(i), z: c.z }).x;
     route(h, [southEast]);
     if (!bring(h, bearers[i], [southEast, { x, z: c.z - hzs[i] - PIT.rimM }])) throw new Error(`buildPit: bearer ${bearers[i]} broke on the way`);
@@ -824,6 +850,7 @@ export function furnishPit(
   };
   let next = 0;
   for (const { q, side } of spots) {
+    yield;
     if (next >= grassIds.length) break;
     if (!pairAt(q)) continue;
     const id = grassIds[next++];
@@ -867,7 +894,7 @@ export const PIT_SCENE = { seed: 20261017, size: 120 } as const;
 export async function pitScene(): Promise<Uint8Array> {
   const h = await makeHarness({ seed: PIT_SCENE.seed, size: PIT_SCENE.size });
   try {
-    buildPit(h, { centre: { x: 0, z: 0 }, lengthX: 8, widthZ: 6, depth: 2.5, stakeSpacing: 0.6 });
+    await buildPitAsync(h, { centre: { x: 0, z: 0 }, lengthX: 8, widthZ: 6, depth: 2.5, stakeSpacing: 0.6 });
     h.standAt({ x: 0, z: -10 });
     h.ticks(60);
     return h.saveBytes();

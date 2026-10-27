@@ -118,6 +118,8 @@ export interface Harness {
   digPit(o: DigPitOptions): DigPitResult;
   /** The same planner, yielding between strikes to keep Vitest RPC responsive. */
   digPitAsync(o: DigPitOptions): Promise<DigPitResult>;
+  /** The same planner as a generator, one `yield` per strike (for a builder that runs it with runSteps/runStepsAsync). */
+  digPitSteps(o: DigPitOptions): Generator<void, DigPitResult>;
   chopTo(tree: number, remaining: number): { chops: number; swings: number };
   pull(onTicks: number): { combat: CombatEvent[]; world: WorldEvent[] };
   reelIn(joint: number, leaveSlackM: number, o?: { maxTicks?: number }): number;
@@ -371,6 +373,31 @@ export async function loadHarness(bytes: Uint8Array, o?: { nav?: 'full' | 'off' 
  */
 export function cachedScene(key: string): Promise<Uint8Array> {
   return sceneBytes(key);
+}
+
+/**
+ * A step generator (a builder that `yield`s between units of synchronous work: a strike, a stake, a bearer) run to its
+ * end in one go. The yields carry nothing, so runSteps and runStepsAsync send the world the same commands on the same
+ * ticks: the build is the same either way.
+ */
+export function runSteps<T>(g: Generator<void, T>): T {
+  let next = g.next();
+  while (!next.done) next = g.next();
+  return next.value;
+}
+
+/**
+ * The same, letting the worker's event loop run at each `yield` (yieldToVitest): a long build in a test worker (the
+ * cached pit's ≈ 12 min) would otherwise block it past Vitest's 60 s RPC timeout ("Timeout calling onTaskUpdate", an
+ * unhandled error that fails the run with every test passed).
+ */
+export async function runStepsAsync<T>(g: Generator<void, T>): Promise<T> {
+  let next = g.next();
+  while (!next.done) {
+    await yieldToVitest();
+    next = g.next();
+  }
+  return next.value;
 }
 
 class WorldHarness implements Harness {
@@ -892,20 +919,15 @@ class WorldHarness implements Harness {
   // -------------------------------------------------------------------------
 
   digPit(o: DigPitOptions): DigPitResult {
-    const planner = digPitPlanner(this, o);
-    let next = planner.next();
-    while (!next.done) next = planner.next();
-    return next.value;
+    return runSteps(digPitPlanner(this, o));
   }
 
-  async digPitAsync(o: DigPitOptions): Promise<DigPitResult> {
-    const planner = digPitPlanner(this, o);
-    let next = planner.next();
-    while (!next.done) {
-      await yieldToVitest();
-      next = planner.next();
-    }
-    return next.value;
+  digPitAsync(o: DigPitOptions): Promise<DigPitResult> {
+    return runStepsAsync(digPitPlanner(this, o));
+  }
+
+  digPitSteps(o: DigPitOptions): Generator<void, DigPitResult> {
+    return digPitPlanner(this, o);
   }
 
   // -------------------------------------------------------------------------
