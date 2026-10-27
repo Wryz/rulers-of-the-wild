@@ -54,3 +54,17 @@ decision and the usual review before it changes anything here. Rule 6 stands (tr
 ## Perf
 - Warded enforces a 1 ms average tick in CI. Ours is 14.2 ms (Codex profile: loads.update 39.7%, Rapier 29.1%,
   combat.stepBody 17.8%).
+
+## Follow-ups from the same session
+- **Log mass (confirmed in our code by that agent):** `logPrism(length, r)` (factory.ts:155) is a 6-gon of circumradius r; the
+  design's 651 kg is a round r 0.18 log. `prismRForRoundDiam(0.36, PHYSICS_TUNING.logFacets)` (factory.ts:162) gives
+  r ≈ 0.198 and 651 kg. Check every logPrism caller whose r was a round design radius. Passed to P28.
+- **loads.update cost (P38 perf):** it recomputes unchanged loads every tick (deliver → supportsOf walking contact pairs,
+  `new Set(seen)` per recursion level, two passes over all entities). Proposal, bit-identical outcomes:
+  1. cache resting shares per quiet chain; invalidate on wake, break, new joint, contact change, capacity change, or a
+     foot entering it;
+  2. keep rot working (rule 10) by re-testing quiet chains at a staggered low rate in id order, or re-testing when
+     capacity crosses the cached breaking point;
+  3. skip the history window for quiet entities, and keep a running sum;
+  4. cheap wins first: a push/pop path array instead of `new Set(seen)`, and a maintained list of dynamic entities.
+  Prove it with identical AC-7 replay hashes, then gate the timing in the CI tick budget.
