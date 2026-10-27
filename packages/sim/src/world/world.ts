@@ -42,7 +42,7 @@ import { Loads } from './loads';
 import { NavSystem, NavWalkable } from './nav';
 import { isPhysicsReady, PHYSICS_TUNING, PhysicsWorld, physicsReady } from './physics';
 import { WorldQueries } from './queries';
-import { RULER_BODY_TUNING, RulerBodies } from './rulerBody';
+import { RULER_BODY_TUNING, RulerBodies, steadyGround } from './rulerBody';
 import { WorldRngs } from './rngs';
 import { Terrain } from './terrain';
 import type { Finish, FighterMover, GroundQuery, ProjectileWorldHit, WorldEvent, WorldPort, WorldStrike } from './types';
@@ -437,7 +437,7 @@ export class World implements WorldPort {
         const id = hit.owner.id;
         const e = this.entities.get(id);
         const y = top - hit.toi - RULER_BODY_TUNING.soleProbeHalfM;
-        const resting = !!e && (e.state === 'fixed' || e.state === 'anchored' || e.restTicks >= PHYSICS_TUNING.restTicks || (e.body?.isSleeping() ?? false) || this.rulers.holdsUp(id));
+        const resting = !!e && (e.state === 'fixed' || e.state === 'anchored' || e.restTicks >= PHYSICS_TUNING.restTicks || (e.body?.isSleeping() ?? false) || this.rulers.holdsUp(id) || steadyGround(e));
         if (hit.toi > 0 && resting && y - ground <= maxAbove) return Math.max(ground, y);
         ex.push(id);
       }

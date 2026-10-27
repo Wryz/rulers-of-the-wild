@@ -602,7 +602,11 @@ export class ContactSystem {
         // creature's side of that contact is applied and recorded first, whatever its energy (SPEC:344: "an impact's
         // damage is applied before it breaks"), so no break comes without its impact.
         const o = ent[1 - k];
-        if (!o || !breaks(o)) {
+        // For a fallen ruler (its body dynamic, its colliders solid), or a pointed entity (SPEC:344's "a stake that
+        // shatters still delivers its blow") whoever meets it: a standing ruler's sensors walking through a blunt pole
+        // are a brush the mover's obstacle trip answers (§4.7 steps 6, 9).
+        const fallen = !!b.hit.impact.target.ruler && b.hit.impact.target.state === 'tripped';
+        if (!o || !(fallen || o.e.sharpPoints.length > 0) || !breaks(o)) {
           this.unscored.brush++;
           continue;
         }

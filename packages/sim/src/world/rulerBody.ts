@@ -101,6 +101,9 @@ export const RULER_BODY_TUNING = defineTuning(
     // held the ruler up was displaced from under it.
     supportMinShare: 0.1,
     supportDisplaceM: 0.25,
+    // P28: a dynamic entity no part of which moves faster than this is ground for a ruler though not at rest (a 505 kg
+    // bridge log rocking on a grass bundle under it reset its rest count every few ticks and was a hole).
+    groundMaxSpeedMps: 0.25,
     // Not §9.1 rows (P11): values §4.7 gives in prose or leaves open, kept here so the file holds no bare constants.
     climbLookM: 3,
     pitOutDepthFrac: 0.15,
@@ -139,6 +142,7 @@ export const RULER_BODY_TUNING = defineTuning(
     pitDownDepthFrac: { unit: '× knee height (1.4 m)', source: 'NEW: "in a pit" (SPEC:504), the ledge threshold (RR-1)' },
     coverTripWindowTicks: { unit: 'ticks', source: "NEW: a ledge trip this soon after a cover load break is a 'cover' trip (RT-1); P28: the support set's window" },
     supportMinShare: { unit: "× the foot's load", source: "NEW: P28 (lost-support trip rule: a support carried at least this share of a foot's load; the WardedMMO session's ~10%)", min: 0, max: 1 },
+    groundMaxSpeedMps: { unit: 'm/s (|v| + |ω| × reach)', source: 'NEW: P28 (a steady entity is a ruler\'s ground, not only one at rest)', min: 0 },
     supportDisplaceM: { unit: 'm', source: 'NEW: P28 (lost-support trip rule: a support moved this far from where it held the ruler up is displaced)', min: 0 },
     climbLookM: { unit: 'm', source: 'NEW: §4.7 step 3 ("a support no more than climbMaxM above the pit floor within 3 m ahead")' },
     pitOutDepthFrac: {
@@ -946,7 +950,7 @@ export class RulerBodies {
         const e = w.entities.get(id);
         const resting =
           !!e &&
-          (e.state === 'fixed' || e.state === 'anchored' || e.restTicks >= PHYSICS_TUNING.restTicks || (e.body?.isSleeping() ?? false) || this.heldUp(rb, id));
+          (e.state === 'fixed' || e.state === 'anchored' || e.restTicks >= PHYSICS_TUNING.restTicks || (e.body?.isSleeping() ?? false) || this.heldUp(rb, id) || steadyGround(e));
         if (e && resting && hit.point.y <= cap) {
           if (rb) rb.supports.set(id, { tick: w.tick, credit: [...e.credit], at: { ...e.pose.p } });
           return { y: Math.max(terrain, hit.point.y), entity: id };
@@ -1010,7 +1014,7 @@ export class RulerBodies {
       if (!hit || hit.owner.kind !== 'entity') break;
       const id = hit.owner.id;
       const e = w.entities.get(id);
-      const resting = !!e && (e.state === 'fixed' || e.state === 'anchored' || e.restTicks >= PHYSICS_TUNING.restTicks || (e.body?.isSleeping() ?? false) || this.heldUp(rb, id));
+      const resting = !!e && (e.state === 'fixed' || e.state === 'anchored' || e.restTicks >= PHYSICS_TUNING.restTicks || (e.body?.isSleeping() ?? false) || this.heldUp(rb, id) || steadyGround(e));
       const y = top - hit.toi - T.soleProbeHalfM;
       if (hit.toi > 0 && e && resting && y <= cap) {
         if (rb) rb.supports.set(id, { tick: w.tick, credit: [...e.credit], at: { ...e.pose.p } });
@@ -1768,4 +1772,16 @@ export function supportLoss(rulerId: number, ev: { energy: number; by?: Owner | 
   if (!ev || ev.energy === 0 || !ev.by) return true;
   const by = ev.by;
   return by.kind === 'fighter' && by.id === rulerId && (by.bone === 'shinL' || by.bone === 'shinR' || by.bone === 'thighL' || by.bone === 'thighR');
+}
+
+/**
+ * P28: whether a dynamic entity is steady enough to be a ruler's ground though not at rest (PHYSICS_TUNING.restTicks):
+ * no point of it moves faster than RULER_BODY_TUNING.groundMaxSpeedMps (|v| + |ω| × its reach from its origin).
+ */
+export function steadyGround(e: Entity): boolean {
+  const ax = principalAxis(e.shape);
+  const reach = Math.max(Math.abs(ax.min), Math.abs(ax.max)) + ax.crossHalf;
+  const v = e.vel.lin;
+  const w = e.vel.ang;
+  return Math.hypot(v.x, v.y, v.z) + Math.hypot(w.x, w.y, w.z) * reach < RULER_BODY_TUNING.groundMaxSpeedMps;
 }

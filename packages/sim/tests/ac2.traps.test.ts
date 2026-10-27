@@ -244,24 +244,20 @@ describe('AC-2(a): a deadfall wounds the ape that disturbs it', () => {
   const TOWARD_BODY = -Math.PI / 2;
 
   /*
-   * §11.2(a)'s own recipes (the bait tug) are kept as written. They FAIL and stay failing; the recipe that works from
-   * the rules is the walked one further down, without the tug (see the P28 report).
-   *
-   * With P28's sim fixes (the crouch shows its posture; low postures cross-fade; the tugging ape backs off facing the
-   * bait and holds it where it gripped it) the ape tugging toward its own body backs inward, under the lowering log:
-   * verb-only (0.45 m inward) its back meets the log (clearance −0.075 m) and the 907.5 N pull never springs it (the
-   * pull on the prop's foot at the lash's height only walks the foot in); staged (0.8 m inward) it springs in 0.83 s
-   * but the log arrives at v_n 1.83 m/s (gate ≥ 2) for 0.85 HP, and the 700 N control springs it too (0.88 s): this
-   * sim's prop gives way below the C lab's 762 N. Before those fixes the tugging ape turned and walked inward head
-   * first, into the log, and the drag's fixed 0.8 m hold shoved the bait into the prop's foot (which sprang every run,
-   * 200 N and 700 N included).
-   * Third pass (P28 lab): the prop itself is right — a force applied at the lash's point on the free prop springs it at
-   * 200 N (in 1.2 s; 266 N 0.7 s, 907 N 0.13 s) and holds at 150 N, near the C lab's 266 N — so the 200 N control can't
-   * hold whoever pulls. The tug doesn't deliver its 907.5 N: the drag PD reaches its cap only ≈ 0.3 m past the taut
-   * rope, so the ape backs off that far and the spring comes 1.2-2.3 s after the grip, by then under the lower log
-   * (moving the bait 0.2-0.3 m toward the prop: clearance −0.18 … +0.07 m, no hit at v_n ≥ 1 m/s). A taller prop (2.6-2.9
-   * m) or a steeper log topples the free 7 cm prop before the bait is lashed. No scene that keeps the free prop and the
-   * lash met all four gates; left failing.
+   * §11.2(a)'s own recipes (the bait tug), with their gates as written; the scenes are raised a little (LEAN_P28,
+   * STAGED_DEADFALL: departures recorded there and in docs/work/ledger.md).
+   * P28's sim fixes behind them: the crouch shows its posture and low postures cross-fade (the body never rises through
+   * standing height); the tugging ape backs off facing the bait, holding it where it gripped it, and its arms draw the
+   * grip in at the hand speed (VERB_TUNING.tugHoldMinM), so the pull reaches 907.5 N in ≈ 0.2 s, not only once the ape has
+   * walked 0.3 m back; a creature's tugged entity is never scored against it (the 1 kg bait, yanked against the ape's own
+   * chest at 46 J, broke).
+   * The staged 700 N control still springs the prop (0.48 s, P28 lab: from ≈ 500 N, 600 N in 0.18 s; the C lab's 762 N):
+   * every code force here is a pre-step impulse (C F3), and Rapier resolves an impulse in the first of its substeps, where
+   * the contacts can only give a substep's share of friction: a load below the static threshold creeps (a box pushed at
+   * 0.3 μN creeps 6.7 mm in 3 s; pushed with an in-solver force it doesn't move, and this prop then holds 850 N, the
+   * verb-only prop 200 N and gives at 266 N in 1.17 s, the C lab's numbers). Neither friction combining (Average →
+   * Max) nor solver iterations (4 → 16, single-substep) change it. The fix (an in-solver force, reset every step) is
+   * what C F3 and the sim purity test forbid: left failing, for the owner's decision (see the ledger).
    */
   it('verb-only gate (§11.2(a) as written): the 40 kg log leaned on a free prop holds 120 s awake, springs when the ape tugs the bait toward itself, and hits it', async () => {
     const h = await make(44, 40);
@@ -458,20 +454,16 @@ describe('AC-2(a): a deadfall wounds the ape that disturbs it', () => {
 // ---------------------------------------------------------------------------
 
 /*
- * AC-2(b). P28's first run found the pit unreachable: its spoil made a 1 m berm with sheer edges all round it, steeper
- * than the giant's 40° slope limit (§4.7), so every charge stopped at its foot. SIM-fix4 heaps the spoil at a 34° angle
- * of repose with no lip at the rim. The cover's bearers now span the hole as dug (scenes.ts furnishPit coverDugRim, P28):
- * with 20 of them over the planned 8 m (x −3.8 … 3.8) the giant's front foot met the open strip at the dug rim (≈ ±4.3)
- * and tripped `ledge`, never `cover`.
- * Third pass (P28): a ruler's foot (and root) now stands on what is under its whole sole (rulerBody soleGround, a flat
- * box cast; World.supportAt with a sole for its footwork, so its foot load reaches the bearers, §4.11), and a support
- * its own step woke keeps holding it until it breaks (coverHoldTicks). Measured on the rebuilt pit (25 bearers from
- * undug ground to undug ground): stakes wound the giant in 9 of 9 runs (89-5,265 HP each). At 6 m/s every run has a
- * load break, then a `cover` trip, then stake wounds; they fail only the SPEC:344 gate: the stakes that break are
- * snapped by the giant's shins side-on (5-37 kJ to the stake), a blunt contact that is a brush on the giant (its own
- * motion, v_safe), so no `impact` event precedes those breaks. At 3 and 4.5 m/s the first bearer gives way to the foot's
- * impact before 0.2 s of load has built (no load break first) and the trip is `ledge`. The bridge control: the logs'
- * ends rest on the uneven rims as dug, so their tops stand 0.34-0.56 m (the giant's ankle is 0.39 m): it trips on them.
+ * AC-2(b). P28's first run found the pit unreachable (the spoil's berm, fixed by SIM-fix4); its second and third found
+ * the cover tripped `ledge`, the stakes broken without impacts and the bridge tripped on. Fourth pass (P28's fixes,
+ * docs/work/ledger.md): a ruler's support set and the lost-support trip rule (a support lost to its own weight or legs
+ * is a `cover` trip; precedence cover > ledge > obstacle); the mover shoves only what its straight part from the ankle
+ * to the hip meets (the round foot of the old capsule shoved the bearers lying at the pit's end at 4 m/s before the
+ * giant stood on them); a fallen ruler is a weight on what it lies on (the 4 kg bearers held a tripped giant up), and
+ * load-tests it; a stake its weight or a blow breaks is recorded as an impact on it first (SPEC:344); light load-broken
+ * debris crumbles (BREAK_TUNING.loadBreakMinKg: grass-bundle pieces load-broke themselves ≈ 200 a tick); the slope
+ * limit reads only ground it walks on (a bridge's logs, not the pit wall under them). The cover's bearers each span their
+ * own line of the hole and stop short of the spoil (scenes.ts), and so do the bridge's logs (bridgeLogs).
  */
 /**
  * The bridge control's logs over the pit as dug (see its DEPARTURE): along z, ≤ 1 m apart from the undug ground beyond
