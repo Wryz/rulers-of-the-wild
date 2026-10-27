@@ -20,6 +20,8 @@
 // Lab-first step (§11.2, RT-21), run with the real pipeline in this package (P28's lab runs, reported in the P28 report):
 // the pins below that differ from §11.2's are the lab's numbers, each with its own note.
 
+import { prismRForRoundDiam } from '../src/world/factory';
+import { PHYSICS_TUNING } from '../src/world/physics';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { toCm } from '../src/sim/commands';
 import type { Fighter } from '../src/sim/fighter';
@@ -471,6 +473,42 @@ describe('AC-2(a): a deadfall wounds the ape that disturbs it', () => {
  * impact before 0.2 s of load has built (no load break first) and the trip is `ledge`. The bridge control: the logs'
  * ends rest on the uneven rims as dug, so their tops stand 0.34-0.56 m (the giant's ankle is 0.39 m): it trips on them.
  */
+/**
+ * The bridge control's logs over the pit as dug (see its DEPARTURE): along z, ≤ 1 m apart from the undug ground beyond
+ * one end of the hole to the other, each 0.5 m onto the undug rim beyond its own line's dug width, stopping short of the
+ * spoil (ground no higher than its original there). `spawn` makes one (length, r, pose); returns them in x order.
+ */
+/** §11.2(b)'s bridge log section: "r 0.18 m" round (651 kg at 8 m of green wood) as the factory's 6-gon log of the same area. */
+const BRIDGE_LOG_R = prismRForRoundDiam(0.36, PHYSICS_TUNING.logFacets);
+
+function bridgeLogs(h: Harness, spawn: (o: { length: number; r: number; p: V3; q: Quat }) => number): number[] {
+  const t = h.w.terrain;
+  const dug = (x: number, z: number): boolean => t.heightAt(x, z) < t.originalHeightAt(x, z) - 0.05;
+  const raised = (x: number, z: number): boolean => t.heightAt(x, z) > t.originalHeightAt(x, z) + 0.05;
+  let xMin = 0;
+  let xMax = 0;
+  for (let z = -5; z <= 5; z += 0.25) for (let x = -6; x <= 6; x += 0.05) if (dug(x, z)) [xMin, xMax] = [Math.min(xMin, x), Math.max(xMax, x)];
+  const n = Math.ceil((xMax - xMin) / 1.0) + 1;
+  const logs: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const x = xMin + ((xMax - xMin) * i) / (n - 1) + 0.013;
+    // Its line's dug half-width (over the strip it covers), then 0.5 m onto the rim, short of the berm.
+    let w = 0;
+    for (const dx of [-0.2, 0, 0.2]) for (let z = 0; z <= 5; z += 0.05) if (dug(x + dx, z) || dug(x + dx, -z)) w = Math.max(w, z);
+    let hz = w + 0.5;
+    for (let z = w; z <= w + 0.5 + 1e-9; z += 0.05) {
+      if (raised(x, z) || raised(x, -z)) {
+        hz = Math.max(w + 0.25, z - 0.1);
+        break;
+      }
+    }
+    let rim = -Infinity;
+    for (const z of [w + 0.05, (w + hz) / 2, hz]) rim = Math.max(rim, t.heightAt(x, z), t.heightAt(x, -z));
+    logs.push(spawn({ length: 2 * hz, r: BRIDGE_LOG_R, p: { x, y: rim + BRIDGE_LOG_R + 0.02, z: 0 }, q: lyingAlong(0) }));
+  }
+  return logs;
+}
+
 describe('AC-2(b): a covered spike pit wounds the giant that steps on its cover', () => {
   let pit: Uint8Array;
   beforeAll(async () => {
@@ -641,27 +679,15 @@ describe('AC-2(b): a covered spike pit wounds the giant that steps on its cover'
     goTo(h, { x: 0, z: -12 });
     h.ticks(300);
     // The bridge (D-25: 651 kg logs no verb moves), spawned at their pose. DEPARTURE (§11.2(b) "8 green logs r 0.18 m ×
-    // 8 m (651 kg)"): the design's mass, 651 kg each, but over the hole as dug (P28: ≈ ±4.45 m by ±4.25 m, not the
-    // planned 8 × 6): long enough to bear 0.5 m on undug ground at both long rims, and as many as keep them ≤ 1 m apart
-    // from undug ground at one end to the other (the giant's 1.06 m sole bridges a gap that wide).
-    const dug = (x: number, z: number): boolean => h.w.terrain.heightAt(x, z) < h.w.terrain.originalHeightAt(x, z) - 0.05;
-    let xMin = 0;
-    let xMax = 0;
-    let zHalf = 0;
-    for (let z = -5; z <= 5; z += 0.25) for (let x = -6; x <= 6; x += 0.05) if (dug(x, z)) [xMin, xMax] = [Math.min(xMin, x), Math.max(xMax, x)];
-    for (let x = xMin; x <= xMax; x += 0.1) for (let z = 0; z <= 5; z += 0.05) if (dug(x, z) || dug(x, -z)) zHalf = Math.max(zHalf, z);
-    const lengthM = 2 * (zHalf + 0.5);
-    const n = Math.ceil((xMax - xMin) / 1.0) + 1;
-    const logs: number[] = [];
-    for (let i = 0; i < n; i++) {
-      const x = xMin + ((xMax - xMin) * i) / (n - 1) + 0.013;
-      let rim = -Infinity;
-      for (const z of [zHalf + 0.1, zHalf + 0.3, zHalf + 0.5]) rim = Math.max(rim, h.w.terrain.heightAt(x, z), h.w.terrain.heightAt(x, -z));
-      logs.push(h.log({ mass: 651, length: lengthM, r: 0.18, material: 'greenWood', p: { x, y: rim + 0.22, z: 0 }, q: lyingAlong(0) }));
-    }
+    // 8 m (651 kg)"): the design's mass, 651 kg each, over the hole as dug (P28: ≈ ±4.45 m by up to ±4.25 m, not the
+    // planned 8 × 6), as many as keep them ≤ 1 m apart from undug ground at one end to the other (the giant's 1.06 m
+    // sole bridges a gap that wide), each as long as its own line across the hole needs to bear 0.5 m on the undug rim
+    // beyond it, short of the spoil's berm: a log as long as the widest point (9.5 m) lay with its ends up on the berm's
+    // flanks, its top 0.34-0.56 m above the rim (the giant's ankle is 0.39 m) where the giant stepped onto it, and tripped.
+    const logs = bridgeLogs(h, (o) => h.log({ material: 'greenWood', ...o }));
     h.ticks(240);
     const lr = (h.ent(logs[0]).shape as { r: number }).r;
-    console.info(`bridge: ${logs.length} logs of ${h.ent(logs[0]).mass.toFixed(0)} kg, ${lengthM.toFixed(2)} m, r ${lr.toFixed(3)}, over x ${xMin.toFixed(2)} … ${xMax.toFixed(2)}; tops at ${logs.map((l) => (h.ent(l).pose.p.y + lr).toFixed(2)).join(', ')} m`);
+    console.info(`bridge: ${logs.length} logs of ${h.ent(logs[0]).mass.toFixed(0)} kg, ${logs.map((l) => (2 * (h.ent(l).shape as { halfHeight: number }).halfHeight).toFixed(2)).join(', ')} m, r ${lr.toFixed(3)}; tops at ${logs.map((l) => (h.ent(l).pose.p.y + lr).toFixed(2)).join(', ')} m`);
     const from = h.history.world.length;
     const giant = h.creature('giantApe', { x: -30, z: 0 }, Math.PI / 2, { brain: 'off' });
     h.script(giant, { kind: 'charge', heading: Math.PI / 2, speed: 6 });

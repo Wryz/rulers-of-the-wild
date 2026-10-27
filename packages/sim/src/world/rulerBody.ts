@@ -739,6 +739,9 @@ export class RulerBodies {
     for (let pass = 0; pass < 2; pass++) {
       const l = Math.hypot(dx, dz);
       if (!(l > TINY)) return [0, 0];
+      // P28 fix: terrain lying more than the ankle below the root there is not what it walks on (a bridge of logs over a
+      // pit, a cover): its slope (the pit's wall under the bridge's far end) limits nothing; the step-up below still does.
+      if (w.terrain.heightAt(prev.x + dx, prev.z + dz) < prev.y - rulerAnkleM(f)) break;
       const n = w.terrain.normalAt(prev.x + dx, prev.z + dz, { x: 0, y: 1, z: 0 });
       const gx = -n.x / n.y;
       const gz = -n.z / n.y;
@@ -1335,6 +1338,64 @@ export class RulerBodies {
    * mass once. Read from contact manifolds, which persist while the island sleeps (MAP gap-3 §2.4). Also the entities
    * among them (by id).
    */
+  /**
+   * P28 (§4.11 "resting weights"): what a dynamic ruler (tripped, or a corpse) lies on, for the loads pass: per owner its
+   * colliders rest on (a contact whose normal up into the ruler is steeper than `minNormalY`), the entity (null: the
+   * terrain or a fixed entity) and the mean contact point, in owner order; empty for a standing ruler.
+   */
+  lyingOn(f: Fighter, minNormalY: number): { entity: Entity | null; point: V3 }[] {
+    const rb = this.byId.get(f.id);
+    if (!rb || !rb.dynamic) return [];
+    const w = this.world;
+    const rapier = w.physics.rapier;
+    const by = new Map<string, { owner: Owner; sum: V3; k: number }>();
+    for (const c1 of rb.cols) {
+      const others: RAPIER.Collider[] = [];
+      rapier.contactPairsWith(c1, (c2) => {
+        if (c2) others.push(c2);
+      });
+      others.sort((a, b) => a.handle - b.handle);
+      for (const c2 of others) {
+        const owner = w.physics.ownerOf(c2.handle);
+        if (!owner || (owner.kind !== 'terrain' && owner.kind !== 'entity')) continue;
+        let rests = false;
+        const sum = { x: 0, y: 0, z: 0 };
+        let k = 0;
+        rapier.contactPair(c1, c2, (mf, flipped) => {
+          if (mf.numContacts() === 0) return;
+          // The normal out of the ruler's collider (Rapier's points out of the manifold's first collider).
+          const ny = (flipped ? -1 : 1) * mf.normal().y;
+          if (!(-ny > minNormalY)) return;
+          rests = true;
+          for (let i = 0; i < mf.numSolverContacts(); i++) {
+            const p = mf.solverContactPoint(i);
+            if (!p) continue;
+            sum.x += p.x;
+            sum.y += p.y;
+            sum.z += p.z;
+            k++;
+          }
+        });
+        if (!rests) continue;
+        const key = ownerKey(owner);
+        const cur = by.get(key);
+        if (cur) {
+          cur.sum = { x: cur.sum.x + sum.x, y: cur.sum.y + sum.y, z: cur.sum.z + sum.z };
+          cur.k += k;
+        } else by.set(key, { owner, sum, k });
+      }
+    }
+    const out: { entity: Entity | null; point: V3 }[] = [];
+    const com = rb.body.worldCom();
+    for (const s of [...by.values()].sort((a, b) => compareOwners(a.owner, b.owner))) {
+      const e = s.owner.kind === 'entity' ? (w.entities.get(s.owner.id) ?? null) : null;
+      if (s.owner.kind === 'entity' && !e) continue;
+      const point = s.k > 0 ? { x: s.sum.x / s.k, y: s.sum.y / s.k, z: s.sum.z / s.k } : { x: com.x, y: com.y, z: com.z };
+      out.push({ entity: e && e.state !== 'fixed' ? e : null, point });
+    }
+    return out;
+  }
+
   private restingLoad(rb: RulerBody): { kg: number; entities: number[] } {
     const rapier = this.world.physics.rapier;
     const minY = RULER_TUNING.pinnedNormalY;

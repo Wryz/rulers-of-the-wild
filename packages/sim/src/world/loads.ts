@@ -27,6 +27,9 @@
 //   and no share of a covering's load that came from that fighter. Without that, the pieces of a bearer broken by a
 //   ruler foot broke again under the same foot every tick until they fell.
 import RAPIER from '@dimforge/rapier3d-compat';
+import { BONE_ZONE } from '../body/mass';
+import { BONES, type BoneName } from '../body/skeleton';
+import { applyImpact } from '../sim/impact';
 import type { Fighter } from '../sim/fighter';
 import { DT } from '../sim/math';
 import { SPECIES_BODY } from '../sim/species';
@@ -146,6 +149,18 @@ export class Loads {
       deliver(e, e.mass * g, { x: com.x, y: com.y, z: com.z }, { kind: 'entity', id: e.id }, null, 0, new Set());
     }
 
+    // P28 (§4.11 "resting weights"): a ruler down on its dynamic body (tripped, or dead) is a weight on what it lies on, in
+    // equal shares among them (the terrain and fixed entities take theirs into the ground), whether or not it is still:
+    // a tripped giant sliding over a pit's cover was held up by 4 kg bearers no load ever tested.
+    for (const f of w.combat.fighters) {
+      if (!f.ruler) continue;
+      const on = w.rulers.lyingOn(f, LOAD_TUNING.supportNormalY);
+      if (on.length === 0) continue;
+      const share = (f.mass * g) / on.length;
+      const loader: Owner = { kind: 'fighter', id: f.id, part: 'ruler' };
+      for (const s of on) if (s.entity && (dynamicBody(s.entity) || s.entity.state === 'anchored')) deliver(s.entity, share, s.point, loader, null, 0, new Set());
+    }
+
     // P28 (§4.7 steps 7-8, the lost-support rule): each entity that carried a share of a ruler's planted foot joins its
     // support set (RulerBodies.noteFootLoad): the coverings the load passed through, and what received it.
     for (const foot of feet) {
@@ -188,6 +203,7 @@ export class Loads {
       // The heaviest load point breaks it; a second point more than loadPointSplitM away along it makes 3 pieces.
       const byLoad = [...points].sort((a, b) => b.n - a.n);
       const main = byLoad[0];
+      weightContact(w, e, main.point, main.loader);
       w.breaking.loadBreak(e, main.point, main.loader);
       const ax = principalAxis(e.shape);
       const along = (p: V3): number => {
@@ -299,12 +315,20 @@ export class Loads {
     if (!c) return false;
     // Up through the entity from twice its reach below the point, as far again above it: the first hit is its underside.
     const below = 2 * bodyReach(e);
-    const from = { x: point.x, y: point.y - below, z: point.z };
-    const toi = c.castRay(new RAPIER.Ray(from, { x: 0, y: 1, z: 0 }), 2 * below, true);
+    let from = { x: point.x, y: point.y - below, z: point.z };
+    let toi = c.castRay(new RAPIER.Ray(from, { x: 0, y: 1, z: 0 }), 2 * below, true);
+    if (toi < 0) {
+      // P28 fix: the load point isn't over the entity (a big sole on a thin stake's top): the span is judged under its
+      // point nearest the load. Read at the load point, nothing was under it, and an upright driven stake under a giant's
+      // foot was load-tested as if it spanned a gap, and load-broke (no impact on the foot first, SPEC:344).
+      const near = c.projectPoint(point, true)?.point ?? point;
+      from = { x: near.x, y: point.y - below, z: near.z };
+      toi = c.castRay(new RAPIER.Ray(from, { x: 0, y: 1, z: 0 }), 2 * below, true);
+    }
     const under = toi >= 0 ? from.y + toi : point.y;
     const gap = LOAD_TUNING.spanGapM;
-    if (under - w.terrain.heightAt(point.x, point.z) <= gap) return false;
-    const hit = w.queries.castRay({ x: point.x, y: under, z: point.z }, { x: 0, y: -1, z: 0 }, gap, {
+    if (under - w.terrain.heightAt(from.x, from.z) <= gap) return false;
+    const hit = w.queries.castRay({ x: from.x, y: under, z: from.z }, { x: 0, y: -1, z: 0 }, gap, {
       terrain: false,
       entities: 'static',
       exclude: { entities: [e.id] },
@@ -422,4 +446,41 @@ function rotate(q: { x: number; y: number; z: number; w: number }, v: V3): V3 {
     y: v.y + q.w * ty + (q.z * tx - q.x * tz),
     z: v.z + q.w * tz + (q.x * ty - q.y * tx),
   };
+}
+
+/**
+ * P28 (SPEC:344, "an impact's damage is applied before it breaks"): a ruler whose weight (a planted foot, or its body
+ * lying on it) load-breaks an entity met it: that contact is recorded on the ruler as an `impact` from the entity, before
+ * the break, with no energy (a weight is no blow: no damage, no Δv, no trip). Without it a loose stake crushed under a
+ * fallen giant broke with no impact of its own (AC-2(b)'s gate). Nothing for any other loader.
+ */
+function weightContact(w: World, e: Entity, point: V3, loader: Owner | null): void {
+  if (!loader || loader.kind !== 'fighter') return;
+  const f = w.combat.fighters.find((x) => x.id === loader.id);
+  if (!f?.ruler || !f.alive) return;
+  let bone: BoneName = loader.bone ?? 'pelvis';
+  if (!loader.bone) {
+    let best = Infinity;
+    for (const b of BONES) {
+      const p = f.rig[b].pos;
+      const d = Math.hypot(p.x - point.x, p.y - point.y, p.z - point.z);
+      if (d < best) [best, bone] = [d, b];
+    }
+  }
+  applyImpact(w.combat, {
+    target: f,
+    bone,
+    zone: BONE_ZONE[bone],
+    rulerZone: null,
+    point: { ...point },
+    normal: { x: 0, y: -1, z: 0 },
+    mEff: e.mass,
+    vn: 0,
+    sharpness: 0,
+    energy: 0,
+    toughness: 0,
+    dv: { x: 0, y: 0, z: 0 },
+    impactorMass: e.mass,
+    cause: { kind: 'entity', entityId: e.id, fighterId: null, credit: [...e.credit], held: false, feature: 'fall' },
+  });
 }
