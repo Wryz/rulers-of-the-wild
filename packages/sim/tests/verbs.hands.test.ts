@@ -337,11 +337,11 @@ describe('drag (§5.1): the B lab as a test', () => {
    * z = 0, and with the pull in the solver it stuck on the next tile's first edge (600 N, 0 m/s; the pre-step impulse
    * hopped it). The tiles' seam is a sim issue of its own (docs/work/ledger.md).
    */
-  async function drag(massKg: number): Promise<{ speed: number; maxGap: number; moved: number }> {
+  async function drag(massKg: number, from: { x: number; z: number } = { x: -18, z: -6 }): Promise<{ speed: number; maxGap: number; moved: number }> {
     const w = await make(31);
     const p = w.player!;
-    const X0 = -18;
-    const Z0 = -6;
+    const X0 = from.x;
+    const Z0 = from.z;
     w.teleport(p, X0, Z0, -Math.PI / 2);
     const L = 3.6;
     const id = log(w, massKg, L, X0 - 0.8 - L / 2, Z0);
@@ -368,6 +368,15 @@ describe('drag (§5.1): the B lab as a test', () => {
     console.info(`drag 150 kg: ${r.speed.toFixed(2)} m/s, moved ${r.moved.toFixed(2)} m, max gap ${r.maxGap.toFixed(3)} m`);
     expect(r.speed).toBeGreaterThanOrEqual(1.5);
     expect(r.maxGap).toBeLessThanOrEqual(VERB_TUNING.tetherM + 0.05);
+  });
+
+  // KNOWN REGRESSION (P28 fifth pass, docs/work/ledger.md; TODO in src/world/terrain.ts): from the original start at the
+  // origin the force-dragged log runs along the heightfield tiles' seam (z = 0) and sticks dead on the next tile's first
+  // edge at x = 0 (0.11 m/s). It passes again once a body slides across a tile seam as it does across a tile.
+  it.fails('KNOWN REGRESSION: from the origin, across the terrain tiles\' seam, 150 kg follows at ≥ 1.5 m/s', async () => {
+    const r = await drag(150, { x: 0, z: 0 });
+    console.info(`drag 150 kg across the tile seam: ${r.speed.toFixed(2)} m/s, moved ${r.moved.toFixed(2)} m (KNOWN REGRESSION)`);
+    expect(r.speed).toBeGreaterThanOrEqual(1.5);
   });
 
   it('300 kg (the limit raised for the test) hardly moves: the 600 N pull is a felt limit (< 0.05 m/s)', async () => {

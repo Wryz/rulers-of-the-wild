@@ -28,7 +28,7 @@ import type { Fighter } from '../src/sim/fighter';
 import { getTuningValue, setTuningValue } from '../src/tuning/registry';
 import { RULER_BODY_TUNING } from '../src/world/rulerBody';
 import type { Quat, V3, WorldEvent } from '../src/world/types';
-import { buildHauledLog, buildLeaningLog, buildNotchedTree, LEAN_P28, lyingAlong } from './support/scenes';
+import { buildHauledLog, buildLeaningLog, buildNotchedTree, buildProppedLog, LEAN_P28, lyingAlong, PROPPED_P28, PROPPED_WALKED } from './support/scenes';
 import { BACK_SLOT, cachedScene, type Harness, loadHarness, makeHarness, SCENE_BUILD_TIMEOUT_MS, type XZ } from './support/worldHarness';
 
 /** §11: anything with Rapier gets 120 s. */
@@ -228,39 +228,13 @@ function holdTilt(h: Harness, r: { prop: number; log: number }): number {
   return tilt;
 }
 
-/**
- * §11.2(a)'s staged deadfall geometry: a stick r 0.07 m `propLengthM` long placed upright at x = propX, a dry hex log
- * `logLengthM` long (circumradius `logR`; the design's 0.17 m) from the ground at x = 0 onto its top (25°).
- */
-type StagedGeometry = { propX: number; propLengthM: number; logLengthM: number; logR: number };
-/**
- * DEPARTURE (P28, §11.2(a) staged steps 1-2 "2.38 m … x = 5.07 … 6.0 m … circumradius 0.17 m"): the bait-tug runs
- * use a 2.47 m stick at x 5.3 and a 6.2 m log (25° still): the underside over the ape 0.8 m in from the bait stands
- * 0.1 m higher, so the log, once sprung, falls far enough to arrive at v_n ≥ 2 m/s (1.83-1.89 m/s on the design's).
- * Fifth pass (the sustained forces in-solver, C F3 departure): the log is circumradius 0.13 m (150 kg, not 248 kg).
- * With forces in-solver the design's 248 kg log holds the prop against a sustained 850 N on the bait (the C lab), past
- * the ape's 907.5 N tug; the ape's tug, applied where it grips the 1 kg hide (which tumbles and bounces on its lash),
- * moves the prop less than the same force at the bait's centre: 0.15 m (199 kg) held the tug 2 s; 0.13-0.14 m spring
- * to it in 0.68-0.88 s and hold the 700 N tug (P28 lab). Under a step force at the bait's centre this prop gives from
- * ≈ 600 N (the threshold test below measures the 199 kg and 248 kg logs).
- */
-const STAGED_DEADFALL: StagedGeometry = { propX: 5.3, propLengthM: 2.47, logLengthM: 6.2, logR: 0.13 };
-const STAGED_AS_DESIGNED: StagedGeometry = { propX: 5.07, propLengthM: 2.38, logLengthM: 6, logR: 0.17 };
-/**
- * DEPARTURE (P28 fifth pass, §11.2(a) staged "circumradius 0.17 m"): the walked run keeps the design's stick and log
- * length with a 0.16 m log (220 kg): with the controller's lean on the bait and prop a force (C F3 departure), the
- * design's log, having hit the ape's head at 4.5 m/s, rolled 0.83 m off its plane (gate < 0.35 m). Chaotic: 0.13,
- * 0.15 and 0.17 m roll 0.61-0.91 m, 0.16 m 0.25 m (P28 lab).
- */
-const STAGED_WALKED: StagedGeometry = { ...STAGED_AS_DESIGNED, logR: 0.16 };
-
 describe('AC-2(a): a deadfall wounds the ape that disturbs it', () => {
   /** §11.2(a): the log rises along +x (yaw π/2) from its lower end at the origin: "toward its own body" is −x. */
   const TOWARD_BODY = -Math.PI / 2;
 
   /*
    * §11.2(a)'s own recipes (the bait tug), with their gates as written; the scenes are raised a little (LEAN_P28,
-   * STAGED_DEADFALL, STAGED_WALKED: departures recorded there and in docs/work/ledger.md).
+   * PROPPED_P28, PROPPED_WALKED: departures recorded there and in docs/work/ledger.md).
    * P28's sim fixes behind them: the crouch shows its posture and low postures cross-fade (the body never rises through
    * standing height); the tugging ape backs off facing the bait, holding it where it gripped it, and its arms draw the
    * grip in at the hand speed (VERB_TUNING.tugHoldMinM), so the pull reaches full strength without the ape walking back
@@ -346,88 +320,6 @@ describe('AC-2(a): a deadfall wounds the ape that disturbs it', () => {
     expect(hit!.damage).toBeLessThan(4);
   }, LONG_IT_MS);
 
-  /**
-   * §11.2(a)'s staged scene: a dry stick r 0.07 × 2.38 m carried and placed upright, not driven, at x 5.07; a dry hex
-   * log 6.0 m, circumradius 0.17 m spawned free at its pose (D-25), its lower end on the ground at x 0 and its
-   * underside on the stick's top (25°); a 1 kg hide bait placed 0.55 m inward of the stick and lashed to it (a 0.65 m
-   * vine). DEVIATION (§11.2(a) "≈ 170 kg"): the factory's dry wood makes that log 248 kg; the recipe's dimensions are
-   * kept (they set the underside's height over the ape). The runs build it to their geometry (STAGED_DEADFALL,
-   * STAGED_WALKED, STAGED_AS_DESIGNED: the departures recorded there).
-   */
-  function buildStagedDeadfall(h: Harness, STAGED: StagedGeometry = STAGED_DEADFALL): { prop: number; log: number; bait: number } {
-    const PROP = { x: STAGED.propX, z: 0.013, lengthM: STAGED.propLengthM, r: 0.07 };
-    const g = h.w.terrain.heightAt(PROP.x, PROP.z);
-    const prop = h.stick({ length: PROP.lengthM, r: PROP.r, p: { x: 5, y: g + PROP.r + 0.03, z: 3 }, q: lyingAlong(Math.PI / 2) });
-    h.ticks(20);
-    take(h, prop, 'take the prop');
-    goTo(h, { x: PROP.x, z: -1.2 });
-    h.must({ verb: 'place', target: 0, at: toCm({ x: PROP.x, y: g + PROP.lengthM / 2, z: PROP.z }), yaw: 0, pitch: 64, drive: 0 }, 'place the prop upright');
-    h.ticks(60);
-    const sp = h.ent(prop).pose.p;
-    const top = sp.y + PROP.lengthM / 2 - g;
-    // The log: its underside on the line from (0, ground) to the prop's top; a flat face down.
-    const th = Math.atan2(top, sp.x);
-    const ri = STAGED.logR * Math.cos(Math.PI / 6);
-    const c = { x: -ri * Math.sin(th) + (STAGED.logLengthM / 2) * Math.cos(th), y: g + ri * Math.cos(th) + (STAGED.logLengthM / 2) * Math.sin(th) + 0.01 };
-    goTo(h, { x: 3, z: -4 });
-    const log = h.log({ length: STAGED.logLengthM, r: STAGED.logR, p: { x: c.x, y: c.y, z: 0 }, q: mulQ(aboutZ(th), lyingAlong(Math.PI / 2)) });
-    h.ticks(120);
-    // The bait, placed lying 0.55 m inward of the prop, lashed to the prop's side facing it by a 0.65 m vine.
-    const bx = sp.x - 0.55;
-    const bait = h.box({ p: { x: bx, y: g + 0.03, z: -2.5 }, size: [0.25, 0.04, 1 / 1100 / (0.25 * 0.04)], material: 'hide', state: 'free', look: 'hide' });
-    h.ticks(10);
-    take(h, bait, 'take the bait');
-    goTo(h, { x: bx, z: -1.0 });
-    h.must({ verb: 'place', target: 0, at: toCm({ x: bx, y: g + 0.04, z: PROP.z }), yaw: 64, pitch: 0 }, 'place the bait');
-    h.ticks(20);
-    const coil = h.coil({ material: 'vine', lengthM: 3, at: { x: 2, y: g, z: -2 } });
-    h.ticks(5);
-    take(h, coil, 'take the vine coil');
-    h.must({ verb: 'stow', target: 0, slot: 0 }, 'the coil to the belt');
-    goTo(h, { x: bx + 0.2, z: -0.9 });
-    const bp = h.ent(bait).pose.p;
-    const btop = { x: bp.x, y: bp.y + 0.02, z: bp.z };
-    const face = { x: sp.x - PROP.r * Math.cos(Math.PI / 8), z: sp.z };
-    const dh = flat(face, btop);
-    h.must({ verb: 'lash', target: bait, second: prop, at: toCm(btop), at2: toCm({ x: face.x, y: btop.y + Math.sqrt(0.65 * 0.65 - dh * dh), z: face.z }) }, 'lash the bait to the prop');
-    h.ticks(30);
-    goTo(h, { x: -3, z: -6 });
-    return { prop, log, bait };
-  }
-
-  /**
-   * P28 (C F3 departure: sustained code forces are in-solver forces, EntityStore.queueForce): the staged prop's hold
-   * under a force on the bait toward the ape, applied in full from the first tick (a step, the C lab's method) at the
-   * bait's centre: the tick of the spring (the log's centre 5 cm down) within 360 ticks, or -1.
-   */
-  function springUnder(h: Harness, r: { log: number; bait: number }, forceN: number): number {
-    h.ticks(60);
-    const y0 = h.ent(r.log).pose.p.y;
-    for (let t = 0; t < 360; t++) {
-      if (t < 120) h.w.entities.queueForce(r.bait, { x: -forceN, y: 0, z: 0 }, { ...h.ent(r.bait).pose.p });
-      h.step();
-      if (h.ent(r.log).pose.p.y < y0 - 0.05) return t;
-    }
-    return -1;
-  }
-
-  it('the staged prop holds a sustained 700 N on its bait and gives at 762 N (199 kg log); the design\'s 248 kg one holds 850 N (the C lab)', async () => {
-    const at = async (g: StagedGeometry, n: number): Promise<{ kg: number; spring: number }> => {
-      const h = await make(48, 40);
-      const r = buildStagedDeadfall(h, g);
-      return { kg: h.ent(r.log).mass, spring: springUnder(h, r, n) };
-    };
-    const g199 = { ...STAGED_DEADFALL, logR: 0.15 };
-    const runs = { hold700: await at(g199, 700), give762: await at(g199, 762), design850: await at(STAGED_AS_DESIGNED, 850), design908: await at(STAGED_AS_DESIGNED, 908) };
-    console.info(`deadfall staged, sustained force on the bait: ${Object.entries(runs).map(([k, v]) => `${k} (${v.kg.toFixed(0)} kg) spring ${v.spring}`).join('; ')}`);
-    // PIN (P28 fifth pass, the C lab's thresholds; under C F3's pre-step impulses this prop sprang from ≈ 500 N):
-    // holds 700 N 2 s; springs at 762 N (60 ticks); the design's log holds 850 N, springs at 908 N (57 ticks).
-    expect(runs.hold700.spring).toBe(-1);
-    expect(runs.give762.spring).toBeGreaterThan(0);
-    expect(runs.design850.spring).toBe(-1);
-    expect(runs.design908.spring).toBeGreaterThan(0);
-  }, LONG_IT_MS);
-
   function stagedHold(h: Harness, r: { prop: number; log: number; bait: number }): void {
     // The log was only spawned (D-25): its credit is [] (RT-19); the prop and the bait were placed by the player.
     expect(h.ent(r.log).credit).toEqual([]);
@@ -441,7 +333,7 @@ describe('AC-2(a): a deadfall wounds the ape that disturbs it', () => {
 
   it('staged physics (§11.2(a) as written): the 6 m log on a 2.38 m stick holds 120 s awake, springs when the ape tugs the bait toward itself, and hits it at v_n ≥ 2 m/s', async () => {
     const h = await make(48, 40);
-    const r = buildStagedDeadfall(h);
+    const r = buildProppedLog(h);
     const vnOf = watchVelocities(h, [r.log]);
     stagedHold(h, r);
     const z0 = h.ent(r.log).pose.p.z;
@@ -467,7 +359,7 @@ describe('AC-2(a): a deadfall wounds the ape that disturbs it', () => {
 
   it('staged negative control: a 700 N tug does not spring it', async () => {
     const h = await make(48, 40);
-    const r = buildStagedDeadfall(h);
+    const r = buildProppedLog(h);
     const vnOf = watchVelocities(h, [r.log]);
     h.ticks(60);
     const b = h.ent(r.bait).pose.p;
@@ -480,7 +372,7 @@ describe('AC-2(a): a deadfall wounds the ape that disturbs it', () => {
 
   it('staged physics: the 6 m log springs on an ape that walks its route under it into the prop, and hits it at v_n ≥ 2 m/s', async () => {
     const h = await make(48, 40);
-    const r = buildStagedDeadfall(h, STAGED_WALKED);
+    const r = buildProppedLog(h, PROPPED_WALKED);
     const vnOf = watchVelocities(h, [r.log]);
     stagedHold(h, r);
     const z0 = h.ent(r.log).pose.p.z;
@@ -498,6 +390,74 @@ describe('AC-2(a): a deadfall wounds the ape that disturbs it', () => {
     // GATE: the log lands within 0.35 m of its own vertical plane.
     expect(Math.abs(zEnd - z0)).toBeLessThan(0.35);
   }, LONG_IT_MS);
+
+  /*
+   * LOGGED, not gated (P28 review): how robust the raised geometries are. The bait-tug gate and its control on the
+   * neighbourhood of LEAN_P28 (pitch ± 1°, log length ± 0.1 m) and of PROPPED_P28 (log circumradius 0.13-0.16 m), each
+   * without the 120 s hold (60 ticks settle instead): the share of variants whose every gate passes is printed (and in
+   * the ledger). Nothing here is asserted.
+   */
+  it('LOGGED sweep (not gated): the gates on the neighbourhood of LEAN_P28 and PROPPED_P28', async () => {
+    const rows: string[] = [];
+    let leanPass = 0;
+    let leanN = 0;
+    for (const dPitch of [-1, 0, 1]) {
+      for (const dLen of [-0.1, 0, 0.1]) {
+        const lean = { ...LEAN_P28, pitchDeg: LEAN_P28.pitchDeg + dPitch, logLengthM: LEAN_P28.logLengthM + dLen };
+        leanN++;
+        try {
+          const h = await make(44, 40);
+          const r = buildLeaningLog(h, { at: { x: 0, z: 0 }, yaw: Math.PI / 2, lean });
+          const vnOf = watchVelocities(h, [r.log]);
+          h.walk({ x: -4, z: -6 });
+          h.ticks(60);
+          const b = h.ent(r.bait).pose.p;
+          const res = apeAtBait(h, { log: r.log, bait: r.bait, stand: { x: b.x - 0.45, z: b.z }, act: { tugYaw: TOWARD_BODY }, vnOf });
+          const hit = res.hits.some((i, k) => !i.cause.held && i.damage > 0 && res.vn[k] >= 1);
+          const gate = res.spring > 0 && (res.spring - res.grip) / 60 <= 1 && hit && h.tripwires().length === 0 && res.fit > 0;
+          const hc = await make(44, 40);
+          const rc = buildLeaningLog(hc, { at: { x: 0, z: 0 }, yaw: Math.PI / 2, lean });
+          const vc = watchVelocities(hc, [rc.log]);
+          hc.walk({ x: -4, z: -6 });
+          hc.ticks(60);
+          const bc = hc.ent(rc.bait).pose.p;
+          const ctl = withTugN(1.1, 200, () => apeAtBait(hc, { log: rc.log, bait: rc.bait, stand: { x: bc.x - 0.45, z: bc.z }, act: { tugYaw: TOWARD_BODY }, vnOf: vc }));
+          const control = ctl.spring === -1;
+          if (gate && control) leanPass++;
+          rows.push(`lean ${lean.pitchDeg}° ${lean.logLengthM.toFixed(1)} m: gate ${gate ? 'pass' : 'FAIL'} (spring ${res.spring < 0 ? 'none' : ((res.spring - res.grip) / 60).toFixed(2) + ' s'}, hit ${hit}, fit ${res.fit.toFixed(2)}), 200 N control ${control ? 'holds' : 'SPRINGS'}`);
+        } catch (e) {
+          rows.push(`lean ${lean.pitchDeg}° ${lean.logLengthM.toFixed(1)} m: not built (${(e as Error).message.slice(0, 60)})`);
+        }
+      }
+    }
+    let propPass = 0;
+    let propN = 0;
+    for (const logR of [0.13, 0.14, 0.15, 0.16]) {
+      const g = { ...PROPPED_P28, logR };
+      propN++;
+      const h = await make(48, 40);
+      const r = buildProppedLog(h, g);
+      const vnOf = watchVelocities(h, [r.log]);
+      h.ticks(60);
+      const z0 = h.ent(r.log).pose.p.z;
+      const b = h.ent(r.bait).pose.p;
+      const res = apeAtBait(h, { log: r.log, bait: r.bait, stand: { x: b.x - 0.8, z: b.z }, act: { tugYaw: TOWARD_BODY }, vnOf });
+      h.ticks(240);
+      const plane = Math.abs(h.ent(r.log).pose.p.z - z0);
+      const hit = res.hits.some((i, k) => !i.cause.held && i.damage > 0 && res.vn[k] >= 2);
+      const gate = res.spring > 0 && (res.spring - res.grip) / 60 <= 1 && hit && h.tripwires().length === 0 && plane < 0.35 && res.fit > 0;
+      const hc = await make(48, 40);
+      const rc = buildProppedLog(hc, g);
+      const vc = watchVelocities(hc, [rc.log]);
+      hc.ticks(60);
+      const bc = hc.ent(rc.bait).pose.p;
+      const ctl = withTugN(1.1, 700, () => apeAtBait(hc, { log: rc.log, bait: rc.bait, stand: { x: bc.x - 0.8, z: bc.z }, act: { tugYaw: TOWARD_BODY }, vnOf: vc }));
+      const control = ctl.spring === -1;
+      if (gate && control) propPass++;
+      rows.push(`propped r ${logR} (${h.ent(r.log).mass.toFixed(0)} kg): gate ${gate ? 'pass' : 'FAIL'} (spring ${res.spring < 0 ? 'none' : ((res.spring - res.grip) / 60).toFixed(2) + ' s'}, v_n≥2 hit ${hit}, plane ${plane.toFixed(2)} m, tripwires ${h.tripwires().length}), 700 N control ${control ? 'holds' : 'SPRINGS'}`);
+    }
+    console.info(`deadfall sweep (LOGGED): LEAN_P28 neighbourhood ${leanPass}/${leanN} pass every gate; PROPPED_P28 r 0.13-0.16 m ${propPass}/${propN}\n${rows.join('\n')}`);
+  }, 3 * LONG_IT_MS);
 });
 
 // ---------------------------------------------------------------------------
@@ -572,8 +532,8 @@ describe('AC-2(b): a covered spike pit wounds the giant that steps on its cover'
     const { stakes, bearers, grass } = parts(h);
     console.info(`pit: ${stakes.size} stakes, ${bearers.length} bearers, ${grass.length} grass bundles on them`);
     expect(stakes.size).toBe(108);
-    // 20 bearers over the planned 8 m; furnishPit's coverDugRim spans the hole as dug, so at least that many.
-    expect(bearers.length).toBeGreaterThanOrEqual(20);
+    // 20 bearers over the planned 8 m; furnishPit's coverDugRim spans the hole as dug: the deterministic build lays 26.
+    expect(bearers.length).toBe(26);
     const cover = [...bearers, ...grass];
     const y0 = new Map(cover.map((id) => [id, h.ent(id).pose.p.y]));
     for (const id of cover) h.keepAwake(id);
@@ -689,11 +649,14 @@ describe('AC-2(b): a covered spike pit wounds the giant that steps on its cover'
     }
     // GATE: no NaN.
     expect(nan).toBe(false);
-    // PIN (§11.2(b): 385-3,084 HP per run, I-rev ac3_density.out): the pit's damage in that band.
-    expect(pitDamage).toBeGreaterThan(385 * 0.5);
+    // PIN (P28 review; measured on the cached pit: 1,620-4,797 HP over the 9 runs): 1,200-6,500 HP. DEPARTURE (§11.2(b):
+    // 385-3,084 HP per run, I-rev ac3_density.out): 4 of the 9 runs land above the design's upper bound (3,182-4,797 HP:
+    // the giant lies across 2-6 stakes after the cover trip; docs/work/ledger.md).
+    expect(pitDamage).toBeGreaterThan(1200);
+    expect(pitDamage).toBeLessThan(6500);
   }, LONG_IT_MS);
 
-  it('negative control: the same pit bridged by 651 kg green logs (cover carried off): the giant crosses at 6 m/s, nothing breaks, no trip, never in the pit', async () => {
+  it('negative control: the same pit bridged by green logs of the design\'s 0.36 m round section, each spanning its line (12 logs, ≈ 0.2-0.75 t by length; cover carried off): the giant crosses at 6 m/s, nothing breaks, no trip, never in the pit', async () => {
     const h = await load(pit);
     const { bearers } = parts(h);
     // The giant can only cross what it can reach: the charge line must be no steeper than its mover climbs (§4.7). On
@@ -721,8 +684,9 @@ describe('AC-2(b): a covered spike pit wounds the giant that steps on its cover'
     console.info(`bridge: bearers still over the pit after carrying them off: ${left.length}`);
     goTo(h, { x: 0, z: -12 });
     h.ticks(300);
-    // The bridge (D-25: 651 kg logs no verb moves), spawned at their pose. DEPARTURE (§11.2(b) "8 green logs r 0.18 m ×
-    // 8 m (651 kg)"): the design's mass, 651 kg each, over the hole as dug (P28: ≈ ±4.45 m by up to ±4.25 m, not the
+    // The bridge (D-25: logs no verb moves), spawned at their pose. DEPARTURE (§11.2(b) "8 green logs r 0.18 m ×
+    // 8 m (651 kg)"): the design's section (r 0.18 m round), not its mass: each log only as long as its line needs, so
+    // ≈ 0.2-0.75 t (651 kg would be a full 8 m), over the hole as dug (P28: ≈ ±4.45 m by up to ±4.25 m, not the
     // planned 8 × 6), as many as keep them ≤ 1 m apart from undug ground at one end to the other (the giant's 1.06 m
     // sole bridges a gap that wide), each as long as its own line across the hole needs to bear 0.5 m on the undug rim
     // beyond it, short of the spoil's berm: a log as long as the widest point (9.5 m) lay with its ends up on the berm's
@@ -730,7 +694,7 @@ describe('AC-2(b): a covered spike pit wounds the giant that steps on its cover'
     const logs = bridgeLogs(h, (o) => h.log({ material: 'greenWood', ...o }));
     h.ticks(240);
     const lr = (h.ent(logs[0]).shape as { r: number }).r;
-    console.info(`bridge: ${logs.length} logs of ${h.ent(logs[0]).mass.toFixed(0)} kg, ${logs.map((l) => (2 * (h.ent(l).shape as { halfHeight: number }).halfHeight).toFixed(2)).join(', ')} m, r ${lr.toFixed(3)}; tops at ${logs.map((l) => (h.ent(l).pose.p.y + lr).toFixed(2)).join(', ')} m`);
+    console.info(`bridge: ${logs.length} logs of ${logs.map((l) => h.ent(l).mass.toFixed(0)).join(', ')} kg, ${logs.map((l) => (2 * (h.ent(l).shape as { halfHeight: number }).halfHeight).toFixed(2)).join(', ')} m, r ${lr.toFixed(3)}; tops at ${logs.map((l) => (h.ent(l).pose.p.y + lr).toFixed(2)).join(', ')} m`);
     const from = h.history.world.length;
     const giant = h.creature('giantApe', { x: -30, z: 0 }, Math.PI / 2, { brain: 'off' });
     h.script(giant, { kind: 'charge', heading: Math.PI / 2, speed: 6 });

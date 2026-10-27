@@ -5,7 +5,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Fighter } from '../src/sim/fighter';
 import { RULER_BODY_TUNING, supportLoss } from '../src/world/rulerBody';
-import type { Owner } from '../src/world/types';
+import type { ImpactCause, Owner } from '../src/world/types';
 import { type Harness, makeHarness } from './support/worldHarness';
 import { lyingAlong } from './support/scenes';
 
@@ -16,9 +16,12 @@ afterEach(() => {
 
 describe('supportLoss: which breaks of a support are lost to the ruler', () => {
   const shin: Owner = { kind: 'fighter', id: 7, part: 'ruler', bone: 'shinL' };
-  it('a load break (anyone\'s), its own leg\'s impact, or an unknown break counts; a blow does not', () => {
+  // P28 review: a load break counts only as this ruler's (or with no loader named); another's load break does not.
+  it('its own load break, its own leg\'s impact, or an unknown break counts; a blow or another\'s load break does not', () => {
     expect(supportLoss(7, { energy: 0, by: shin })).toBe(true);
-    expect(supportLoss(7, { energy: 0, by: { kind: 'entity', id: 3 } })).toBe(true);
+    expect(supportLoss(7, { energy: 0, by: null })).toBe(true);
+    expect(supportLoss(7, { energy: 0, by: { kind: 'entity', id: 3 } })).toBe(false);
+    expect(supportLoss(7, { energy: 0, by: { kind: 'fighter', id: 8, part: 'ruler', bone: 'shinL' } })).toBe(false);
     expect(supportLoss(7, { energy: 120, by: shin })).toBe(true);
     expect(supportLoss(7, { energy: 120, by: { kind: 'fighter', id: 7, part: 'ruler', bone: 'thighR' } })).toBe(true);
     expect(supportLoss(7, null)).toBe(true);
@@ -88,5 +91,66 @@ describe('the lost-support rule on a ruler standing on two bearers', () => {
     h.w.rulers.requestTrip(giant, 'cover', null);
     expect(giant.ruler!.pendingTrip!.why).toBe('cover');
     expect(RULER_BODY_TUNING.supportMinShare).toBeGreaterThan(0);
+  }, 120_000);
+});
+
+/** The support record RulerBodies keeps for `giant` and entity `id` (private; read for the test only). */
+function supportOf(h: Harness, giant: Fighter, id: number): { tick: number; at?: { x: number; y: number; z: number }; restTick?: number; loadTick?: number } | undefined {
+  const rb = (h.w.rulers as unknown as { byId: Map<number, { supports: Map<number, { tick: number; restTick?: number; loadTick?: number }> }> }).byId.get(giant.id);
+  return rb?.supports.get(id);
+}
+
+describe('P28 review: only a support that bore the ruler is lost from under it', () => {
+  it('an obstacle trip next to sticks its shin breaks stays the obstacle\'s, credited to the player who built it', async () => {
+    const { h, giant, logs } = await standOnTwoBearers();
+    // Dry sticks lying on the ground by its feet, outside the bearers (debris: none carries the giant).
+    const sticks = [-1.2, 1.2].map((x) => h.stick({ length: 1.2, r: 0.03, p: { x, y: 0.04, z: 0.4 }, q: lyingAlong(0) }));
+    h.ticks(30);
+    // As a sole that only touched them (a ground cast) would note them: in its support set, never bearing its load.
+    const rb = (h.w.rulers as unknown as { byId: Map<number, { supports: Map<number, object> }> }).byId.get(giant.id)!;
+    for (const id of sticks) rb.supports.set(id, { tick: h.w.tick, credit: [], at: { ...h.ent(id).pose.p }, restTick: h.w.tick });
+    for (const id of sticks) expect(supportOf(h, giant, id)?.loadTick).toBeUndefined();
+    expect(supportOf(h, giant, logs[0])?.loadTick).toBeDefined();
+    for (const id of sticks) {
+      const e = h.ent(id);
+      h.w.breaking.hit(e, 1e7, { ...e.pose.p }, { kind: 'fighter', id: giant.id, part: 'ruler', bone: 'shinL' });
+    }
+    h.ticks(1);
+    for (const id of sticks) expect(h.w.entities.get(id)).toBeUndefined();
+    const obstacle: ImpactCause = { kind: 'entity', entityId: logs[1], fighterId: null, credit: ['p1'], held: false, feature: 'fall' };
+    h.w.rulers.requestTrip(giant, 'obstacle', obstacle);
+    expect(giant.ruler!.pendingTrip?.why).toBe('obstacle');
+    expect(giant.ruler!.pendingTrip?.cause?.credit).toEqual(['p1']);
+  }, 120_000);
+
+  it('a bearer sliding out from under it: its hold expires and it is lost once 0.25 m from where it was first noted', async () => {
+    const { h, giant, logs } = await standOnTwoBearers();
+    const id = logs[0];
+    const s0 = supportOf(h, giant, id)!;
+    expect(s0.loadTick).toBeDefined();
+    const at0 = { ...s0.at! };
+    const v = 0.3; // m/s: faster than groundMaxSpeedMps, so never ground on its own while it slides
+    expect(v).toBeGreaterThan(RULER_BODY_TUNING.groundMaxSpeedMps);
+    let expiredAt = -1;
+    let lostAt = -1;
+    for (let t = 0; t < 120 && lostAt < 0; t++) {
+      h.ent(id).body!.setLinvel({ x: -v, y: 0, z: 0 }, true);
+      h.step();
+      const s = supportOf(h, giant, id);
+      if (s && s.at) expect(s.at).toEqual(at0); // kept from the first notice, not refreshed
+      if (expiredAt < 0 && !h.w.rulers.holdsUp(id)) expiredAt = t;
+      if (!s) lostAt = t;
+    }
+    // The hold lapses at most coverHoldTicks after it last rested on its own (here it already had: the giant's hold keeps
+    // it jostled); then it is lost, displaced 0.25 m from where it was first noted (≈ 0.8 s at 0.3 m/s).
+    expect(expiredAt).toBeGreaterThanOrEqual(0);
+    expect(expiredAt).toBeLessThanOrEqual(RULER_BODY_TUNING.coverHoldTicks + 2);
+    expect(lostAt).toBeGreaterThan(0);
+    expect(lostAt).toBeLessThan(80);
+    // A ledge trip asked now is that support's trip.
+    expect(giant.ruler!.pendingTrip).toBeNull();
+    h.w.rulers.requestTrip(giant, 'ledge', null);
+    expect(giant.ruler!.pendingTrip?.why).toBe('cover');
+    expect(giant.ruler!.pendingTrip?.cause?.entityId).toBe(id);
   }, 120_000);
 });

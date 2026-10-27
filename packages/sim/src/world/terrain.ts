@@ -463,6 +463,9 @@ export class Terrain implements GroundQuery {
 
   private makeCollider(physics: PhysicsWorld, t: number): RAPIER.Collider {
     const centre = this.tileCentre(t);
+    // TODO(P28 known regression, docs/work/ledger.md P28 fifth pass; verbs.hands.test.ts "KNOWN REGRESSION: from the origin,
+    // across the terrain tiles' seam"): FIX_INTERNAL_EDGES works inside one tile only. A body slid by a sustained
+    // (in-solver) force stops dead on the next tile's first edge at a seam; the old pre-step impulses hopped it.
     const desc = RAPIER.ColliderDesc.heightfield(this.cells, this.cells, this.heights[t], this.scale(), RAPIER.HeightFieldFlags.FIX_INTERNAL_EDGES)
       .setTranslation(centre.x, 0, centre.z)
       .setFriction(MATERIALS[TERRAIN_TUNING.material].friction)

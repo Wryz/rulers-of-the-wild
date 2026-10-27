@@ -370,6 +370,85 @@ export function buildLeaningLog(h: Harness, o: { at: XZ; yaw: number; lean?: Lea
 // AC-2(c): the hauled log (§11.2(c) gate)
 // ---------------------------------------------------------------------------
 
+const flatXZ = (a: XZ, b: XZ): number => Math.hypot(a.x - b.x, a.z - b.z);
+const aboutZ = (a: number): Quat => ({ x: 0, y: 0, z: Math.sin(a / 2), w: Math.cos(a / 2) });
+
+/**
+ * §11.2(a)'s staged deadfall geometry: a stick r 0.07 m `propLengthM` long placed upright at x = propX, a dry hex log
+ * `logLengthM` long (circumradius `logR`; the design's 0.17 m) from the ground at x = 0 onto its top (25°).
+ */
+export type ProppedGeometry = { propX: number; propLengthM: number; logLengthM: number; logR: number };
+/**
+ * DEPARTURE (P28, §11.2(a) staged steps 1-2 "2.38 m … x = 5.07 … 6.0 m … circumradius 0.17 m"): the bait-tug runs
+ * use a 2.47 m stick at x 5.3 and a 6.2 m log (25° still): the underside over the ape 0.8 m in from the bait stands
+ * 0.1 m higher, so the log, once sprung, falls far enough to arrive at v_n ≥ 2 m/s (1.83-1.89 m/s on the design's).
+ * Fifth pass (the sustained forces in-solver, C F3 departure): the log is circumradius 0.13 m (150 kg, not 248 kg).
+ * With forces in-solver the design's 248 kg log holds the prop against a sustained 850 N on the bait (the C lab), past
+ * the ape's 907.5 N tug; the ape's tug, applied where it grips the 1 kg hide (which tumbles and bounces on its lash),
+ * moves the prop less than the same force at the bait's centre: 0.15 m (199 kg) held the tug 2 s; 0.13-0.14 m spring
+ * to it in 0.68-0.88 s and hold the 700 N tug (P28 lab). Under a step force at the bait's centre this prop gives from
+ * ≈ 600 N (tests/proppedLog.lab.test.ts measures the 199 kg and 248 kg logs).
+ */
+export const PROPPED_P28: ProppedGeometry = { propX: 5.3, propLengthM: 2.47, logLengthM: 6.2, logR: 0.13 };
+export const PROPPED_AS_DESIGNED: ProppedGeometry = { propX: 5.07, propLengthM: 2.38, logLengthM: 6, logR: 0.17 };
+/**
+ * DEPARTURE (P28 fifth pass, §11.2(a) staged "circumradius 0.17 m"): the walked run keeps the design's stick and log
+ * length with a 0.16 m log (220 kg): with the controller's lean on the bait and prop a force (C F3 departure), the
+ * design's log, having hit the ape's head at 4.5 m/s, rolled 0.83 m off its plane (gate < 0.35 m). Chaotic: 0.13,
+ * 0.15 and 0.17 m roll 0.61-0.91 m, 0.16 m 0.25 m (P28 lab).
+ */
+export const PROPPED_WALKED: ProppedGeometry = { ...PROPPED_AS_DESIGNED, logR: 0.16 };
+
+/**
+ * §11.2(a)'s staged scene: a dry stick r 0.07 × 2.38 m carried and placed upright, not driven, at x 5.07; a dry hex
+ * log 6.0 m, circumradius 0.17 m spawned free at its pose (D-25), its lower end on the ground at x 0 and its
+ * underside on the stick's top (25°); a 1 kg hide bait placed 0.55 m inward of the stick and lashed to it (a 0.65 m
+ * vine). DEVIATION (§11.2(a) "≈ 170 kg"): the factory's dry wood makes that log 248 kg; the recipe's dimensions are
+ * kept (they set the underside's height over the ape). The runs build it to their geometry (PROPPED_P28,
+ * PROPPED_WALKED, PROPPED_AS_DESIGNED: the departures recorded there).
+ */
+export function buildProppedLog(h: Harness, STAGED: ProppedGeometry = PROPPED_P28): { prop: number; log: number; bait: number } {
+  const PROP = { x: STAGED.propX, z: 0.013, lengthM: STAGED.propLengthM, r: 0.07 };
+  const g = h.w.terrain.heightAt(PROP.x, PROP.z);
+  const prop = h.stick({ length: PROP.lengthM, r: PROP.r, p: { x: 5, y: g + PROP.r + 0.03, z: 3 }, q: lyingAlong(Math.PI / 2) });
+  h.ticks(20);
+  take(h, prop, 'take the prop');
+  goTo(h, { x: PROP.x, z: -1.2 });
+  h.must({ verb: 'place', target: 0, at: toCm({ x: PROP.x, y: g + PROP.lengthM / 2, z: PROP.z }), yaw: 0, pitch: 64, drive: 0 }, 'place the prop upright');
+  h.ticks(60);
+  const sp = h.ent(prop).pose.p;
+  const top = sp.y + PROP.lengthM / 2 - g;
+  // The log: its underside on the line from (0, ground) to the prop's top; a flat face down.
+  const th = Math.atan2(top, sp.x);
+  const ri = STAGED.logR * Math.cos(Math.PI / 6);
+  const c = { x: -ri * Math.sin(th) + (STAGED.logLengthM / 2) * Math.cos(th), y: g + ri * Math.cos(th) + (STAGED.logLengthM / 2) * Math.sin(th) + 0.01 };
+  goTo(h, { x: 3, z: -4 });
+  const log = h.log({ length: STAGED.logLengthM, r: STAGED.logR, p: { x: c.x, y: c.y, z: 0 }, q: mulQuat(aboutZ(th), lyingAlong(Math.PI / 2)) });
+  h.ticks(120);
+  // The bait, placed lying 0.55 m inward of the prop, lashed to the prop's side facing it by a 0.65 m vine.
+  const bx = sp.x - 0.55;
+  const bait = h.box({ p: { x: bx, y: g + 0.03, z: -2.5 }, size: [0.25, 0.04, 1 / 1100 / (0.25 * 0.04)], material: 'hide', state: 'free', look: 'hide' });
+  h.ticks(10);
+  take(h, bait, 'take the bait');
+  goTo(h, { x: bx, z: -1.0 });
+  h.must({ verb: 'place', target: 0, at: toCm({ x: bx, y: g + 0.04, z: PROP.z }), yaw: 64, pitch: 0 }, 'place the bait');
+  h.ticks(20);
+  const coil = h.coil({ material: 'vine', lengthM: 3, at: { x: 2, y: g, z: -2 } });
+  h.ticks(5);
+  take(h, coil, 'take the vine coil');
+  h.must({ verb: 'stow', target: 0, slot: 0 }, 'the coil to the belt');
+  goTo(h, { x: bx + 0.2, z: -0.9 });
+  const bp = h.ent(bait).pose.p;
+  const btop = { x: bp.x, y: bp.y + 0.02, z: bp.z };
+  const face = { x: sp.x - PROP.r * Math.cos(Math.PI / 8), z: sp.z };
+  const dh = flatXZ(face, btop);
+  h.must({ verb: 'lash', target: bait, second: prop, at: toCm(btop), at2: toCm({ x: face.x, y: btop.y + Math.sqrt(0.65 * 0.65 - dh * dh), z: face.z }) }, 'lash the bait to the prop');
+  h.ticks(30);
+  goTo(h, { x: -3, z: -6 });
+  return { prop, log, bait };
+}
+
+
 /**
  * §11.2(c) gate (verb-only), at `at`: two trees (d 0.4 m, h 14 m) at ±2.6 m in z, each with a 9 m hanging vine anchored
  * 8 m up on its inner side; a 138 kg dry log (2 m) dragged to lie along z under the anchors (the support); a 30 kg, 4 m

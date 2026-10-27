@@ -226,10 +226,24 @@ interface RulerBody {
 
 /** An entity that held a ruler up lately (its root, or a foot's load): when, its credit, and where it was then (P28). */
 interface Support {
+  /** The last tick it held the ruler up (a ground cast found it, or it carried a foot's load). */
   tick: number;
   credit: string[];
-  /** Its position when it last held the ruler up (P28: displaced beyond supportDisplaceM, it was lost from under it). */
+  /**
+   * Its position when first noted (P28 review: kept for the record's life, not refreshed each tick, so a bearer sliding
+   * away under the ruler is caught; displaced beyond supportDisplaceM, it was lost from under it).
+   */
   at?: V3;
+  /**
+   * P28 review: the last tick it was ground on its own merit (fixed, anchored, at rest, asleep or steady), or first noted;
+   * heldUp counts coverHoldTicks from it, so a support that keeps moving expires (absent in older saves: `tick`).
+   */
+  restTick?: number;
+  /**
+   * P28 review: the last tick it carried ≥ supportMinShare of a planted foot of this ruler (noteFootLoad). Only a support
+   * that bore the ruler's load within coverTripWindowTicks is lost from under it (vanishedSupports); absent: never.
+   */
+  loadTick?: number;
 }
 
 /** A shove queued in phase 3 for phase 4d (§4.7 step 5). */
@@ -573,7 +587,14 @@ export class RulerBodies {
           deflect: rb.deflect ? { entity: rb.deflect.entity, tick: rb.deflect.tick } : null,
           supports: [...rb.supports]
             .sort((x, y) => x[0] - y[0])
-            .map(([entity, s]) => ({ entity, tick: s.tick, credit: [...s.credit], ...(s.at ? { at: { ...s.at } } : {}) })),
+            .map(([entity, s]) => ({
+              entity,
+              tick: s.tick,
+              credit: [...s.credit],
+              ...(s.at ? { at: { ...s.at } } : {}),
+              ...(s.restTick === undefined ? {} : { restTick: s.restTick }),
+              ...(s.loadTick === undefined ? {} : { loadTick: s.loadTick }),
+            })),
           coverBreak: rb.coverBreak ? { tick: rb.coverBreak.tick, cause: copyCause(rb.coverBreak.cause) } : null,
         };
         return { fighter: rb.f.id, ruler };
@@ -606,7 +627,7 @@ export class RulerBodies {
       rb.deflect = d === null ? null : { entity: numFromRecord(d.entity, `${at}.deflect.entity`), tick: numFromRecord(d.tick, `${at}.deflect.tick`) };
       rb.supports.clear();
       readList(rec.supports, `${at}.supports`).forEach((x, i) => {
-        const s = x as { entity: unknown; tick: unknown; credit: unknown; at?: unknown };
+        const s = x as { entity: unknown; tick: unknown; credit: unknown; at?: unknown; restTick?: unknown; loadTick?: unknown };
         const credit = readList(s.credit, `${at}.supports[${i}].credit`).map((c, k) => {
           if (typeof c !== 'string') throw new Error(`${at}.supports[${i}].credit[${k}] is not a string`);
           return c;
@@ -615,6 +636,8 @@ export class RulerBodies {
           tick: numFromRecord(s.tick, `${at}.supports[${i}].tick`),
           credit,
           ...(s.at === undefined ? {} : { at: readVec(s.at, `${at}.supports[${i}].at`) }),
+          ...(s.restTick === undefined ? {} : { restTick: numFromRecord(s.restTick, `${at}.supports[${i}].restTick`) }),
+          ...(s.loadTick === undefined ? {} : { loadTick: numFromRecord(s.loadTick, `${at}.supports[${i}].loadTick`) }),
         });
       });
       const cb = rec.coverBreak as { tick: unknown; cause: ImpactCause } | null | undefined;
@@ -952,7 +975,7 @@ export class RulerBodies {
           !!e &&
           (e.state === 'fixed' || e.state === 'anchored' || e.restTicks >= PHYSICS_TUNING.restTicks || (e.body?.isSleeping() ?? false) || this.heldUp(rb, id) || steadyGround(e));
         if (e && resting && hit.point.y <= cap) {
-          if (rb) rb.supports.set(id, { tick: w.tick, credit: [...e.credit], at: { ...e.pose.p } });
+          if (rb) this.noteSupport(rb, e, ownGround(e));
           return { y: Math.max(terrain, hit.point.y), entity: id };
         }
       }
@@ -974,7 +997,24 @@ export class RulerBodies {
     const rb = this.byId.get(f.id);
     const e = this.world.entities.get(id);
     if (!rb || !e || !(share >= RULER_BODY_TUNING.supportMinShare)) return;
-    rb.supports.set(id, { tick: this.world.tick, credit: [...e.credit], at: { ...e.pose.p } });
+    this.noteSupport(rb, e, false);
+    rb.supports.get(id)!.loadTick = this.world.tick;
+  }
+
+  /**
+   * P28 review: entity `e` holds ruler body `rb` up this tick. A new record keeps where it is now (`at`) and counts as
+   * resting from now; an existing one keeps its `at` and refreshes `restTick` only when `own` (ground on its own merit).
+   */
+  private noteSupport(rb: RulerBody, e: Entity, own: boolean): void {
+    const tick = this.world.tick;
+    const s = rb.supports.get(e.id);
+    if (!s) {
+      rb.supports.set(e.id, { tick, credit: [...e.credit], at: { ...e.pose.p }, restTick: tick });
+      return;
+    }
+    s.tick = tick;
+    s.credit = [...e.credit];
+    if (own) s.restTick = tick;
   }
 
   /** Does entity `id` hold up any ruler now (heldUp)? World.supportAt asks for a ruler's sole (its footwork, P28). */
@@ -985,7 +1025,9 @@ export class RulerBodies {
 
   private heldUp(rb: RulerBody | null, id: number): boolean {
     const s = rb?.supports.get(id);
-    return !!s && this.world.tick - s.tick <= RULER_BODY_TUNING.coverHoldTicks;
+    // P28 review: counted from the last tick it was ground on its own (restTick), not from the last tick a cast found it:
+    // a cast accepts it because it is held up, so `tick` alone renewed itself every tick and never expired.
+    return !!s && this.world.tick - (s.restTick ?? s.tick) <= RULER_BODY_TUNING.coverHoldTicks;
   }
 
   /**
@@ -1017,7 +1059,7 @@ export class RulerBodies {
       const resting = !!e && (e.state === 'fixed' || e.state === 'anchored' || e.restTicks >= PHYSICS_TUNING.restTicks || (e.body?.isSleeping() ?? false) || this.heldUp(rb, id) || steadyGround(e));
       const y = top - hit.toi - T.soleProbeHalfM;
       if (hit.toi > 0 && e && resting && y <= cap) {
-        if (rb) rb.supports.set(id, { tick: w.tick, credit: [...e.credit], at: { ...e.pose.p } });
+        if (rb) this.noteSupport(rb, e, ownGround(e));
         return y > best.y ? { y, entity: id } : best;
       }
       ex.push(id);
@@ -1503,11 +1545,16 @@ export class RulerBodies {
     for (const id of [...rb.supports.keys()].sort((a, b) => a - b)) {
       const s = rb.supports.get(id)!;
       const e = w.entities.get(id);
+      // P28 review: only a support that bore this ruler's load lately (its own support set while bearing load) is lost
+      // from under it: debris its shin breaks, a stick its sole only touched, or something displaced that never carried
+      // it make no cover trip (an obstacle trip beside them stays the obstacle's, with its credit).
+      const bore = s.loadTick !== undefined && tick - s.loadTick <= T.coverTripWindowTicks;
       if (e) {
         if (tick - s.tick > T.coverTripWindowTicks) rb.supports.delete(id);
-        // P28: displaced from under it (pushed or rolled away, or sunk) since it last held the ruler up.
+        // P28: displaced from under it (pushed or rolled away, or sunk) since it was first noted holding the ruler up.
         else if (s.at && s.tick < tick && Math.hypot(e.pose.p.x - s.at.x, e.pose.p.y - s.at.y, e.pose.p.z - s.at.z) > T.supportDisplaceM) {
           rb.supports.delete(id);
+          if (!bore) continue;
           const cause: ImpactCause = { kind: 'entity', entityId: id, fighterId: null, credit: [...s.credit], held: false, feature: 'cover' };
           rb.coverBreak = { tick, cause };
           out.push({ id, cause, recent: tick - s.tick <= 1 });
@@ -1517,7 +1564,7 @@ export class RulerBodies {
       rb.supports.delete(id);
       // P28: a support lost to a blow (a forearm's, a weapon's, a thrown or falling thing's) is not lost to the ruler's
       // weight: no cover trip comes of it (supportLoss).
-      if (!supportLoss(rb.f.id, breakOf(w, id))) continue;
+      if (!bore || !supportLoss(rb.f.id, breakOf(w, id))) continue;
       const cause: ImpactCause = { kind: 'entity', entityId: id, fighterId: null, credit: [...s.credit], held: false, feature: 'cover' };
       rb.coverBreak = { tick, cause };
       out.push({ id, cause, recent: tick - s.tick <= 1 });
@@ -1763,15 +1810,22 @@ function breakOf(w: World, id: number): Extract<WorldEvent, { type: 'break' }> |
 
 /**
  * P28, the lost-support trip rule: whether a support of ruler `rulerId` that broke as `ev` was lost to the ruler's own
- * weight or legs, so that the drop that follows is the cover's trip. A load break (energy 0: a sustained load, whoever's)
- * counts; an impact break counts when the ruler's own leg delivered it (a foot landing on it, its shin across it); a
- * break by anything else (its forearm or head, a player's axe, a falling log) does not. No event (gone some other way,
- * or broken before the events this tick holds): it counts, as before P28.
+ * weight or legs, so that the drop that follows is the cover's trip. A load break (energy 0) counts when this ruler was
+ * its loader (or none is named); P28 review: another's load break (an entity's, another fighter's) does not. An impact
+ * break counts when the ruler's own leg delivered it (a foot landing on it, its shin across it); a break by anything
+ * else (its forearm or head, a player's axe, a falling log) does not. No event (gone some other way, or broken before
+ * the events this tick holds): it counts, as before P28. (vanishedSupports asks only of supports that bore its load.)
  */
 export function supportLoss(rulerId: number, ev: { energy: number; by?: Owner | null } | null): boolean {
-  if (!ev || ev.energy === 0 || !ev.by) return true;
+  if (!ev || !ev.by) return true;
   const by = ev.by;
+  if (ev.energy === 0) return by.kind === 'fighter' && by.id === rulerId;
   return by.kind === 'fighter' && by.id === rulerId && (by.bone === 'shinL' || by.bone === 'shinR' || by.bone === 'thighL' || by.bone === 'thighR');
+}
+
+/** P28 review: whether entity `e` is a ruler's ground on its own merit (not because it held the ruler up lately). */
+function ownGround(e: Entity): boolean {
+  return e.state === 'fixed' || e.state === 'anchored' || e.restTicks >= PHYSICS_TUNING.restTicks || (e.body?.isSleeping() ?? false) || steadyGround(e);
 }
 
 /**
