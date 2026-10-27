@@ -19,7 +19,7 @@ import { Terrain } from '../src/world/terrain';
 import type { ImpactCause, WorldEvent } from '../src/world/types';
 import { isDirtPile } from '../src/world/verbs/dig';
 import { currentSceneHash, dependencyFingerprint, ensureScene, readScene, SCENE_DIR, sceneHash, sceneOnce, scenePath } from './support/globalSetup';
-import { buildHauledLog, buildLeaningLog, buildNotchedTree, buildStakedLog, buildStakedWall, furnishPit, lyingAlong, PIT_GRASS_MIN, PROBE_SCENE } from './support/scenes';
+import { buildHauledLog, buildLeaningLog, buildNotchedTree, buildStakedLog, buildStakedWall, furnishPitAsync, lyingAlong, PIT_GRASS_MIN, PROBE_SCENE } from './support/scenes';
 import { BACK_SLOT, cachedScene, DIG_PLAN, SCENE_BUILD_TIMEOUT_MS, type Harness, loadHarness, makeHarness, type StandAtWhy, steepestClimbDeg, wallOnPath } from './support/worldHarness';
 
 vi.setConfig({ testTimeout: 600_000 });
@@ -592,7 +592,7 @@ describe('furnishPit (§11.2(b) steps 2-3 on the small pit)', () => {
     const stick = h.p.inventory!.hands!.entity;
     const pit = { centre: { x: 0, z: 0 }, ...SMALL_PIT, stakeSpacing: 0.6 };
     // A 3 × 2 m floor: a 4 × 2 grid; 8 bearers 4 m long; up to 12 bundles in the four rows.
-    const r = furnishPit(h, { ...pit, grass: { count: 12, minCount: SMALL_PIT_GRASS_MIN } }, stick);
+    const r = await furnishPitAsync(h, { ...pit, grass: { count: 12, minCount: SMALL_PIT_GRASS_MIN } }, stick);
     const grass = r.cover.filter((id) => h.ent(id).look === 'grass');
     console.info(`furnishPit 3×2: ${r.stakes.length} stakes, ${grass.length} grass laid, tick ${h.w.tick}`);
     const moves = reportStandAts(h, 'furnishPit 3×2');

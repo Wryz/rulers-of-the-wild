@@ -30,6 +30,7 @@ import { RULER_BODY_TUNING } from '../src/world/rulerBody';
 import type { Quat, V3, WorldEvent } from '../src/world/types';
 import { buildHauledLog, buildLeaningLog, buildNotchedTree, buildProppedLog, LEAN_P28, lyingAlong, PROPPED_P28, PROPPED_WALKED } from './support/scenes';
 import { BACK_SLOT, cachedScene, type Harness, loadHarness, makeHarness, SCENE_BUILD_TIMEOUT_MS, type XZ } from './support/worldHarness';
+import { YIELD_TICKS, yieldToVitest } from './support/yieldToVitest';
 
 /** §11: anything with Rapier gets 120 s. */
 const RAPIER_IT_MS = 120_000;
@@ -405,6 +406,9 @@ describe('AC-2(a): a deadfall wounds the ape that disturbs it', () => {
       for (const dLen of [-0.1, 0, 0.1]) {
         const lean = { ...LEAN_P28, pitchDeg: LEAN_P28.pitchDeg + dPitch, logLengthM: LEAN_P28.logLengthM + dLen };
         leanN++;
+        // (Each variant is ≈ 2 s of synchronous work: the worker's event loop runs between them, so Vitest's RPC is
+        // answered; a stretch over 60 s fails the run with "Timeout calling onTaskUpdate".)
+        await yieldToVitest();
         try {
           const h = await make(44, 40);
           const r = buildLeaningLog(h, { at: { x: 0, z: 0 }, yaw: Math.PI / 2, lean });
@@ -415,6 +419,7 @@ describe('AC-2(a): a deadfall wounds the ape that disturbs it', () => {
           const res = apeAtBait(h, { log: r.log, bait: r.bait, stand: { x: b.x - 0.45, z: b.z }, act: { tugYaw: TOWARD_BODY }, vnOf });
           const hit = res.hits.some((i, k) => !i.cause.held && i.damage > 0 && res.vn[k] >= 1);
           const gate = res.spring > 0 && (res.spring - res.grip) / 60 <= 1 && hit && h.tripwires().length === 0 && res.fit > 0;
+          await yieldToVitest();
           const hc = await make(44, 40);
           const rc = buildLeaningLog(hc, { at: { x: 0, z: 0 }, yaw: Math.PI / 2, lean });
           const vc = watchVelocities(hc, [rc.log]);
@@ -435,6 +440,7 @@ describe('AC-2(a): a deadfall wounds the ape that disturbs it', () => {
     for (const logR of [0.13, 0.14, 0.15, 0.16]) {
       const g = { ...PROPPED_P28, logR };
       propN++;
+      await yieldToVitest();
       const h = await make(48, 40);
       const r = buildProppedLog(h, g);
       const vnOf = watchVelocities(h, [r.log]);
@@ -446,6 +452,7 @@ describe('AC-2(a): a deadfall wounds the ape that disturbs it', () => {
       const plane = Math.abs(h.ent(r.log).pose.p.z - z0);
       const hit = res.hits.some((i, k) => !i.cause.held && i.damage > 0 && res.vn[k] >= 2);
       const gate = res.spring > 0 && (res.spring - res.grip) / 60 <= 1 && hit && h.tripwires().length === 0 && plane < 0.35 && res.fit > 0;
+      await yieldToVitest();
       const hc = await make(48, 40);
       const rc = buildProppedLog(hc, g);
       const vc = watchVelocities(hc, [rc.log]);
@@ -671,6 +678,8 @@ describe('AC-2(b): a covered spike pit wounds the giant that steps on its cover'
     const laneZ = -(halfL + 0.6);
     const southEast = { x: 6, z: laneZ };
     for (const [k, id] of bearers.entries()) {
+      // (≈ 14 s of synchronous work a bearer, 26 of them: the worker's event loop runs between them, see the sweep.)
+      await yieldToVitest();
       goTo(h, southEast);
       const e = h.ent(id).pose.p;
       goTo(h, { x: e.x, z: laneZ });
@@ -682,8 +691,10 @@ describe('AC-2(b): a covered spike pit wounds the giant that steps on its cover'
     }
     const left = bearers.filter((id) => h.w.entities.get(id) && Math.abs(h.ent(id).pose.p.x) < 5 && Math.abs(h.ent(id).pose.p.z) < 5);
     console.info(`bridge: bearers still over the pit after carrying them off: ${left.length}`);
+    await yieldToVitest();
     goTo(h, { x: 0, z: -12 });
     h.ticks(300);
+    await yieldToVitest();
     // The bridge (D-25: logs no verb moves), spawned at their pose. DEPARTURE (§11.2(b) "8 green logs r 0.18 m ×
     // 8 m (651 kg)"): the design's section (r 0.18 m round), not its mass: each log only as long as its line needs, so
     // ≈ 0.2-0.75 t (651 kg would be a full 8 m), over the hole as dug (P28: ≈ ±4.45 m by up to ±4.25 m, not the
@@ -698,7 +709,10 @@ describe('AC-2(b): a covered spike pit wounds the giant that steps on its cover'
     const from = h.history.world.length;
     const giant = h.creature('giantApe', { x: -30, z: 0 }, Math.PI / 2, { brain: 'off' });
     h.script(giant, { kind: 'charge', heading: Math.PI / 2, speed: 6 });
-    h.ticks(Math.round((60 / 6 + 4) * 60));
+    for (let left = Math.round((60 / 6 + 4) * 60); left > 0; left -= YIELD_TICKS) {
+      await yieldToVitest();
+      h.ticks(Math.min(YIELD_TICKS, left));
+    }
     const evs = h.history.world.slice(from);
     console.info(`bridge run: giant at x ${giant.pos.x.toFixed(1)}; breaks ${of(evs, 'break').length}, trips ${of(evs, 'trip').length}, pit on ${of(evs, 'pit').filter((e) => e.on).length}`);
     // The giant got across.
