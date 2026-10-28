@@ -41,8 +41,9 @@
 //    handed to the contact pipeline so the restored episodes keep their counts and the contacts the saved world's next
 //    step would have started start on the first tick (ContactSystem.restoredStarts); the events construction pushed
 //    cleared;
-// 9. (P38) every entity body in `sleeping`, and every tripped ruler body saved asleep, put back to sleep after that
-//    zero-length step (before it, Rapier's step woke them: the AC-4 load bug of a pinned, sleeping ruler).
+// 9. (P38) a tripped ruler body saved asleep put back to sleep after that zero-length step (asleep before it, the
+//    step woke it among the awake bodies the load made: the AC-4 load bug of a pinned, sleeping ruler). Entity bodies
+//    still load awake (see P38 in docs/work/ledger.md: saving their sleep moved AC-3's fitted hunt).
 // Rapier's body order after a load differs from the saving world's (restored bodies are made after the generated ones
 // kept), so a loaded world matches the saved one within SPEC:730's 1 cm and 1° at rest, not bit for bit; two loads of
 // one save are bit-identical to each other.
@@ -287,20 +288,12 @@ function restoreWorld(w: World, s: SaveV1): void {
     w.nav.restoreDirty(s.navDirty);
   }
   refreshQueries(w);
-  // P38 (the AC-4 load bug): the bodies that slept go back to sleep after the zero-length step. Rapier wakes a body
-  // made since its last step in the step's own bookkeeping, and an awake body wakes a sleeping one it touches, so a
-  // body put to sleep before it (the pinned ruler, P11, and every restored entity) woke there and the load failed.
-  // After it, nothing has moved and every island sleeps as the save left it.
-  w.entities.restoreSleep(s.sleeping);
+  // P38 (the AC-4 load bug): a tripped ruler body that slept goes back to sleep after the zero-length step. Put to sleep
+  // before it (as P11's restoreRecord did), the step woke it among the awake bodies the load made around it, and the
+  // load failed ("the zero-length step changed Rapier body"). After it, nothing has moved; an awake body still touching
+  // it wakes it on the first real step, as the island's bodies load awake (an entity's sleep isn't saved).
   for (const b of s.bodies) if (b.ruler?.dynamic && b.ruler.sleeping) w.rulers.sleepAfterLoad(fighterById(w, b.fighter, 'bodies'));
   w.events.length = 0;
-}
-
-/** A list of entity ids in strictly increasing order. */
-function increasingIds(v: unknown, p: string): number[] {
-  const ids = arr(v, p).map((x, i) => nat(x, `${p}[${i}]`));
-  for (let i = 1; i < ids.length; i++) if (!(ids[i] > ids[i - 1])) fail(`${p}[${i}]`, ids[i], 'ids in increasing order');
-  return ids;
 }
 
 /**
@@ -393,8 +386,7 @@ const byId = (a: { id: number }, b: { id: number }): number => a.id - b.id;
 type Obj = Readonly<Record<string, unknown>>;
 
 function checkSaveV1(o: Obj): SaveV1 {
-  // P38: `sleeping` came after the first v1 saves (the v1 fixture has none): optional, absent = none asleep.
-  exactKeys(o, SAVE_V1_KEYS.filter((k) => k !== 'sleeping'), 'save', ['sleeping']);
+  exactKeys(o, SAVE_V1_KEYS, 'save');
   const s: SaveV1 = {
     format: SAVE_FORMAT,
     formatVersion: 1,
@@ -411,7 +403,6 @@ function checkSaveV1(o: Obj): SaveV1 {
     cover: arr(o.cover, 'cover').map((x, i) => pair(x, `cover[${i}]`, nat, fin)),
     entities: arr(o.entities, 'entities').map((x, i) => entity(x, `entities[${i}]`)),
     removed: arr(o.removed, 'removed').map((x, i) => nat(x, `removed[${i}]`)),
-    sleeping: o.sleeping === undefined ? [] : increasingIds(o.sleeping, 'sleeping'),
     impulses: arr(o.impulses, 'impulses').map((x, i) => impulse(x, `impulses[${i}]`)),
     joints: arr(o.joints, 'joints').map((x, i) => joint(x, `joints[${i}]`)),
     fighters: arr(o.fighters, 'fighters').map((x, i) => fighter(x, `fighters[${i}]`)),

@@ -579,7 +579,7 @@ const INVENTORY: Record<string, Record<string, string>> = {
         'releasedBy',
       ].map((k) => [k, `saved: entities[].${k}`]),
     ),
-    body: 'saved: sleeping (P38: whether it sleeps); otherwise not saved: the Rapier body, rebuilt from the record',
+    body: 'not saved: the Rapier body, rebuilt from the record',
     collider: 'not saved: the Rapier collider, rebuilt from the record',
     prevPose: 'not saved: client interpolation (a load sets it to the pose)',
   },
@@ -1092,7 +1092,6 @@ const EXACT = [
   'cover',
   'entities',
   'removed',
-  'sleeping',
   'impulses',
   'joints',
   'fighters',
@@ -1590,8 +1589,8 @@ describe('the loader (core-fix)', () => {
   });
 });
 
-describe('save → load → save at several ticks, with sleeping and pinned bodies (P38; the AC-4 load bug)', () => {
-  it('a giant tripped and pinned under a slab: every checkpoint loads and saves again byte for byte, its sleep kept', async () => {
+describe('save → load → save at several ticks, with a pinned, sleeping ruler (P38; the AC-4 load bug)', () => {
+  it('a giant tripped and pinned under a lid: every checkpoint loads and saves again byte for byte, its body\'s sleep kept', async () => {
     const w = await make({ size: 100, player: false });
     const g = w.spawnCreature('giantApe', { x: 0, z: 0 }, Math.PI / 2);
     // Loose things on the ground beside it, to fall asleep too.
@@ -1600,8 +1599,10 @@ describe('save → load → save at several ticks, with sleeping and pinned bodi
     w.step();
     w.rulers.requestTrip(g, 'impact', null);
     let trip = -1;
-    let slab = -1;
-    const checks: { tick: number; pinned: boolean; rulerAsleep: boolean; asleep: number }[] = [];
+    let lid = -1;
+    const rulerAsleep = (x: World): boolean =>
+      (x.rulers as unknown as { byId: Map<number, { body: { isSleeping(): boolean } | null }> }).byId.get(g.id)?.body?.isSleeping() ?? false;
+    const checks: { tick: number; pinned: boolean; asleep: boolean }[] = [];
     for (let t = 0; t < 1500; t++) {
       w.step();
       if (trip < 0 && w.events.some((e) => e.type === 'trip' && e.f === g)) trip = w.tick;
@@ -1610,24 +1611,23 @@ describe('save → load → save at several ticks, with sleeping and pinned bodi
         for (const b of BONES) top = Math.max(top, g.rig[b].pos.y);
         const c = g.rig.abdomen.pos;
         // A 2.2 t lid laid on it (rulerBody.test's pinned scene): it pins the giant (D-38) and the island falls asleep.
-        slab = spawnBox(w, { p: { x: c.x, y: top + 0.3, z: c.z }, size: [10, 0.04, 10], material: 'dryWood', look: 'lid' });
+        lid = spawnBox(w, { p: { x: c.x, y: top + 0.3, z: c.z }, size: [10, 0.04, 10], material: 'dryWood', look: 'lid' });
       }
       if (trip < 0 || w.tick < trip + 60 || w.tick % 180 !== 0) continue;
       await yieldNow();
       const bytes = serializeWorld(w);
+      // The load used to fail here once the pinned giant slept: "the zero-length step changed Rapier body".
       const l = await load(bytes);
       expect(text(serializeWorld(l)) === text(bytes), `save → load → save at tick ${w.tick}`).toBe(true);
-      // The loaded world keeps every body's sleep.
-      const asleep = (x: World): number[] => x.entities.all().filter((e) => e.body?.isEnabled() && e.body.isDynamic() && e.body.isSleeping()).map((e) => e.id);
-      expect(asleep(l), `sleeping entities at tick ${w.tick}`).toEqual(asleep(w));
-      const rb = (x: World): boolean => (x.rulers as unknown as { byId: Map<number, { body: { isSleeping(): boolean } | null }> }).byId.get(g.id)?.body?.isSleeping() ?? false;
-      checks.push({ tick: w.tick, pinned: g.ruler!.pinned, rulerAsleep: rb(w), asleep: asleep(w).length });
+      expect(rulerAsleep(l), `the ruler body's sleep at tick ${w.tick}`).toBe(rulerAsleep(w));
+      // And the loaded world steps on (its awake neighbours may wake the ruler: an entity's sleep isn't saved).
+      l.step();
+      checks.push({ tick: w.tick, pinned: g.ruler!.pinned, asleep: rulerAsleep(w) });
       l.dispose();
     }
-    // The scene isn't vacuous: the slab pinned the giant, and the checkpoints include the pinned giant asleep.
-    expect(slab).toBeGreaterThan(0);
-    expect(checks.some((c) => c.pinned && c.rulerAsleep), JSON.stringify(checks)).toBe(true);
-    expect(checks.some((c) => c.asleep >= 2), JSON.stringify(checks)).toBe(true);
+    // The scene isn't vacuous: the lid pinned the giant, and the checkpoints include the pinned giant asleep.
+    expect(lid).toBeGreaterThan(0);
+    expect(checks.some((c) => c.pinned && c.asleep), JSON.stringify(checks)).toBe(true);
   });
 });
 

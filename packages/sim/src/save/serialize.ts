@@ -90,7 +90,6 @@ export function saveRecord(w: World): SaveV1 {
     cover: w.cover.edits().map(([cell, v]): [number, number] => [cell, v]),
     entities: w.entities.toRecord(),
     removed: w.entities.removedGenerated(),
-    sleeping: w.entities.sleepingIds(),
     impulses: savedImpulses(w),
     joints: w.joints.toRecord(),
     fighters: fighters.map((f) => fighterRecord(w, f)),

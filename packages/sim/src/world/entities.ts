@@ -575,25 +575,6 @@ export class EntityStore {
     return out;
   }
 
-  /** P38 (the save's `sleeping`): every entity whose body is dynamic, enabled and asleep, in id order. */
-  sleepingIds(): number[] {
-    const out: number[] = [];
-    for (const e of this.sorted) if (e.body && e.body.isEnabled() && e.body.isDynamic() && e.body.isSleeping()) out.push(e.id);
-    return out;
-  }
-
-  /**
-   * P38, the loader's last body step: puts each listed entity's body to sleep (Rapier zeroes a sleeping body's
-   * velocities; a body that slept was saved with zero velocities). Throws on an id with no dynamic, enabled body.
-   */
-  restoreSleep(ids: readonly number[]): void {
-    for (const id of ids) {
-      const b = this.byId.get(id)?.body;
-      if (!b || !b.isEnabled() || !b.isDynamic()) throw new Error(`save record: sleeping names entity ${id}, which has no dynamic body in the loaded world`);
-      b.sleep();
-    }
-  }
-
   /** Generated ids no longer present, sorted. */
   removedGenerated(): number[] {
     return [...this.removedGen].sort((a, b) => a - b);

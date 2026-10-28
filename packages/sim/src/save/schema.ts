@@ -331,12 +331,6 @@ export interface SaveV1 {
   entities: EntityRecV1[];
   /** Generated ids no longer present, sorted. */
   removed: number[];
-  /**
-   * P38: every entity whose dynamic body is asleep, sorted (generated untouched ones included). A load puts them back to
-   * sleep, so a pinned, sleeping ruler's island stays asleep through the load's zero-length step (the AC-4 load bug).
-   * Optional on read: an earlier v1 save has none (its bodies load awake, as before).
-   */
-  sleeping: number[];
   impulses: ImpulseRecV1[];
   /** Id order, every joint (generation's included). */
   joints: JointRecV1[];
@@ -384,7 +378,6 @@ export const SAVE_V1_KEYS: readonly (keyof SaveV1)[] = [
   'cover',
   'entities',
   'removed',
-  'sleeping',
   'impulses',
   'joints',
   'fighters',
