@@ -406,3 +406,15 @@ Follow-ups:
 - RECORDED (unchanged, not small): AC-5's it.fails split; the charge posture ramp and shin-band semantics; P22's minors (giveTool putInHands, setTuning arity, spawn clearance, corpse clutter); capped spoil placement and spoilSlideM range.
 - FIXED (P38's own): the perf smoke reads the thread's CPU clock per 60 ticks (a thread clock is too coarse for one step: per-tick median 7.39 ms against a 5.95 ms wall median and equal means).
 - FOUND: a vitest setup file must not import the sim statically (it loaded sim/impact before worldImpactCalls/contacts' vi.mock: 3 failures); loadsVerify imports it only on demand.
+
+## P38 follow-up: the thin branches that never sleep (coordinator: fix them; stop if AC-2/AC-3 break)
+- ROOT CAUSE (measured on one stick alone on the Clearing's terrain under raw Rapier stepping): a long body on the uneven heightfield has jittering contacts (it hops 2-6 mm and rocks 0.5-3 rad/s about its long axis, or seesaws on a bump) and Rapier sleeps a body only below fixed speeds (0.4 m/s, 0.5 rad/s, not scaled by size). Ruled out, each measured: angular damping (up to 20/s), linear damping, CCD, facet count (4/5/6/12/16 and a box), friction, restitution, solver and PGS iterations, the internal-edge flag, the inertia (isotropic inertia still hops).
+- FIX (1bd3648): EntityStore.settle (phase 18): two windows of settleS/2; an awake free body whose extreme points' means moved < settleDriftM (0.005 m) and swung < settleSwingM (0.05 m) is put to sleep (not harness-kept or force-pushed bodies). settle.test: seeds 1 and 7 all branches and logs asleep within 10 s, < 1 mm over 60 s; control (rule off) ≥ 10 awake, > 1 cm creep. Perf smoke now PASSES: 2.84 ms (wall median 2.70 ms).
+- IT BREAKS ACCEPTANCE GATES (full run, 14 failed / 1,579 passed; not refitted, not relaxed; for the coordinator):
+  - AC-2(a) deadfall: verb-only 200 N control springs at tick 1514 (gate: never); staged run: hit gate 1.73 (expected ≤ 1); staged 700 N control springs at 1614; walked staged run rolls 0.935 m off its plane (gate < 0.35).
+  - AC-2(b) pit: the cached pit has 25 bearers (gate exactly 26); 6 m/s run: stake 76 broke with no impact first; bridge control: "no entity 150" (the scene differs).
+  - AC-2(c) swinging log staged: no hit with v_n ≥ 5 m/s and damage > 0.
+  - AC-3: 3 of 4 runs (brain on, z0 −1.5, 0, 1.5) no trunk wound; brain-off passes.
+  - AC-4: the pinned scene's scout finds no spot (875 trials): both pinned tests fail.
+  - proppedLog.lab: the propped log sprang at tick 125 under 700 N (expected to hold).
+  - Unchanged: AC-1, AC-5, AC-6, AC-7 (no golden file changes: the fixture is a command log), everything else. Typecheck and build pass.
