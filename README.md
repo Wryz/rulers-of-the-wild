@@ -141,10 +141,14 @@ browser, no backend.
 
 ## Run it
 
+Use **Node 22** (`.nvmrc`; `package.json` `engines`): the recorded legacy-fight replay fixture
+mismatches on Node 24.
+
 ```bash
 npm install
 npm run dev        # http://localhost:5173
-npm test           # combat rules + reach regression tests (headless)
+npm test           # every package's tests (headless)
+npm run test:accept  # Milestone 1's acceptance tests AC-1..AC-7
 npm run build      # typecheck + production build into dist/
 ```
 
