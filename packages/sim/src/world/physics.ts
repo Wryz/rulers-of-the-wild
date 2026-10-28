@@ -34,9 +34,6 @@ export const PHYSICS_TUNING = defineTuning(
     forceEventThresholdN: 2000,
     restSpeed: 0.05,
     restTicks: 30,
-    settleDriftM: 0.005,
-    settleSwingM: 0.05,
-    settleS: 2,
   },
   {
     entityExtraSolverIters: { unit: 'iterations', source: 'MAP rapier finding 11 (orchestrator decision 5)' },
@@ -48,16 +45,6 @@ export const PHYSICS_TUNING = defineTuning(
     forceEventThresholdN: { unit: 'N', source: 'NEW: dev cross-check only' },
     restSpeed: { unit: 'm/s', source: 'NEW' },
     restTicks: { unit: 'ticks', source: 'NEW' },
-    settleDriftM: {
-      unit: 'm',
-      source:
-        "NEW (P38): the settle rule (world/entities.ts mirror): a free body whose extreme points' mean positions moved less than this between two windows of settleS / 2, and swung less than settleSwingM, is put to sleep (Rapier's own speed test never sees through its contact jitter on the heightfield)",
-      min: 0,
-      max: 0.1,
-      step: 0.001,
-    },
-    settleSwingM: { unit: 'm', source: 'NEW (P38): the settle rule: the most a point may swing within the window (a swinging or rocking body stays awake above it)', min: 0, max: 0.5, step: 0.005 },
-    settleS: { unit: 's', source: "NEW (P38): the settle rule's two windows together (Rapier's own time to sleep, 2 s)", min: 0.1, max: 10, step: 0.1 },
   },
 );
 

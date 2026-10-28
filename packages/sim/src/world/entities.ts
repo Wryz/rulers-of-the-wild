@@ -34,7 +34,7 @@ import { collisionGroups, pieceGraceCollisionGroups, solverGroups } from './grou
 import { LOAD_TUNING } from './loads';
 import { MATERIALS } from './materials';
 import { ownerKey, PHYSICS_TUNING } from './physics';
-import { colliderDesc, principalAxis, shapeMass, shapeVolume, triangulate } from './shapes';
+import { colliderDesc, shapeMass, shapeVolume, triangulate } from './shapes';
 import type { Entity, EntitySpec, EntityState, Owner, PlantState, Pose3, Quat, Shape, SharpPoint, V3 } from './types';
 import { VERB_TUNING } from './verbs/tuning';
 import type { World } from './world';
@@ -96,11 +96,6 @@ interface Runtime {
   reach: number;
   /** m: the shape's smallest half-extent (CCD below PHYSICS_TUNING.ccdMinHalfExtent). */
   minHalf: number;
-  /**
-   * P38, the settle rule (mirror): this window's first extreme points (world xyz triples), their running sums, its ticks,
-   * the most a point swung from its first position, and the previous window's mean points; null when none.
-   */
-  settle: { first: number[]; sum: number[]; ticks: number; swing: number; prevMean: number[] | null } | null;
 }
 
 /** The PHYSICS_TUNING values a dynamic body carries, as last applied to every body. */
@@ -141,8 +136,6 @@ export class EntityStore {
   private forces: QueuedImpulse[] = [];
   /** P28: the bodies forced this tick, reset by resetForces after phase 7. */
   private forced: RAPIER.RigidBody[] = [];
-  /** P38: the bodies this tick's step forced (resetForces' list, kept for the settle rule of phase 18). */
-  private forcedNow: ReadonlySet<RAPIER.RigidBody> = new Set();
   /** The PHYSICS_TUNING body values every dynamic body has (bodies made later read the table when they are made). */
   private applied: BodyTuning;
 
@@ -465,7 +458,6 @@ export class EntityStore {
 
   /** P28: phase 7's end: every force added this tick is taken off its body again (C F3: none persists). */
   resetForces(): void {
-    this.forcedNow = new Set(this.forced);
     for (const b of this.forced) {
       b.resetForces(false);
       b.resetTorques(false);
@@ -558,7 +550,6 @@ export class EntityStore {
           e.vel = { lin: copyV3(b.linvel()), ang: copyV3(b.angvel()) };
           const speed = norm(e.vel.lin) + norm(e.vel.ang) * rt.reach;
           e.restTicks = speed < restSpeed ? e.restTicks + 1 : 0;
-          this.settle(e, rt, b);
         } else {
           e.vel = { lin: zero(), ang: zero() };
           e.restTicks++;
@@ -571,48 +562,6 @@ export class EntityStore {
       if (e.touched) rt.genPose = null;
       if (e.state !== 'frozen') e.age += DT;
     }
-  }
-
-  /**
-   * P38, the settle rule (phase 18). Rapier puts a body to sleep when its linear and angular speeds stay under fixed
-   * thresholds (0.4 m/s, 0.5 rad/s) for 2 s. A long body lying on the uneven heightfield never gets there: its contacts
-   * there jitter, so it hops a few millimetres and rocks (0.5-3 rad/s about its long axis, a seesaw on a bump) though its
-   * surface hardly moves, and 31 of the Clearing's 61 branches and logs rocked and crept for ever (up to 11 cm in 30 s,
-   * rule 3). Not a matter of damping, CCD, facets, friction, restitution, solver iterations, the heightfield's
-   * internal-edge fix or the body's inertia (each measured; P38 in docs/work/ledger.md): the angular threshold isn't
-   * scaled by a body's size, and the jitter keeps a thin body over it. So the sim also judges rest by where a body's
-   * extreme points are (the ends of its long axis, its cross half-extent either side): over two windows of settleS / 2,
-   * an awake free body whose points swing less than settleSwingM within the second window and whose mean positions moved
-   * less than settleDriftM from the first window's is put to sleep. Rapier wakes it again on a new contact, an impulse
-   * or a force. A swinging log (a large swing), a sliding one (a mean that moves), a body the harness keeps awake or one a
-   * sustained code force pushed this tick are left awake.
-   */
-  private settle(e: Entity, rt: Runtime, b: RAPIER.RigidBody): void {
-    if (b.isSleeping() || rt.keepAwake || this.forcedNow.has(b)) {
-      rt.settle = null;
-      return;
-    }
-    const T = PHYSICS_TUNING;
-    const pts = extremePoints(e.shape, e.pose);
-    let s = rt.settle;
-    if (!s) s = rt.settle = { first: pts, sum: new Array<number>(pts.length).fill(0), ticks: 0, swing: 0, prevMean: null };
-    for (let i = 0; i < pts.length; i++) {
-      s.sum[i] += pts[i];
-      if (i % 3 === 2) s.swing = Math.max(s.swing, Math.hypot(pts[i - 2] - s.first[i - 2], pts[i - 1] - s.first[i - 1], pts[i] - s.first[i]));
-    }
-    s.ticks++;
-    if (s.ticks < Math.max(1, Math.round(T.settleS / 2 / DT))) return;
-    const mean = s.sum.map((x) => x / s.ticks);
-    const prev = s.prevMean;
-    let drift = 0;
-    if (prev) for (let i = 0; i + 2 < mean.length; i += 3) drift = Math.max(drift, Math.hypot(mean[i] - prev[i], mean[i + 1] - prev[i + 1], mean[i + 2] - prev[i + 2]));
-    if (prev && drift < T.settleDriftM && s.swing < T.settleSwingM) {
-      b.sleep();
-      e.vel = { lin: zero(), ang: zero() };
-      rt.settle = null;
-      return;
-    }
-    rt.settle = { first: pts, sum: new Array<number>(pts.length).fill(0), ticks: 0, swing: 0, prevMean: mean };
   }
 
   // -------------------------------------------------------------------------
@@ -908,8 +857,6 @@ const copyV3 = (v: { x: number; y: number; z: number }): V3 => ({ x: v.x, y: v.y
 const copyQuat = (q: Quat): Quat => ({ x: q.x, y: q.y, z: q.z, w: q.w });
 const copyPose = (p: Pose3): Pose3 => ({ p: copyV3(p.p), q: copyQuat(p.q) });
 const norm = (v: { x: number; y: number; z: number }): number => Math.hypot(v.x, v.y, v.z);
-const add = (a: V3, b: V3): V3 => ({ x: a.x + b.x, y: a.y + b.y, z: a.z + b.z });
-const cross = (a: V3, b: V3): V3 => ({ x: a.y * b.z - a.z * b.y, y: a.z * b.x - a.x * b.z, z: a.x * b.y - a.y * b.x });
 const finiteV3 = (v: V3): boolean => Number.isFinite(v.x) && Number.isFinite(v.y) && Number.isFinite(v.z);
 const byId = (a: Entity, b: Entity): number => a.id - b.id;
 const ownerOf = (e: Entity): Owner => ({ kind: 'entity', id: e.id });
@@ -942,28 +889,6 @@ function rotate(q: Quat, v: V3): V3 {
     y: v.y + q.w * ty + (q.z * tx - q.x * tz),
     z: v.z + q.w * tz + (q.x * ty - q.y * tx),
   };
-}
-
-/**
- * P38: a shape's extreme points at a pose, as world xyz triples: the ends of its long axis and its cross half-extent
- * either side of the axis's middle, both ways across it (principalAxis).
- */
-function extremePoints(s: Shape, at: Pose3): number[] {
-  const ax = principalAxis(s);
-  const d = ax.dir;
-  // Two directions across the axis.
-  const u = Math.abs(d.y) < 0.9 ? cross(d, { x: 0, y: 1, z: 0 }) : cross(d, { x: 1, y: 0, z: 0 });
-  const un = norm(u);
-  const u1 = { x: u.x / un, y: u.y / un, z: u.z / un };
-  const u2 = cross(d, u1);
-  const mid = (ax.min + ax.max) / 2;
-  const local = (t: number, c: V3, k: number): V3 => ({ x: d.x * t + c.x * k, y: d.y * t + c.y * k, z: d.z * t + c.z * k });
-  const out: number[] = [];
-  for (const p of [local(ax.min, u1, 0), local(ax.max, u1, 0), local(mid, u1, ax.crossHalf), local(mid, u1, -ax.crossHalf), local(mid, u2, ax.crossHalf), local(mid, u2, -ax.crossHalf)]) {
-    const w = add(at.p, rotate(at.q, p));
-    out.push(w.x, w.y, w.z);
-  }
-  return out;
 }
 
 /** Whether `p` left `from` by more than ENTITY_TUNING.touchedMoveM or turned by more than touchedTurnDeg. */
@@ -1003,7 +928,6 @@ function runtimeFor(e: Entity, prev: Runtime | null): Runtime {
     shape: e.shape,
     reach: shapeRadius(e.shape),
     minHalf: minHalfExtent(e.shape),
-    settle: null,
   };
 }
 

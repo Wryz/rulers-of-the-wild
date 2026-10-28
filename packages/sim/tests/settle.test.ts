@@ -1,9 +1,12 @@
-// P38: the settle rule (world/entities.ts EntityStore.settle; PHYSICS_TUNING.settleDriftM, settleSwingM, settleS).
-// Long thin bodies lying on the Clearing's uneven heightfield used to rock and creep for ever (31 of 61 branches and
-// logs on seed 1, up to 11 cm in 30 s: rule 3): Rapier's speed thresholds never saw through its contact jitter. With
-// the rule they fall asleep within 10 s and stay put for a minute; without it (settleSwingM 0) they don't.
+// P38: KNOWN BUG, documented (rule 3): long thin bodies lying on the Clearing's uneven heightfield never fall asleep.
+// Their contacts there jitter (they hop 2-6 mm and rock 0.5-3 rad/s about the long axis, or seesaw on a bump), and
+// Rapier sleeps a body only below fixed speeds (0.4 m/s, 0.5 rad/s, not scaled by size), so 31 of 61 generated
+// branches and logs on seed 1 rock and creep for ever (up to 11 cm in 30 s), and cost ≈ 3 ms of Rapier per tick.
+// A position-based settle rule fixed it (both `it.fails` below passed with it) but broke AC-2(b) and AC-3, even
+// narrowed to loose bodies resting on the terrain alone, so it was reverted (docs/work/ledger.md, P38). These stay
+// `it.fails` until a fix keeps every gate green; flip them then.
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { resetTuning, setTuningValue } from '../src/tuning/registry';
+import { resetTuning } from '../src/tuning/registry';
 import { physicsReady } from '../src/world/physics';
 import type { Entity, V3 } from '../src/world/types';
 import { createWorld, type World } from '../src/world/world';
@@ -35,9 +38,9 @@ async function run(w: World, ticks: number): Promise<void> {
   }
 }
 
-describe('the settle rule (P38): branches and logs on the terrain fall asleep and stay put', () => {
+describe('KNOWN BUG (P38): branches and logs on the terrain should fall asleep and stay put', () => {
   for (const seed of [1, 7]) {
-    it(`seed ${seed}: every generated branch and log is asleep within 10 s and moves < 1 mm over the next 60 s`, async () => {
+    it.fails(`seed ${seed}: every generated branch and log is asleep within 10 s and moves < 1 mm over the next 60 s`, async () => {
       const w = await createWorld({ seed, scene: 'clearing', nav: 'off' });
       live.push(w);
       const bodies = lying(w);
@@ -52,18 +55,4 @@ describe('the settle rule (P38): branches and logs on the terrain fall asleep an
       expect(moved).toEqual([]);
     });
   }
-
-  it('control: without the rule (settleSwingM 0) many of them never sleep and keep creeping (seed 1)', async () => {
-    setTuningValue('PHYSICS_TUNING', 'settleSwingM', 0);
-    const w = await createWorld({ seed: 1, scene: 'clearing', nav: 'off' });
-    live.push(w);
-    const bodies = lying(w);
-    await run(w, SETTLE_TICKS);
-    const awake = bodies.filter((e) => !e.body!.isSleeping());
-    expect(awake.length).toBeGreaterThanOrEqual(10);
-    const at = new Map<number, V3>(awake.map((e) => [e.id, { ...e.pose.p }]));
-    await run(w, STAY_TICKS);
-    const creep = Math.max(...awake.map((e) => Math.hypot(e.pose.p.x - at.get(e.id)!.x, e.pose.p.z - at.get(e.id)!.z)));
-    expect(creep).toBeGreaterThan(0.01);
-  });
 });

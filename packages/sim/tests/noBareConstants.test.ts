@@ -64,7 +64,6 @@ export const ALLOW: FileAllowlist = {
   },
   'world/queries.ts': { '0.0001': 'VERTICAL_RAY_SLACK_M: float32 slack between the heightfield and heightAt (documented in place)' },
   'world/creatures/rulerMind.ts': { '0.25': 'a triangle wave of one period (its quarter points)', '0.75': 'a triangle wave of one period (its quarter points)' },
-  'world/entities.ts': { '0.9': 'a perpendicular to an axis: crossed with y unless the axis lies within ≈ 25° of y (a geometric choice, P38 extremePoints)' },
   'world/devOps.ts': { '100': 'centimetres per metre (dev positions are integer cm)' },
   'world/materials.ts': { '1000': 'newtons per kilonewton (SPEC gives rope strength in kN)' },
   'world/collision.ts': { '2.5': "DS's flat-ground Walkable fixture (SPEC:896 keeps it for the DS tests): a prop's default height" },
