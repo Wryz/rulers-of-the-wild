@@ -666,8 +666,9 @@ export class RulerBodies {
         rb.body.setLinvel(lin, false);
         rb.body.setAngvel(ang, false);
         rb.dynamic = true;
-        if (boolFromRecord(rec.sleeping, `${at}.sleeping`)) rb.body.sleep();
-        else rb.body.wakeUp();
+        // P38: a body that slept is put back to sleep by the loader after its zero-length step (sleepAfterLoad).
+        boolFromRecord(rec.sleeping, `${at}.sleeping`);
+        rb.body.wakeUp();
       } else {
         rb.local = null;
         if (rb.dynamic) this.makeSensors(rb);
@@ -680,6 +681,16 @@ export class RulerBodies {
       }
       for (const k of rb.keys) this.world.physics.resetHistory(k);
     }
+  }
+
+  /**
+   * P38, the loader's last step (save/load.ts): a tripped ruler's body that slept when saved goes back to sleep after
+   * the load's zero-length step (asleep before it, the awake bodies the load made around it woke it there).
+   */
+  sleepAfterLoad(f: Fighter): void {
+    const rb = this.byId.get(f.id);
+    if (!rb?.dynamic) throw new Error(`RulerBodies.sleepAfterLoad: fighter ${f.id} has no tripped ruler body`);
+    rb.body.sleep();
   }
 
   // -------------------------------------------------------------------------
