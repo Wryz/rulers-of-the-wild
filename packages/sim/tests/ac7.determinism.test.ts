@@ -569,6 +569,35 @@ describe.skipIf(RECORD)('AC-7: determinism (SPEC:904, §11.7)', () => {
     expect(compareRuns(a, { name: 'A*', checkpoints: bentSave })).toMatch(/tick 60 .*save differs at tick: /);
   }, 600_000);
 
+  it('negative control (P38): one move command turned by one step shows from the next checkpoint on and not before; another seed differs at the first', async () => {
+    // End to end, not only the comparator's byte flips above: the same runner and checks fed a log that differs in one
+    // command, and a world of another seed, must be told apart, at the right checkpoint.
+    const script = readScript();
+    const keys = editedKeys(script.commands);
+    const at = script.commands.findIndex((c) => c.kind === 'move' && c.tick > 600 && c.speed > 0);
+    expect(at, 'a moving move command after tick 600').toBeGreaterThanOrEqual(0);
+    const cmd = script.commands[at] as Extract<Command, { kind: 'move' }>;
+    const bent: Ac7Script = { ...script, commands: script.commands.map((c, i) => (i === at ? { ...cmd, dir: (cmd.dir + 1) % COMMAND_STEPS } : c)) };
+    const firstAfter = Math.ceil(cmd.tick / CONFIG.every) * CONFIG.every;
+    const ticks = firstAfter + 3 * CONFIG.every;
+    resetTuning();
+    const a = await makeRunner('A', CONFIG.seed, script, keys, false);
+    await runTogether([a], ticks);
+    resetTuning();
+    const n = await makeRunner('N', CONFIG.seed, bent, keys, false);
+    await runTogether([n], ticks);
+    const before = (r: Runner) => ({ name: r.name, checkpoints: r.checkpoints.filter((cp) => cp.tick < cmd.tick) });
+    expect(before(a).checkpoints.length).toBeGreaterThan(5);
+    expect(compareRuns(before(a), before(n)), 'GATE identical before the changed command').toBeNull();
+    expect(compareRuns(a, n), 'GATE the changed command shows at the first checkpoint after it').toMatch(new RegExp(`first difference at tick ${firstAfter} `));
+    resetTuning();
+    const o = await makeRunner('O', CONFIG.seed + 1, script, keys, false);
+    await runTogether([o], CONFIG.every);
+    const first = (r: Runner) => ({ name: r.name, checkpoints: r.checkpoints.slice(0, 1) });
+    expect(compareRuns(first(a), first(o)), 'GATE another seed differs at the first checkpoint').toMatch(/first difference at tick 60 .*save differs at seed/);
+    console.info(`AC-7 negative control: move command ${at} (tick ${cmd.tick}) turned one step: ${compareRuns(a, n)}`);
+  }, 600_000);
+
   it('two worlds stepped interleaved tick by tick (W1, W2) stay byte-identical every 60 ticks', async () => {
     const script = readScript();
     const keys = editedKeys(script.commands);
