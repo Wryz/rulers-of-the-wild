@@ -5,8 +5,7 @@
 // A position-based settle rule fixed it (both `it.fails` below passed with it) but broke AC-2(b) and AC-3, even
 // narrowed to loose bodies resting on the terrain alone, so it was reverted (docs/work/ledger.md, P38). These stay
 // `it.fails` until a fix keeps every gate green; flip them then.
-import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { resetTuning } from '../src/tuning/registry';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { physicsReady } from '../src/world/physics';
 import type { Entity, V3 } from '../src/world/types';
 import { createWorld, type World } from '../src/world/world';
@@ -23,9 +22,8 @@ const live: World[] = [];
 beforeAll(async () => {
   await physicsReady();
 });
-afterEach(() => {
+afterAll(() => {
   for (const w of live.splice(0)) w.dispose();
-  resetTuning('PHYSICS_TUNING');
 });
 
 /** The generated branches and logs lying free on the ground (long prisms). */
@@ -40,19 +38,26 @@ async function run(w: World, ticks: number): Promise<void> {
 
 describe('KNOWN BUG (P38): branches and logs on the terrain should fall asleep and stay put', () => {
   for (const seed of [1, 7]) {
-    it.fails(`seed ${seed}: every generated branch and log is asleep within 10 s and moves < 1 mm over the next 60 s`, async () => {
+    // The run is a plain test (a setup failure or a crash fails it); only the bug's own assertions are `it.fails`.
+    const seen: { awake: number[]; moved: { id: number; m: number }[] } = { awake: [], moved: [] };
+    it(`seed ${seed}: setup: the Clearing's over 40 lying branches and logs, run 10 s, then 60 s more`, async () => {
       const w = await createWorld({ seed, scene: 'clearing', nav: 'off' });
       live.push(w);
       const bodies = lying(w);
       expect(bodies.length).toBeGreaterThan(40);
       await run(w, SETTLE_TICKS);
-      expect(bodies.filter((e) => !e.body!.isSleeping()).map((e) => e.id)).toEqual([]);
+      seen.awake = bodies.filter((e) => !e.body!.isSleeping()).map((e) => e.id);
       const at = new Map<number, V3>(bodies.map((e) => [e.id, { ...e.pose.p }]));
       await run(w, STAY_TICKS);
-      const moved = bodies
+      seen.moved = bodies
         .map((e) => ({ id: e.id, m: Math.hypot(e.pose.p.x - at.get(e.id)!.x, e.pose.p.y - at.get(e.id)!.y, e.pose.p.z - at.get(e.id)!.z) }))
         .filter((x) => !(x.m < STAY_MAX_MOVE_M));
-      expect(moved).toEqual([]);
+    });
+    it.fails(`seed ${seed}: every generated branch and log is asleep within 10 s`, () => {
+      expect(seen.awake).toEqual([]);
+    });
+    it.fails(`seed ${seed}: none of them moves 1 mm or more over the next 60 s`, () => {
+      expect(seen.moved).toEqual([]);
     });
   }
 });

@@ -19,22 +19,23 @@ const DOC = fileURLToPath(new URL('../../../docs/M1-DESIGN.md', import.meta.url)
 /** The client logic M1 wrote that reads starting values. */
 const FILES = ['game/killcam.ts', 'game/loop.ts', 'game/moments.ts', 'input/verbInput.ts', 'input/targeting.ts', 'render/followCam.ts'];
 
+const at = (v: string, re: RegExp, why: string) => ({ v, at: re, why });
 const ALLOW: FileAllowlist = {
-  'game/loop.ts': { '1000': 'milliseconds per second' },
-  'input/verbInput.ts': {
-    '8': 'an eighth of a turn in command steps (COMMAND_STEPS / 8)',
-    '0.001': "a floor under VERB_UI_TUNING.leanSampleM so a panel edit to 0 can't make the sampling loop endless",
-  },
-  'input/targeting.ts': {
-    '12': 'alternating-projection iterations of nearestToRay (a numerical device: it converges in a few)',
-    '24': 'bisection steps of rayTerrain (a numerical device: 2⁻²⁴ of a step)',
-  },
-  'render/followCam.ts': {
-    '16': "the camera's aspect before the first resize (16 / 9; the canvas sets it)",
-    '9': "the camera's aspect before the first resize (16 / 9; the canvas sets it)",
-    '0.1': "the camera's near plane, DS's (render/cameraRig.ts), kept equal so a cut between the two cameras never pops",
-    '24': 'BISECT: bisection steps for the boom (a numerical device, documented in place)',
-  },
+  'game/loop.ts': [at('1000', /\(now - last\) \/ 1000/, 'milliseconds per second')],
+  'input/verbInput.ts': [
+    at('8', /const PITCH_SLOPED_PROBE = COMMAND_STEPS \/ 8;/, 'an eighth of a turn in command steps'),
+    at('0.001', /Math\.max\(1e-3, VERB_UI_TUNING\.leanSampleM\)/, "a floor under VERB_UI_TUNING.leanSampleM so a panel edit to 0 can't make the sampling loop endless"),
+  ],
+  'input/targeting.ts': [
+    at('12', /for \(let i = 0; i < 12; i\+\+\)/, 'alternating-projection iterations of nearestToRay (a numerical device: it converges in a few)'),
+    at('24', /for \(let i = 0; i < 24; i\+\+\)/, 'bisection steps of rayTerrain (a numerical device: 2⁻²⁴ of a step)'),
+  ],
+  'render/followCam.ts': [
+    at('16', /new PerspectiveCamera\(CAMERA_TUNING\.fov, 16 \/ 9, 0\.1,/, "the camera's aspect before the first resize (16 / 9; the canvas sets it)"),
+    at('9', /new PerspectiveCamera\(CAMERA_TUNING\.fov, 16 \/ 9, 0\.1,/, "the camera's aspect before the first resize (16 / 9; the canvas sets it)"),
+    at('0.1', /new PerspectiveCamera\(CAMERA_TUNING\.fov, 16 \/ 9, 0\.1,/, "the camera's near plane, DS's (render/cameraRig.ts), kept equal so a cut between the two cameras never pops"),
+    at('24', /const BISECT = 24;/, 'bisection steps for the boom (a numerical device, documented in place)'),
+  ],
 };
 
 describe('no bare constants in the client logic (P38, §9, RR-7)', () => {

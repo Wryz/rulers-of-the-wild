@@ -42,7 +42,7 @@ end of this file.
    ```
    t5321 ape#2 ← entity #187 (fall) 412 J → 22.9 HP env [p1]
    t5322 KO ape#2 — environmental [p1]
-   t9050 WOUND giant#5 shoulders 306 HP (world) [p1]
+   t9050 WOUND giantApe#5 shoulders 306 HP (world) [p1]
    ```
 
    Read a line as: tick, who was hit, what hit it (an entity number, its feature: fall, sharp point, rolling…), the
@@ -175,7 +175,7 @@ Fire, water, mud and snow don't exist in M1, so the last five can't happen anywa
 shows either
 - an **impact with damage > 0 on a creature** (an ape or the giant) whose cause is an **entity**, with **the tester's
   credit** (`[p1]`) — e.g. `t8123 ape#3 ← entity #241 (fall) 230 J → 4.1 HP env [p1]`; or
-- a **ruler wound** credited to the tester — e.g. `t20311 WOUND giant#5 back 612 HP (world) [p1]`.
+- a **ruler wound** credited to the tester — e.g. `t20311 WOUND giantApe#5 back 612 HP (world) [p1]`.
 
 An entity carries the tester's credit once they built, placed, moved, cut or threw it (SPEC:473). An untouched part of
 the world that happens to fall on an ape shows `[nobody]` and doesn't count. Damage dealt by something **in the

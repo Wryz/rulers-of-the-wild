@@ -128,6 +128,10 @@ export class Loads {
    */
   private readonly awakeTick = new Map<number, number>();
   private readonly memos = new Map<number, Memo>();
+  /** EntityStore.epoch when the maps were last pruned of removed entities. */
+  private prunedEpoch = -1;
+  /** How many answers came from a memo (tests: verify mode must have something to check). */
+  memoHits = 0;
   static verify = false;
 
   constructor(world: World) {
@@ -137,6 +141,12 @@ export class Loads {
   /** Phase 11 (see the top of this file). */
   update(w: World): void {
     const tick = w.tick;
+    // P38: an entity removed since the last change takes its sleep record and memo with it.
+    if (this.prunedEpoch !== w.entities.epoch) {
+      for (const id of [...this.memos.keys()]) if (!w.entities.get(id)) this.memos.delete(id);
+      for (const id of [...this.awakeTick.keys()]) if (!w.entities.get(id)) this.awakeTick.delete(id);
+      this.prunedEpoch = w.entities.epoch;
+    }
     // P38: which dynamic entities are asleep at this step's end (the memos' condition), in id order.
     for (const e of w.entities.dynamic()) if (!e.body!.isSleeping()) this.awakeTick.set(e.id, tick);
     if (Loads.verify) {
@@ -324,6 +334,7 @@ export class Loads {
       return { x: c.x, y: c.y, z: c.z };
     };
     if (!m?.com) return fresh();
+    this.memoHits++;
     if (Loads.verify) expectSame(`centre of mass of entity ${e.id}`, m.com, fresh());
     return { ...m.com };
   }
@@ -336,6 +347,7 @@ export class Loads {
     const m = this.dynamicMemo(w, e);
     if (m?.supports && m.partners.every((id) => this.sleptSince(id, m.supportsTick))) {
       const out = this.resolve(w, m.supports);
+      this.memoHits++;
       if (Loads.verify) expectSame(`supports of entity ${e.id}`, view(out), view(this.supportsOf(w, e)));
       return out;
     }
@@ -387,6 +399,7 @@ export class Loads {
       const now = at(next, p);
       if (now) return now.spans;
       const kept = at(prev, p);
+      if (kept) this.memoHits++;
       if (kept && Loads.verify) expectSame(`span test of entity ${e.id}`, kept.spans, this.spans(w, e, p));
       const entry = kept ?? { x: p.x, y: p.y, z: p.z, spans: this.spans(w, e, p) };
       next.push(entry);

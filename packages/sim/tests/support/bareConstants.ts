@@ -6,7 +6,8 @@
 // - a literal type (`n: 2 | 3 | 4`), which is a type, not a value;
 // - one of ANYWHERE's maths constants, or a numerical tolerance no bigger than EPSILON_MAX;
 // - allowed for its file by the caller's allowlist, each value with its reason (bit masks, Recast's limits, byte
-//   sizes, unit conversions, formula constants, DS fixtures).
+//   sizes, unit conversions, formula constants, DS fixtures), each tied to its site: the value and a pattern its source
+//   line must match, so an allowance covers that use only, not every use of the value in the file.
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import ts from 'typescript';
@@ -28,8 +29,15 @@ export const ANYWHERE: Readonly<Record<string, string>> = {
 /** |v| at or below this is a numerical tolerance (float comparisons, divide-by-zero guards), never a starting value. */
 export const EPSILON_MAX = 1e-6;
 
-/** Per file (path relative to the scanned root, '/' separated): value (as written by String(Number(text))) → reason. */
-export type FileAllowlist = Readonly<Record<string, Readonly<Record<string, string>>>>;
+/** One allowed site: the value (as String(Number(text)) writes it), a pattern its source line matches, and why. */
+export interface Allowance {
+  v: string;
+  at: RegExp;
+  why: string;
+}
+
+/** Per file (path relative to the scanned root, '/' separated): its allowed sites. */
+export type FileAllowlist = Readonly<Record<string, readonly Allowance[]>>;
 
 export interface BareConstant {
   file: string;
@@ -54,52 +62,61 @@ export function tsFiles(root: string, dir: string): string[] {
 
 const RANGE_KEYS = new Set(['min', 'max', 'step']);
 
+interface Literal {
+  value: number;
+  key: string;
+  line: number;
+  text: string;
+}
+
+/** Every numeric literal of a file the scan judges: not in a tuning table, not a literal type, not a panel range. */
+function judgedLiterals(root: string, file: string): Literal[] {
+  const text = readFileSync(join(root, file), 'utf8');
+  const src = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
+  const lines = text.split('\n');
+  const out: Literal[] = [];
+  const visit = (n: ts.Node, inTable: boolean): void => {
+    if (ts.isCallExpression(n) && n.expression.getText(src) === 'defineTuning') inTable = true;
+    if (ts.isLiteralTypeNode(n)) return;
+    if (ts.isNumericLiteral(n) && !inTable) {
+      let v = Number(n.text);
+      const p = n.parent;
+      if (ts.isPrefixUnaryExpression(p) && p.operator === ts.SyntaxKind.MinusToken) v = -v;
+      const range = ts.isPropertyAssignment(p) && RANGE_KEYS.has(p.name.getText(src));
+      if (!range) {
+        const line = src.getLineAndCharacterOfPosition(n.getStart(src)).line;
+        out.push({ value: v, key: String(v), line: line + 1, text: lines[line].trim() });
+      }
+    }
+    ts.forEachChild(n, (c) => visit(c, inTable));
+  };
+  visit(src, false);
+  return out;
+}
+
+const allowedAt = (allow: readonly Allowance[], l: Literal): boolean => allow.some((a) => a.v === l.key && a.at.test(l.text));
+
 /** The numeric literals of `files` (relative to `root`) that no rule above allows. */
 export function bareConstants(root: string, files: readonly string[], allow: FileAllowlist): BareConstant[] {
   const out: BareConstant[] = [];
   for (const file of files) {
-    const text = readFileSync(join(root, file), 'utf8');
-    const src = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
-    const lines = text.split('\n');
-    const fileAllow = allow[file] ?? {};
-    const visit = (n: ts.Node, inTable: boolean): void => {
-      if (ts.isCallExpression(n) && n.expression.getText(src) === 'defineTuning') inTable = true;
-      if (ts.isLiteralTypeNode(n)) return;
-      if (ts.isNumericLiteral(n) && !inTable) {
-        let v = Number(n.text);
-        const p = n.parent;
-        if (ts.isPrefixUnaryExpression(p) && p.operator === ts.SyntaxKind.MinusToken) v = -v;
-        const key = String(v);
-        const range = ts.isPropertyAssignment(p) && RANGE_KEYS.has(p.name.getText(src));
-        if (!range && !(key in ANYWHERE) && !(Math.abs(v) <= EPSILON_MAX) && !(key in fileAllow)) {
-          const line = src.getLineAndCharacterOfPosition(n.getStart(src)).line;
-          out.push({ file, line: line + 1, value: v, text: lines[line].trim() });
-        }
-      }
-      ts.forEachChild(n, (c) => visit(c, inTable));
-    };
-    visit(src, false);
+    for (const l of judgedLiterals(root, file)) {
+      if (l.key in ANYWHERE || Math.abs(l.value) <= EPSILON_MAX || allowedAt(allow[file] ?? [], l)) continue;
+      out.push({ file, line: l.line, value: l.value, text: l.text });
+    }
   }
   return out;
 }
 
-/** Allowlist entries (file, value) that no literal uses any more: stale reasons to drop. */
+/**
+ * Allowances no judged literal uses (a literal inside a tuning table, a literal type or a panel range doesn't count):
+ * stale reasons to drop.
+ */
 export function unusedAllowances(root: string, allow: FileAllowlist): string[] {
   const out: string[] = [];
-  for (const [file, values] of Object.entries(allow)) {
-    const text = readFileSync(join(root, file), 'utf8');
-    const src = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
-    const seen = new Set<string>();
-    const visit = (n: ts.Node): void => {
-      if (ts.isNumericLiteral(n)) {
-        let v = Number(n.text);
-        if (ts.isPrefixUnaryExpression(n.parent) && n.parent.operator === ts.SyntaxKind.MinusToken) v = -v;
-        seen.add(String(v));
-      }
-      ts.forEachChild(n, visit);
-    };
-    visit(src);
-    for (const v of Object.keys(values)) if (!seen.has(v)) out.push(`${file}: ${v}`);
+  for (const [file, sites] of Object.entries(allow)) {
+    const lits = judgedLiterals(root, file);
+    for (const a of sites) if (!lits.some((l) => l.key === a.v && a.at.test(l.text))) out.push(`${file}: ${a.v} at ${a.at}`);
   }
   return out;
 }

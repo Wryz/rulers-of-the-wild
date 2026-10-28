@@ -1,9 +1,10 @@
 // P38 (RR-7): which registered tuning keys have no row in docs/M1-DESIGN.md §9.1 ("Every starting value, by table").
 //
 // A §9.1 row is `| TABLE | key | value | unit | source |`; its key cell may group keys with " / " ("a / b / c"), name a
-// compound value by its first path segment (MATERIALS "greenWood" covers greenWood.density …), and give later keys of a
-// group relative to the first one's parent ("shared.sightRayTolM / repathCheckTicks"). A leaf is covered when a key
-// token of one of its table's rows equals it, is a dotted prefix of it, or is its last segments.
+// compound value by its path (MATERIALS "greenWood" covers greenWood.density …: the row gives every part of the value),
+// and give later keys of a group relative to the first one's parent ("shared.sightRayTolM / repathCheckTicks" names
+// shared.repathCheckTicks). A leaf is covered only by its full path: a key token equal to it, or a dotted prefix of it
+// (a compound value). P38 review: a key's last segments alone no longer count.
 
 /** §9.1's text (from its heading to §9.2's). */
 export function section91(doc: string): string {
@@ -20,10 +21,13 @@ export function rowKeys(doc: string, table: string): string[] {
     const cells = line.split('|').map((c) => c.trim());
     // ['', TABLE, key, value, unit, source, '']
     if (cells.length < 4 || cells[1] !== table) continue;
-    for (const t of cells[2].split('/')) {
+    let parent = '';
+    cells[2].split('/').forEach((t, i) => {
       const k = t.trim().replace(/`/g, '');
-      if (k) out.push(k);
-    }
+      if (!k) return;
+      if (i === 0) parent = k.includes('.') ? k.slice(0, k.lastIndexOf('.')) : '';
+      out.push(i > 0 && parent && !k.includes('.') ? `${parent}.${k}` : k);
+    });
   }
   return out;
 }
@@ -31,5 +35,5 @@ export function rowKeys(doc: string, table: string): string[] {
 /** The keys among `keys` (dotted leaf paths of `table`) that no §9.1 row covers, in the order given. */
 export function uncoveredTuningKeys(doc: string, table: string, keys: readonly string[]): string[] {
   const tokens = rowKeys(doc, table);
-  return keys.filter((k) => !tokens.some((t) => k === t || k.startsWith(`${t}.`) || k.endsWith(`.${t}`)));
+  return keys.filter((k) => !tokens.some((t) => k === t || k.startsWith(`${t}.`)));
 }

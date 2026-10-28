@@ -595,6 +595,17 @@ describe.skipIf(RECORD)('AC-7: determinism (SPEC:904, §11.7)', () => {
     await runTogether([o], CONFIG.every);
     const first = (r: Runner) => ({ name: r.name, checkpoints: r.checkpoints.slice(0, 1) });
     expect(compareRuns(first(a), first(o)), 'GATE another seed differs at the first checkpoint').toMatch(/first difference at tick 60 .*save differs at seed/);
+    // Not only the seed field: the world itself differs (P38 review): its bodies' states, from the first entity body on
+    // (the generated Clearing is another one), and the saves' content with the seed left out.
+    const [ca, co] = [a.checkpoints[0], o.checkpoints[0]];
+    expect(same(ca.body, co.body), 'GATE another seed: different body states').toBe(false);
+    expect(bodyDiff(ca.body, co.body), 'GATE another seed: the entities differ').toMatch(/entity \d+ body/);
+    const withoutSeed = (b: Uint8Array): string => {
+      const s = JSON.parse(new TextDecoder().decode(b)) as Record<string, unknown>;
+      delete s.seed;
+      return JSON.stringify(s);
+    };
+    expect(withoutSeed(ca.save) === withoutSeed(co.save), 'GATE another seed: the saves differ beyond the seed').toBe(false);
     console.info(`AC-7 negative control: move command ${at} (tick ${cmd.tick}) turned one step: ${compareRuns(a, n)}`);
   }, 600_000);
 

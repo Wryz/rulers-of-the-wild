@@ -599,6 +599,8 @@ const INVENTORY: Record<string, Record<string, string>> = {
     world: 'not saved: a link',
     awakeTick: 'not saved: P38, the memos\' sleep record (outcome-free: a memo only repeats what Rapier would answer)',
     memos: 'not saved: P38, a cache of contact-derived answers (outcome-free; a loaded world starts with none)',
+    prunedEpoch: 'not saved: P38, when the memos were last pruned of removed entities',
+    memoHits: 'not saved: P38, a test counter of memoised answers',
   },
   Felling: {
     world: 'not saved: a link',

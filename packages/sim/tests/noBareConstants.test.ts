@@ -19,68 +19,88 @@ const DOC = fileURLToPath(new URL('../../../docs/M1-DESIGN.md', import.meta.url)
 const FILES = [...tsFiles(ROOT, 'world'), ...tsFiles(ROOT, 'save'), 'sim/rules.ts', 'sim/ruler.ts', 'sim/impact.ts', 'sim/species.ts'];
 
 const BITS = 'bit arithmetic (masks, shifts, bytes)';
-/** Per file: the values that are not starting values, and why. */
+const NOISE = 'the value-noise permutation table (256 entries, doubled)';
+const BOX = "a box's corner indices (the face table)";
+const POSE6 = "a pose's six numbers per bone (the saved zone history)";
+/** An allowed site: the value, a pattern its line matches, and why it isn't a starting value. */
+const at = (v: string, re: RegExp, why: string) => ({ v, at: re, why });
+/** Per file: the sites whose values are not starting values, and why. */
 export const ALLOW: FileAllowlist = {
-  'world/shapes.ts': {
-    '5': "a box's corner indices (the face table)",
-    '6': "a box's corner indices; a tetrahedron's volume (÷ 6); RAPIER_BAD_FACE_VERTICES, Rapier 0.21's heightfield limit",
-    '7': "a box's corner indices",
-    '8': "a box's eight corners",
-    '12': 'a hull needs four xyz points (12 numbers)',
-    '16': "ROUND_SEGMENTS: the facets a round shape's outline is drawn with (geometry, not a starting value)",
-  },
-  'world/clearing.ts': {
-    '255': 'the value-noise permutation table (256 entries, doubled)',
-    '256': 'the value-noise permutation table (256 entries, doubled)',
-    '512': 'the value-noise permutation table (256 entries, doubled)',
-    '1000': 'HARD: a broken hard rule outweighs any sum of soft scores (a scoring constant, not a layout value)',
-    '0.1': "a floor under CLEARING_TUNING.routeSampleM, so a panel edit to 0 can't make the sampling loop endless",
-  },
-  'world/nav.ts': {
-    '0.9': "DETAIL_SAMPLE_DIST_MIN: Recast's buildPolyMeshDetail crashes below it (MAP recast §7.6)",
-    '6': 'a footprint needs three xz points (6 numbers)',
-    '7': BITS,
-    '8': BITS,
-    '14': "REF_MAX_TILE_BITS: Detour's 32-bit poly refs (MAP recast §3.3)",
-    '22': "REF_TILE_POLY_BITS: Detour's 32-bit poly refs (MAP recast §3.3)",
-    '65535': 'QUERY_INCLUDE_ALL: a query filter including every flag',
-    '256': "WALK_QUERY_MAX_POLYS: Detour's polygon query buffer",
-    '0.0001': "WALK_REACH_TOL: float32 (Detour) against float64 ties on the voxel grid, documented in place",
-  },
-  'world/navInput.ts': { '6': 'two triangles (6 indices) per grid quad; a footprint needs three xz points (6 numbers)' },
-  'world/groups.ts': { '8': BITS, '16': BITS, '32': BITS, '64': BITS, '128': BITS, '65535': BITS },
-  'world/downed.ts': { '16': `${BITS}: a collider's membership bits are its groups' top half` },
-  'world/cover.ts': { '255': 'a byte (the cover grid is stored in bytes)' },
-  'world/felling.ts': { '32': "a round section's modulus π·d³/32 (exact formula)" },
-  'world/rulerBody.ts': {
-    '6': "a pose's six numbers per bone (the saved zone history)",
-    '64': 'SOLE_CAST_MAX_HITS: a bound on the entities one sole cast steps through (a loop guard)',
-  },
-  'world/world.ts': { '64': 'SOLE_CAST_MAX_HITS: a bound on the entities one sole cast steps through (a loop guard)' },
-  'world/verbs/dig.ts': { '6': "a hexagonal ring's 6·k cells" },
-  'world/verbs/place.ts': {
-    '0.001': 'LIFT_GAP_M, PIECE_MIN_M and shrinkShape\'s floor: numerical devices of the casts (documented in place)',
-    '0.9': "AXIS_ALONG_UP_COS: a box axis this close to `up` can't be the ground direction (a geometric choice of axis, documented in place)",
-  },
-  'world/queries.ts': { '0.0001': 'VERTICAL_RAY_SLACK_M: float32 slack between the heightfield and heightAt (documented in place)' },
-  'world/creatures/rulerMind.ts': { '0.25': 'a triangle wave of one period (its quarter points)', '0.75': 'a triangle wave of one period (its quarter points)' },
-  'world/devOps.ts': { '100': 'centimetres per metre (dev positions are integer cm)' },
-  'world/materials.ts': { '1000': 'newtons per kilonewton (SPEC gives rope strength in kN)' },
-  'world/collision.ts': { '2.5': "DS's flat-ground Walkable fixture (SPEC:896 keeps it for the DS tests): a prop's default height" },
-  'save/bodyState.ts': {
-    '5': 'record tags of the body-state bytes',
-    '6': 'record tags of the body-state bytes',
-    '8': 'bytes in a float64',
-    '4096': "the byte buffer's first size (it grows)",
-  },
-  'save/load.ts': {
-    '6': "a pose's six numbers per bone (the saved zone history)",
-    '12': 'a hull needs four xyz points (12 numbers)',
-    '57': 'error text: a value is cut to 60 characters (57 and an ellipsis)',
-    '60': 'error text: a value is cut to 60 characters (57 and an ellipsis)',
-    '4294967295': "the largest uint32 (a saved Rng's state)",
-  },
-  'sim/ruler.ts': { '3600': 'seconds per hour (SPEC:506 gives wound healing per hour of play)' },
+  'world/shapes.ts': [
+    at('16', /const ROUND_SEGMENTS = 16;/, "the facets a round shape's outline is drawn with (geometry, not a starting value)"),
+    at('12', /pts\.length >= 12/, 'a hull needs four xyz points (12 numbers)'),
+    at('6', /const RAPIER_BAD_FACE_VERTICES = 6;/, "Rapier 0.21's heightfield limit (documented in place)"),
+    at('5', /^\[\d, \d, \d, \d\], \/\/ [+−][xyz]$/, BOX),
+    at('6', /^\[\d, \d, \d, \d\], \/\/ [+−][xyz]$/, BOX),
+    at('7', /^\[\d, \d, \d, \d\], \/\/ [+−][xyz]$/, BOX),
+    at('8', /for \(let i = 0; i < 8; i\+\+\) out\.push\(\[i & 1/, "a box's eight corners"),
+    at('6', /cross\(pb, pc\)\) \/ 6;/, "a tetrahedron's volume (÷ 6)"),
+  ],
+  'world/clearing.ts': [
+    at('512', /Uint16Array\(512\)|i < 512/, NOISE),
+    at('256', /Float64Array\(256\)|length: 256|i < 256/, NOISE),
+    at('255', /& 255/, NOISE),
+    at('1000', /const HARD = 1000;/, 'HARD: a broken hard rule outweighs any sum of soft scores (a scoring constant, not a layout value)'),
+    at('0.1', /Math\.max\(0\.1, T\.routeSampleM\)/, "a floor under CLEARING_TUNING.routeSampleM, so a panel edit to 0 can't make the sampling loop endless"),
+  ],
+  'world/nav.ts': [
+    at('0.9', /const DETAIL_SAMPLE_DIST_MIN = 0\.9;/, "Recast's buildPolyMeshDetail crashes below it (MAP recast §7.6)"),
+    at('6', /footprint\.length < 6/, 'a footprint needs three xz points (6 numbers)'),
+    at('7', /bit & 7/, BITS),
+    at('8', /\/ 8\)/, BITS),
+    at('14', /const REF_MAX_TILE_BITS = 14;/, "Detour's 32-bit poly refs (MAP recast §3.3)"),
+    at('22', /const REF_TILE_POLY_BITS = 22;/, "Detour's 32-bit poly refs (MAP recast §3.3)"),
+    at('65535', /const QUERY_INCLUDE_ALL = 0xffff;/, 'a query filter including every flag'),
+    at('256', /const WALK_QUERY_MAX_POLYS = 256;/, "Detour's polygon query buffer"),
+    at('0.0001', /const WALK_REACH_TOL = 1e-4;/, 'float32 (Detour) against float64 ties on the voxel grid, documented in place'),
+  ],
+  'world/navInput.ts': [
+    at('6', /\(nz - 1\) \* 6\)/, 'two triangles (6 indices) per grid quad'),
+    at('6', /fp\.length < 6/, 'a footprint needs three xz points (6 numbers)'),
+  ],
+  'world/groups.ts': [
+    at('8', /ZONE: 0x008,/, BITS),
+    at('16', /RULER_ZONE: 0x010,|<< 16/, BITS),
+    at('32', /RULER_SOLID: 0x020,/, BITS),
+    at('64', /DOWNED: 0x040,/, BITS),
+    at('128', /ROPE: 0x080,/, BITS),
+    at('65535', /& 0xffff/, BITS),
+  ],
+  'world/downed.ts': [at('16', />>> 16\)/, `${BITS}: a collider's membership bits are its groups' top half`)],
+  'world/cover.ts': [at('255', /const BYTE = 255;/, 'a byte (the cover grid is stored in bytes)')],
+  'world/felling.ts': [at('32', /Math\.PI \/ 32/, "a round section's modulus π·d³/32 (exact formula)")],
+  'world/rulerBody.ts': [
+    at('6', /6 \* BONES\.length/, POSE6),
+    at('64', /const SOLE_CAST_MAX_HITS = 64;/, 'a bound on the entities one sole cast steps through (a loop guard)'),
+  ],
+  'world/world.ts': [at('64', /const SOLE_CAST_MAX_HITS = 64;/, 'a bound on the entities one sole cast steps through (a loop guard)')],
+  'world/verbs/dig.ts': [at('6', /6 \* k;/, "a hexagonal ring's 6·k cells")],
+  'world/verbs/place.ts': [
+    at('0.001', /const (LIFT_GAP_M|PIECE_MIN_M) = 1e-3;|const min = 1e-3;/, "numerical devices of the casts (documented in place)"),
+    at('0.9', /const AXIS_ALONG_UP_COS = 0\.9;/, "a box axis this close to `up` can't be the ground direction (documented in place)"),
+  ],
+  'world/queries.ts': [at('0.0001', /const VERTICAL_RAY_SLACK_M = 1e-4;/, 'float32 slack between the heightfield and heightAt (documented in place)')],
+  'world/creatures/rulerMind.ts': [
+    at('0.25', /const tri = u < 0\.25/, 'a triangle wave of one period (its quarter points)'),
+    at('0.75', /const tri = u < 0\.25/, 'a triangle wave of one period (its quarter points)'),
+  ],
+  'world/devOps.ts': [at('100', /const CM = 100;/, 'centimetres per metre (dev positions are integer cm)')],
+  'world/materials.ts': [at('1000', /const N_PER_KN = 1000;/, 'newtons per kilonewton (SPEC gives rope strength in kN)')],
+  'world/collision.ts': [at('2.5', /o\.h \?\? 2\.5/, "DS's flat-ground Walkable fixture (SPEC:896 keeps it for the DS tests): a prop's default height")],
+  'save/bodyState.ts': [
+    at('5', /const TAG_FIGHTER = 5;/, 'a record tag of the body-state bytes'),
+    at('6', /const TAG_COMBAT_RNG = 6;/, 'a record tag of the body-state bytes'),
+    at('8', /this\.room\(8\);|this\.n \+= 8;/, 'bytes in a float64'),
+    at('4096', /new ArrayBuffer\(4096\)/, "the byte buffer's first size (it grows)"),
+  ],
+  'save/load.ts': [
+    at('6', /6 \* BONES\.length/, POSE6),
+    at('12', /points\.length < 12/, 'a hull needs four xyz points (12 numbers)'),
+    at('57', /t\.length > 60 \? `\$\{t\.slice\(0, 57\)\}/, 'error text: a value is cut to 60 characters (57 and an ellipsis)'),
+    at('60', /t\.length > 60 \? /, 'error text: a value is cut to 60 characters (57 and an ellipsis)'),
+    at('4294967295', /v <= 0xffffffff/, "the largest uint32 (a saved Rng's state)"),
+  ],
+  'sim/ruler.ts': [at('3600', /const SECONDS_PER_HOUR = 3600;/, 'seconds per hour (SPEC:506 gives wound healing per hour of play)')],
 };
 
 describe('no bare constants (P38, §9, RR-7)', () => {
