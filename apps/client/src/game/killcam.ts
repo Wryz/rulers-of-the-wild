@@ -125,7 +125,7 @@ export const KILLCAM_TUNING = defineTuning(
  * The ground direction for a cut that looks across the line a → b, on the side the gameplay camera at `cam` is already
  * on (so left and right stay where they were), pulled `toward` over a's shoulder (DS game.ts across).
  */
-export function sideAcross(cam: Vector3, a: Vector3, b: Vector3, toward = 0.25): Vector3 {
+export function sideAcross(cam: Vector3, a: Vector3, b: Vector3, toward: number): Vector3 {
   const l = new Vector3(b.x - a.x, 0, b.z - a.z);
   if (l.lengthSq() < 1e-6) l.set(1, 0, 0);
   l.normalize();

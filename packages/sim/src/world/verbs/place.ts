@@ -134,6 +134,11 @@ const LIFT_GAP_M = 1e-3;
 const SUPPORT_NORMAL_MIN_Y = 1e-6;
 /** m: a cut piece thinner than this across the cut is no solid a cast can use (a vertex grazing the plane). Numerical. */
 const PIECE_MIN_M = 1e-3;
+/**
+ * A box axis whose |cos| to `up` is above this lies too close to `up` to be the ground direction a sloped piece leans
+ * along (a geometric choice of axis among three orthogonal ones, not a starting value; P38 named it).
+ */
+const AXIS_ALONG_UP_COS = 0.9;
 
 /** The vertices bounding a shape in its local frame (a round shape: its extreme points along each axis). */
 function shapeVertices(s: Shape): V3[] {
@@ -299,7 +304,7 @@ function heldOf(w: World, main: Entity): Held {
   const axes = [v(1, 0, 0), v(0, 1, 0), v(0, 0, 1)];
   let pick = -1;
   for (let k = 0; k < 3; k++) {
-    if (Math.abs(dot(axes[k], up)) > 0.9) continue;
+    if (Math.abs(dot(axes[k], up)) > AXIS_ALONG_UP_COS) continue;
     if (pick < 0 || ext[k] < ext[pick] - GEOM_EPS) pick = k;
   }
   const raw = pick >= 0 ? axes[pick] : perpendicular(up);

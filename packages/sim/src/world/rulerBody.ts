@@ -66,6 +66,8 @@ import type { Entity, FighterMover, ImpactCause, Owner, Pose3, Quat, RulerState,
 
 /** The sole cast's direction (P28, soleGround). */
 const SOLE_DOWN: V3 = Object.freeze({ x: 0, y: -1, z: 0 });
+/** A bound on the entities one sole cast steps through (a loop guard, not a starting value; P38 named it). */
+const SOLE_CAST_MAX_HITS = 64;
 import type { World } from './world';
 import { WORLD_TUNING } from './worldTuning';
 import { boneZoneDesc, boneZoneShape } from './zones';
@@ -1051,7 +1053,7 @@ export class RulerBodies {
     if (!(top > terrain)) return best;
     const sole: Shape = { kind: 'box', hx: r, hy: T.soleProbeHalfM, hz: r };
     const ex: number[] = [];
-    for (let k = 0; k < 64; k++) {
+    for (let k = 0; k < SOLE_CAST_MAX_HITS; k++) {
       const hit = w.queries.castShape(sole, { p: { x, y: top, z }, q: { x: 0, y: 0, z: 0, w: 1 } }, SOLE_DOWN, top - terrain, { terrain: false, entities: 'all', exclude: { entities: ex } });
       if (!hit || hit.owner.kind !== 'entity') break;
       const id = hit.owner.id;

@@ -125,7 +125,7 @@ export function chestOf(f: Fighter, out = new Vector3()): Vector3 {
  * Where the ray first meets the terrain within `maxM` (stepped then bisected on heightAt), or null: a ray starting
  * under the ground meets it at once.
  */
-export function rayTerrain(world: Pick<World, 'terrain'>, ray: { origin: Vector3; dir: Vector3 }, maxM: number, stepM = 0.1): Vector3 | null {
+export function rayTerrain(world: Pick<World, 'terrain'>, ray: { origin: Vector3; dir: Vector3 }, maxM: number, stepM = VERB_UI_TUNING.aimTerrainStepM): Vector3 | null {
   const h = (t: number) => {
     const x = ray.origin.x + ray.dir.x * t;
     const z = ray.origin.z + ray.dir.z * t;
