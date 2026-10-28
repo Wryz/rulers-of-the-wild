@@ -30,7 +30,8 @@ import type { Fighter } from '../../sim/fighter';
 import { defineTuning } from '../../tuning/registry';
 import { groundRestY } from '../factory';
 import { MATERIALS, propertyAtMost } from '../materials';
-import { principalAxis, shapeVolume } from '../shapes';
+import RAPIER from '@dimforge/rapier3d-compat';
+import { principalAxis, shapeVolume, triangulate } from '../shapes';
 import { TERRAIN_TUNING } from '../terrain';
 import type { Entity, Shape, V3 } from '../types';
 import type { World } from '../world';
@@ -53,6 +54,7 @@ export const DIG_TUNING = defineTuning(
     pileHeightRatio: 0.5,
     pileTopRatio: 0.3,
     handDigActFrac: 0.5,
+    buriedLiftMinM: 0.05,
   },
   {
     pileHeightRatio: {
@@ -62,6 +64,14 @@ export const DIG_TUNING = defineTuning(
     },
     pileTopRatio: { unit: 'top half-width ÷ base half-width', source: 'NEW: §4.13 "a low 8-point hull of the volume" (a square frustum)', min: 0, max: 1 },
     handDigActFrac: { unit: '× handDigFrames', source: 'NEW: §5.10 (the scoop lands at this fraction of the work action)', min: 0, max: 1 },
+    buriedLiftMinM: {
+      unit: 'm',
+      source:
+        'NEW (P38): a free body a dig left reaching more than this below the terrain (spoil poured under it) is lifted clear; Rapier pushes shallower ones out itself, deeper ones fall out of the world',
+      min: 0,
+      max: 1,
+      step: 0.01,
+    },
   },
 );
 
@@ -353,8 +363,69 @@ export function digAt(w: World, x: number, z: number, depthMul: number, by: Figh
     if (Math.hypot(e.pose.p.x - x, e.pose.p.z - z) > r + reach) continue;
     if (w.entities.depthBelowGround(e.shape, e.pose) <= 0) w.entities.unanchor(e);
   }
+  liftBuried(w, [{ x, z }, ...spoilPoints]);
   w.events.push({ type: 'dig', point: { x, y, z }, volumeM3: dug.volumeM3, pile: spoil.pile });
   return { volumeM3: dug.volumeM3, pile: spoil.pile, spoil: spoil.points };
+}
+
+/**
+ * P38 (the dirt pile that fell through the terrain to y −1.3e6 in the cached pit, P29): spoil poured under a resting body
+ * buries it, and once a body's centre is under a heightfield's surface Rapier's contact pushes it down, out of the world
+ * (a 0.1 m³ pile under 0.46 m of spoil: −122 m within 5 s). So after a dig, every free body near what it changed (the
+ * dig, and within spoilSlideM of a spoil point the dig poured at) that reaches more than DIG_TUNING.buriedLiftMinM
+ * below the terrain is lifted straight up until it clears it (EntityStore.setPose: awake), in id order, as unanchor lifts
+ * a stake out of the ground.
+ */
+export function liftBuried(w: World, near: readonly { x: number; z: number }[]): void {
+  const T = TERRAIN_TUNING;
+  const span = Math.max(T.digRadiusM, T.spoilSlideM) + T.pileMergeR;
+  for (const e of w.entities.dynamic()) {
+    const ax = principalAxis(e.shape);
+    const reach = Math.max(Math.abs(ax.min), Math.abs(ax.max)) + ax.crossHalf;
+    if (!near.some((s) => Math.hypot(e.pose.p.x - s.x, e.pose.p.z - s.z) <= span + reach)) continue;
+    const lift = buriedDepth(w, e);
+    if (lift > DIG_TUNING.buriedLiftMinM) w.entities.setPose(e, { p: { x: e.pose.p.x, y: e.pose.p.y + lift, z: e.pose.p.z }, q: e.pose.q });
+  }
+}
+
+/**
+ * How far the terrain reaches into a body (m; 0 when it doesn't): the deepest of its vertices under the terrain
+ * (EntityStore.depthBelowGround), and of the terrain's vertices inside its footprint above its underside there (spoil
+ * heaped into a pile's middle leaves its corners clear but the pile impaled).
+ */
+function buriedDepth(w: World, e: Entity): number {
+  let d = w.entities.depthBelowGround(e.shape, e.pose);
+  const c = e.collider;
+  if (!c) return d;
+  const { positions } = triangulate(e.shape, e.pose);
+  let x0 = Infinity;
+  let x1 = -Infinity;
+  let z0 = Infinity;
+  let z1 = -Infinity;
+  let y0 = Infinity;
+  for (let i = 0; i + 2 < positions.length; i += 3) {
+    x0 = Math.min(x0, positions[i]);
+    x1 = Math.max(x1, positions[i]);
+    y0 = Math.min(y0, positions[i + 1]);
+    z0 = Math.min(z0, positions[i + 2]);
+    z1 = Math.max(z1, positions[i + 2]);
+  }
+  const t = w.terrain;
+  const lo = t.vertexIndex(x0, z0);
+  const hi = t.vertexIndex(x1, z1);
+  for (let gi = lo.gi; gi <= hi.gi; gi++) {
+    for (let gj = lo.gj; gj <= hi.gj; gj++) {
+      const h = t.vertexHeightAt(gi, gj);
+      if (!(h > y0)) continue;
+      const x = t.minX + gi * t.spacing;
+      const z = t.minZ + gj * t.spacing;
+      // Up from below the body: the first hit is its underside over this vertex.
+      const from = { x, y: y0 - 1, z };
+      const toi = c.castRay(new RAPIER.Ray(from, { x: 0, y: 1, z: 0 }), h - from.y, true);
+      if (toi >= 0) d = Math.max(d, h - (from.y + toi));
+    }
+  }
+  return d;
 }
 
 // ---------------------------------------------------------------------------
