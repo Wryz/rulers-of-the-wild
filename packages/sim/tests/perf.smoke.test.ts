@@ -2,9 +2,10 @@
 // headless soak of the Clearing (36,000 ticks, no commands: the player stands at the spawn while the apes and the giant
 // go about their minds), with no NaN anywhere and a sim step median under 5 ms.
 //
-// The step is timed as the worker process's CPU time (user + system) around each World.step, so a loaded machine running
-// other test files beside it doesn't count against the sim; the wall-clock median is logged beside it. The NaN checks
-// and the event-loop yields are outside the timed steps.
+// The step is timed as the CPU time (user + system) of the thread that steps the world, around each World.step
+// (process.threadCpuUsage; the whole process's where Node lacks it), so a loaded machine running other test files
+// beside it doesn't count against the sim, and neither do V8's concurrent compiler and GC helper threads; the wall-clock
+// median is logged beside it. The NaN checks and the event-loop yields are outside the timed steps.
 //
 // The gate is SPEC:800's 5 ms, not relaxed. If it fails, the log prints the median and the profile hint; the perf work
 // and the measured profile are in docs/work/ledger.md (P38 perf) and tools/profile-soak.mjs prints the phase table.
@@ -22,6 +23,7 @@ const CHECK_EVERY = 60;
 const SEED = 1;
 
 const finite = (...xs: number[]): boolean => xs.every((x) => Number.isFinite(x));
+const threadCpu = (): { user: number; system: number } => (process.threadCpuUsage ? process.threadCpuUsage() : process.cpuUsage());
 
 /** The first non-finite number in the world's bodies (entities' poses and velocities, fighters' roots and bones), or null. */
 function firstNaN(w: World): string | null {
@@ -49,12 +51,12 @@ describe('perf smoke: a 10-minute soak of the Clearing (P38, SPEC:800)', () => {
       const wall = new Float64Array(SOAK_TICKS);
       let nan: string | null = null;
       for (let t = 0; t < SOAK_TICKS; t++) {
-        const c0 = process.cpuUsage();
+        const c0 = threadCpu();
         const t0 = performance.now();
         w.step();
         wall[t] = performance.now() - t0;
-        const c = process.cpuUsage(c0);
-        cpu[t] = (c.user + c.system) / 1000;
+        const c1 = threadCpu();
+        cpu[t] = (c1.user - c0.user + c1.system - c0.system) / 1000;
         if ((t + 1) % CHECK_EVERY === 0) {
           nan = firstNaN(w);
           if (nan) {

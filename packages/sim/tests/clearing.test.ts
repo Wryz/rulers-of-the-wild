@@ -862,23 +862,35 @@ describe('the Clearing (§6.7)', () => {
 
   it('createWorld({ scene: \'clearing\' }) builds in < 300 ms plus nav: the median warm build, in CPU time', async () => {
     // One seed, built 2 + 5 times: the first two warm the code up (the cold one is logged); the budget is the median of
-    // the next five. CPU time of this worker, not wall time: the suite runs workers side by side on a shared machine,
-    // and a build's cost is the work it does, not how long it waits for a core. Wall time is logged beside it.
+    // the next five. CPU time of the thread that builds, not wall time: the suite runs workers side by side on a shared
+    // machine, and a build's cost is the work it does, not how long it waits for a core. P38: the thread's own CPU time
+    // (process.threadCpuUsage), no longer the whole process's: the process's also counts V8's concurrent compiler and
+    // GC helper threads, which ran 2-2.5× the build's own work in a warm-up-heavy run (369 ms process, 146 ms thread, 150 ms
+    // wall, alone on the machine) and more beside another worker (Codex measured 425 ms). The budget is unchanged.
+    // Process CPU time and wall time are logged beside it.
+    const threadCpu = (): { user: number; system: number } => (process.threadCpuUsage ? process.threadCpuUsage() : process.cpuUsage());
     const cpu: number[] = [];
+    const procCpu: number[] = [];
     const wall: number[] = [];
     for (let i = 0; i < 7; i++) {
-      const c0 = process.cpuUsage();
+      const p0 = process.cpuUsage();
+      const c0 = threadCpu();
       const t0 = performance.now();
       const w = await createWorld({ seed: S, scene: 'clearing', nav: 'off' });
       wall.push(performance.now() - t0);
-      const c = process.cpuUsage(c0);
-      cpu.push((c.user + c.system) / 1000);
+      const c1 = threadCpu();
+      const p = process.cpuUsage(p0);
+      cpu.push((c1.user - c0.user + c1.system - c0.system) / 1000);
+      procCpu.push((p.user + p.system) / 1000);
       w.dispose();
     }
     const warm = cpu.slice(2).sort((a, b) => a - b);
     const median = warm[Math.floor(warm.length / 2)];
     const ms = (xs: number[]): string => xs.map((t) => t.toFixed(0)).join(', ');
-    console.info(`Clearing builds (nav off): cold CPU ${cpu[0].toFixed(0)} ms, wall ${wall[0].toFixed(0)} ms; warm CPU ${ms(cpu.slice(2))} ms (median ${median.toFixed(0)}), wall ${ms(wall.slice(2))} ms`);
+    console.info(
+      `Clearing builds (nav off): cold thread CPU ${cpu[0].toFixed(0)} ms, wall ${wall[0].toFixed(0)} ms; warm thread CPU ${ms(cpu.slice(2))} ms (median ${median.toFixed(0)}), ` +
+        `process CPU ${ms(procCpu.slice(2))} ms, wall ${ms(wall.slice(2))} ms`,
+    );
     expect(median).toBeLessThan(300);
   });
 });
