@@ -536,6 +536,7 @@ const INVENTORY: Record<string, Record<string, string>> = {
     queue: 'saved: impulses',
     forces: 'not saved: P28, the sustained code forces of this tick\'s phase 4d, queued and applied in the same 4d (EntityStore.queueForce), never pending between ticks',
     forced: 'not saved: P28, the bodies forced this tick, reset right after the step (EntityStore.resetForces), empty between ticks',
+    forcedNow: "not saved: P38, the bodies the last step forced, read by that tick's settle rule (phase 18) only",
     applied: 'not saved: PHYSICS_TUNING values last applied (tuningOverrides)',
   },
   EntityRuntime: {
@@ -546,6 +547,7 @@ const INVENTORY: Record<string, Record<string, string>> = {
     shape: "not saved: the entity's shape (saved in its record)",
     reach: 'not saved: derived from the shape',
     minHalf: 'not saved: derived from the shape',
+    settle: "not saved: P38, the settle rule's window; a load starts it again, as it starts Rapier's own sleep timer (entity bodies load awake)",
   },
   Entity: {
     ...Object.fromEntries(
