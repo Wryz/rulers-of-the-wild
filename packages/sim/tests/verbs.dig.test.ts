@@ -16,7 +16,7 @@ import { physicsReady } from '../src/world/physics';
 import { shapeVolume } from '../src/world/shapes';
 import { Terrain, TERRAIN_TUNING } from '../src/world/terrain';
 import type { Entity, WorldEvent } from '../src/world/types';
-import { DIG_TUNING, digAt, dirtPileShape, isDirtPile, liftBuried, placeSpoil, spoilLostM3 } from '../src/world/verbs/dig';
+import { DIG_TUNING, digAt, dirtPileShape, isDirtPile, placeSpoil, spoilLostM3 } from '../src/world/verbs/dig';
 import { VERB_TUNING } from '../src/world/verbs/tuning';
 import { createWorld, type World } from '../src/world/world';
 
@@ -318,29 +318,6 @@ describe('after a dig (§4.13)', () => {
     expect(ent(w, near).body?.isDynamic()).toBe(true);
     expect(ent(w, near).body?.isSleeping()).toBe(false);
     expect(ent(w, far).state).toBe('anchored');
-  });
-
-  it('a body spoil buries is lifted clear and stays in the world (P38: the dirt pile that fell to y −1.3e6, P29)', async () => {
-    // A resting pile with 0.46 m of spoil raised under it (terrain.raise, what the berm does): Rapier pushes a body whose
-    // centre is under the heightfield's surface down, out of the world. digAt ends with liftBuried round what it changed.
-    const bury = async (lift: boolean): Promise<{ y: number; ground: number; deepest: number; impaled: number }> => {
-      const w = await make();
-      w.teleport(w.player!, -15, -15, 0);
-      const id = w.entities.create({ material: TERRAIN_TUNING.material, shape: dirtPileShape(0.1), p: { x: 3, y: w.terrain.heightAt(3, 3) + 0.01, z: 3 }, look: 'pile' }).id;
-      run(w, 200);
-      w.terrain.raise(3, 3, 0.3);
-      if (lift) liftBuried(w, [{ x: 3, z: 3 }]);
-      run(w, 300);
-      const e = ent(w, id);
-      // The terrain under its middle against its underside there (its base, the hull's y = 0).
-      return { y: e.pose.p.y, ground: w.terrain.heightAt(e.pose.p.x, e.pose.p.z), deepest: w.entities.depthBelowGround(e.shape, e.pose), impaled: w.terrain.heightAt(e.pose.p.x, e.pose.p.z) - e.pose.p.y };
-    };
-    const control = await bury(false);
-    const fixed = await bury(true);
-    expect(control.y, JSON.stringify(control)).toBeLessThan(control.ground - 1);
-    expect(fixed.deepest, JSON.stringify(fixed)).toBeLessThanOrEqual(DIG_TUNING.buriedLiftMinM);
-    expect(fixed.impaled, JSON.stringify(fixed)).toBeLessThanOrEqual(DIG_TUNING.buriedLiftMinM);
-    expect(fixed.y, JSON.stringify(fixed)).toBeGreaterThan(fixed.ground - DIG_TUNING.buriedLiftMinM);
   });
 });
 

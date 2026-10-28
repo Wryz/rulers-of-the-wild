@@ -3771,7 +3771,6 @@ Keys the packages registered after the tables above were written (their values, 
 | DIG_TUNING | pileHeightRatio | 0.5 | height ÷ base half-width | NEW: §4.13 "a low 8-point hull of the volume": a square frustum whose sides lie at ≈ 35°, loose dirt's angle of repose |
 | DIG_TUNING | pileTopRatio | 0.3 | top half-width ÷ base half-width | NEW: §4.13 "a low 8-point hull of the volume" (a square frustum) |
 | DIG_TUNING | handDigActFrac | 0.5 | × handDigFrames | NEW: §5.10 (the scoop lands at this fraction of the work action) |
-| DIG_TUNING | buriedLiftMinM | 0.05 | m | NEW (P38): a free body a dig left reaching more than this below the terrain (spoil poured under it) is lifted clear; Rapier pushes shallower ones out itself, deeper ones fall out of the world |
 
 ##### PLACE_TUNING (folder "Verbs › place")
 
