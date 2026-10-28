@@ -482,7 +482,7 @@ describe('the ruler branch (§4.6)', () => {
 
   it('a ruler doesn\'t bleed DungeonStyle\'s way', () => {
     const { sim, g } = versus();
-    g.wounds.push({ bone: 'chest', local: [0, 0.1, 0.1], angle: 0, length: 0.1, bleed: 1, floor: 1 });
+    g.wounds.push({ bone: 'chest', local: [0, 0.1, 0.1], angle: 0, length: 0.1, bleed: 1, floor: 1, clot: 0 });
     for (let i = 0; i < 60; i++) sim.step();
     expect(g.hp).toBe(12000);
   });

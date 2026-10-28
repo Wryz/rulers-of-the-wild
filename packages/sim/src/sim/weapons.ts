@@ -550,9 +550,12 @@ export interface Wound {
   /** Orientation of the cut around the surface (rad) and its length (m). */
   angle: number;
   length: number;
-  /** Bleeding rate 0..1; eases down but never fully stops. */
+  /** Bleeding rate 0..1; eases down toward the seep, which closes as the cut clots (0 once clotted). */
   bleed: number;
+  /** The seep the rate eases toward while the cut is fresh (it tapers to 0 as `clot` goes to 1). */
   floor: number;
+  /** How far the cut has clotted, 0..1 (BLEED_TUNING, combat.ts bleedTick); 1: it no longer bleeds. The cut stays. */
+  clot: number;
   /** Set on the stump left where this limb was cut off. */
   stump?: BoneName;
 }

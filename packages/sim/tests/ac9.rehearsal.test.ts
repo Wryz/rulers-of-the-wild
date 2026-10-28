@@ -35,6 +35,8 @@
 // risk and lever proposal go to docs/work/ledger.md (§11.9: the owner decides levers; the test never pulls one).
 // ROTW_AC9_PROBE_ZONE=1 is a probe for that proposal, off by default: the run starts with a logged `meta 'dev'
 // setTuning` of §4.15 lever 1 (SPECIES_BODY.ape.massShareMode 'zone'), so its effect can be measured, not adopted.
+// (After P39 the owner approved that lever, but it was reverted: it broke AC-2(a)'s no-tripwire gate and gained no
+// rehearsal seed; cuts clot now, BLEED_TUNING; docs/work/ledger.md "P39 follow-up".)
 //
 // The world's other creatures (homes B and C's apes, the giant) have their minds paused by `meta 'dev' pauseMinds`
 // commands at the first tick: §11.9's "the ape of home A with its brain on".
@@ -64,8 +66,8 @@ const AC9 = {
   noticeClosingMps: 1.2,
   noticeWithinM: 30,
   /**
-   * The brawl ends at this HP (§11.9). The axe's cuts bleed for good (DS wounds keep a bleeding floor, combat.ts
-   * bleed()), and a bleed-out is no environmental kill, so he cuts only while the ape is above axeUntilHp, then stows
+   * The brawl ends at this HP (§11.9). The axe's cuts bleed for minutes (a stone-axe slash clots in 4-8 min,
+   * BLEED_TUNING), and a bleed-out is no environmental kill, so he cuts only while the ape is above axeUntilHp, then stows
    * the axe on his back and goes on with fists and feet; below gentleHp only the jab (the lightest blow, ≈ 2 HP), so
    * the brawl stops close under 20 and the finish's flying kick (≈ 12 HP) leaves the most for the world to take.
    */
@@ -553,7 +555,7 @@ class Bot {
     const d = flat(p.pos, a.pos);
     const armed = p.inventory?.hands?.mode === 'wield';
     if (armed && a.hp <= AC9.axeUntilHp) {
-      // enough cuts (they bleed for good): the axe goes on his back, a step away from the ape first
+      // enough cuts (they bleed for minutes): the axe goes on his back, a step away from the ape first
       this.sub = 'stow';
       if (d < 2.5) return this.moveToward({ x: p.pos.x + (p.pos.x - a.pos.x), z: p.pos.z + (p.pos.z - a.pos.z) });
       this.halt();

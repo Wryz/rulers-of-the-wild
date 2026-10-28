@@ -8,7 +8,7 @@ import { RectWalkable, type Walkable } from '../world/collision';
 import type { Finish, FighterMover, GroundQuery, ImpactCause, RulerZoneId, V3, Work, WorldPort } from '../world/types';
 import { getTuningValue } from '../tuning/registry';
 import { type Command, COMMAND_STEPS, CommandQueue, MOVE_CROUCH, MOVE_SPRINT, moveVector } from './commands';
-import { boneMass, DAMAGE_TUNING, hpFromEnergy, impactEnergy, launchSpeed, MOVE_TUNING, reducedMass, zoneToughness } from './rules';
+import { BLEED_TUNING, boneMass, DAMAGE_TUNING, hpFromEnergy, impactEnergy, launchSpeed, MOVE_TUNING, reducedMass, zoneToughness } from './rules';
 // ruler.ts imports this module for types only, so this adds no import cycle at runtime (§1.3, RF-8).
 import { RULER_TUNING, rulerVolumes } from './ruler';
 import { bodyCapsules, overlap as capsuleOverlap, segDist as segDistance, strikingLimbs } from './bodyShapes';
@@ -148,6 +148,32 @@ const MIN_POWER = 0.45;
 
 /** Hit points lost per second per unit of bleeding. */
 export const BLEED_DPS = 1.1;
+
+/** A cut's clot time (s): BLEED_TUNING.clotSmallS × (seep / clotRefSeep) ^ clotSizeExp; 0 for a cut with no seep. */
+export function woundClotS(w: Wound): number {
+  const B = BLEED_TUNING;
+  if (!(w.floor > 0)) return 0;
+  return B.clotSmallS * Math.pow(w.floor / B.clotRefSeep, B.clotSizeExp);
+}
+
+/**
+ * One tick of a cut's bleeding (owner's decision after P39: bleeds slowly close; BLEED_TUNING in sim/rules.ts). The
+ * cut clots by DT / its clot time a tick (`clot` 0..1, tick-based, saved); its rate eases down as DungeonStyle's did
+ * (× 0.9993 a tick) toward its seep, which tapers to zero as it clots; clotted, it stops. Only the rate changes: the cut
+ * stays on the body (its gash), and nothing gives back the HP it took. Returns the rate this tick.
+ */
+export function bleedTick(w: Wound): number {
+  if (w.clot < 1) {
+    const s = woundClotS(w);
+    w.clot = s > 0 ? Math.min(1, w.clot + DT / s) : 1;
+  }
+  if (w.clot >= 1) {
+    w.bleed = 0;
+    return 0;
+  }
+  w.bleed = Math.max(w.floor * (1 - w.clot), w.bleed * 0.9993);
+  return w.bleed;
+}
 
 /** Lock-on tuning (rates in radians per frame). */
 /** How much nearer (m) another opponent must be before the lock switches to it. */
@@ -1631,7 +1657,7 @@ export class CombatSim {
       fatal = head.fatal;
       d.hp = 0;
       // Wells up out of the top of the head.
-      d.wounds.push({ bone: 'head', local: [0, 0.29, 0.01], angle: 0, length: 0.12, bleed: 1, floor: 0.4 });
+      d.wounds.push({ bone: 'head', local: [0, 0.29, 0.01], angle: 0, length: 0.12, bleed: 1, floor: 0.4, clot: 0 });
       if (!ko) {
         ko = true;
         knockdown = false;
@@ -1814,6 +1840,7 @@ export class CombatSim {
       length: Math.min(0.2, 0.05 + dmg * 0.006) * (0.7 + cut * 0.4),
       bleed,
       floor: bleed * 0.25,
+      clot: 0,
     };
     d.wounds.push(wound);
     if (d.wounds.length > 16) d.wounds.splice(d.wounds.findIndex((w) => !w.stump), 1);
@@ -1827,22 +1854,19 @@ export class CombatSim {
       bone === 'head' ? 'chest' : bone === 'foreArmL' ? 'upperArmL' : bone === 'foreArmR' ? 'upperArmR' : bone === 'shinL' ? 'thighL' : bone === 'shinR' ? 'thighR' : bone.startsWith('thigh') ? 'pelvis' : 'chest';
     // The joint, in the parent's frame (authored scale).
     const o = SKELETON[bone].offset;
-    const stump: Wound = { bone: parent, local: [o[0], o[1], o[2]], angle: 0, length: 0, bleed: 1, floor: 0.3, stump: bone };
+    const stump: Wound = { bone: parent, local: [o[0], o[1], o[2]], angle: 0, length: 0, bleed: 1, floor: 0.3, clot: 0, stump: bone };
     d.wounds.push(stump);
     for (const w of d.wounds) if (limbBones(bone).includes(w.bone)) w.bleed = w.floor = 0;
     // No right hand: the weapon falls. No left hand: a two-hander can't be held either.
     if (bone === 'foreArmR' || bone === 'upperArmR' || (d.weapon?.style === 'twoHand' && (bone === 'foreArmL' || bone === 'upperArmL'))) this.dropWeapon(d);
   }
 
-  /** Bleeding: every open cut drains a little health; enough of it and they go down. */
+  /** Bleeding: every open cut drains a little health until it clots (bleedTick); enough of it and they go down. */
   private bleed(f: Fighter) {
-    // (A ruler doesn't bleed DungeonStyle's way: its wounds are RulerState's, §4.6.)
+    // (A ruler doesn't bleed DungeonStyle's way: its wounds are RulerState's, §4.6, and clotting never touches them.)
     if (f.ruler || !f.wounds.length) return;
     let rate = 0;
-    for (const w of f.wounds) {
-      w.bleed = Math.max(w.floor, w.bleed * 0.9993);
-      rate += w.bleed;
-    }
+    for (const w of f.wounds) rate += bleedTick(w);
     if (!f.alive || rate <= 0) return;
     f.hp = Math.max(f.minHp, f.hp - rate * BLEED_DPS * DT);
     if (f.hp <= 0) {

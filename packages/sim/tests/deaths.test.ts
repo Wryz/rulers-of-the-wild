@@ -191,7 +191,7 @@ describe('the player’s death and respawn (§4.14, SPEC:419-423, D-33)', () => 
     p.severed.add('foreArmL');
     p.torn.add('earL');
     p.limbDamage.foreArmL = 30;
-    p.wounds.push({ bone: 'chest', local: [0, 0, 0], angle: 0, length: 0.1, bleed: 1, floor: 0.4 });
+    p.wounds.push({ bone: 'chest', local: [0, 0, 0], angle: 0, length: 0.1, bleed: 1, floor: 0.4, clot: 0 });
     w.combat.koFighter(p, strike(a));
     const ev = run(w, 1);
     const death = ev.find((e): e is Extract<WorldEvent, { type: 'death' }> => e.type === 'death');
