@@ -518,6 +518,7 @@ const INVENTORY: Record<string, Record<string, string>> = {
     nearDugSetback: 'not saved: TERRAIN_TUNING.spoilSetbackM',
     spoilLimit: 'not saved: derived from the heights and the dug mask (rebuilt on load, equal to the live field)',
     spoilKey: 'not saved: the tuning the spoil limit was built for',
+    editEpoch: 'not saved: P38, an edit counter for the loads memos (a loaded world starts with no memo)',
   },
   GroundCover: {
     world: 'not saved: a link',
@@ -529,6 +530,8 @@ const INVENTORY: Record<string, Record<string, string>> = {
     rt: 'not saved: per-entity runtime (EntityRuntime below)',
     sorted: 'saved: entities (id order)',
     snapshot: 'not saved: a cache of sorted',
+    dynamicSnapshot: 'not saved: P38, a cache of the dynamic entities in sorted',
+    epoch: 'not saved: P38, a change counter for the loads memos (a loaded world starts with no memo)',
     removedGen: 'saved: removed',
     queue: 'saved: impulses',
     forces: 'not saved: P28, the sustained code forces of this tick\'s phase 4d, queued and applied in the same 4d (EntityStore.queueForce), never pending between ticks',
@@ -592,7 +595,13 @@ const INVENTORY: Record<string, Record<string, string>> = {
     world: 'not saved: a link',
     pending: 'not saved: breaks found in phases 9c and 11 for phase 12 of the same tick, which empties it; empty at a tick end',
   },
-  Loads: { world: 'not saved: a link' },
+  Loads: {
+    world: 'not saved: a link',
+    awakeTick: 'not saved: P38, the memos\' sleep record (outcome-free: a memo only repeats what Rapier would answer)',
+    memos: 'not saved: P38, a cache of contact-derived answers (outcome-free; a loaded world starts with none)',
+    prunedEpoch: 'not saved: P38, when the memos were last pruned of removed entities',
+    memoHits: 'not saved: P38, a test counter of memoised answers',
+  },
   Felling: {
     world: 'not saved: a link',
     moments: 'not saved: moments added in phases 4d and 9c for phase 13c of the same tick, which empties it; empty at a tick end',
@@ -1579,6 +1588,48 @@ describe('the loader (core-fix)', () => {
       expect(got[0].tick, `saved at tick ${s}`).toBe(T);
       expect(Math.abs(got[0].damage / want[0].damage - 1), `saved at tick ${s}: ${got[0].damage} HP`).toBeLessThan(1e-3);
     }
+  });
+});
+
+describe('save → load → save at several ticks, with a pinned, sleeping ruler (P38; the AC-4 load bug)', () => {
+  it('a giant tripped and pinned under a lid: every checkpoint loads and saves again byte for byte, its body\'s sleep kept', async () => {
+    const w = await make({ size: 100, player: false });
+    const g = w.spawnCreature('giantApe', { x: 0, z: 0 }, Math.PI / 2);
+    // Loose things on the ground beside it, to fall asleep too.
+    spawnLog(w, { p: { x: 12, y: 0.3, z: 4 }, length: 3, mass: 60 });
+    spawnStone(w, { p: { x: -12, y: 0.4, z: -4 }, mass: 8, proto: 2 });
+    w.step();
+    w.rulers.requestTrip(g, 'impact', null);
+    let trip = -1;
+    let lid = -1;
+    const rulerAsleep = (x: World): boolean =>
+      (x.rulers as unknown as { byId: Map<number, { body: { isSleeping(): boolean } | null }> }).byId.get(g.id)?.body?.isSleeping() ?? false;
+    const checks: { tick: number; pinned: boolean; asleep: boolean }[] = [];
+    for (let t = 0; t < 1500; t++) {
+      w.step();
+      if (trip < 0 && w.events.some((e) => e.type === 'trip' && e.f === g)) trip = w.tick;
+      if (trip > 0 && w.tick === trip + 120) {
+        let top = -Infinity;
+        for (const b of BONES) top = Math.max(top, g.rig[b].pos.y);
+        const c = g.rig.abdomen.pos;
+        // A 2.2 t lid laid on it (rulerBody.test's pinned scene): it pins the giant (D-38) and the island falls asleep.
+        lid = spawnBox(w, { p: { x: c.x, y: top + 0.3, z: c.z }, size: [10, 0.04, 10], material: 'dryWood', look: 'lid' });
+      }
+      if (trip < 0 || w.tick < trip + 60 || w.tick % 180 !== 0) continue;
+      await yieldNow();
+      const bytes = serializeWorld(w);
+      // The load used to fail here once the pinned giant slept: "the zero-length step changed Rapier body".
+      const l = await load(bytes);
+      expect(text(serializeWorld(l)) === text(bytes), `save → load → save at tick ${w.tick}`).toBe(true);
+      expect(rulerAsleep(l), `the ruler body's sleep at tick ${w.tick}`).toBe(rulerAsleep(w));
+      // And the loaded world steps on (its awake neighbours may wake the ruler: an entity's sleep isn't saved).
+      l.step();
+      checks.push({ tick: w.tick, pinned: g.ruler!.pinned, asleep: rulerAsleep(w) });
+      l.dispose();
+    }
+    // The scene isn't vacuous: the lid pinned the giant, and the checkpoints include the pinned giant asleep.
+    expect(lid).toBeGreaterThan(0);
+    expect(checks.some((c) => c.pinned && c.asleep), JSON.stringify(checks)).toBe(true);
   });
 });
 

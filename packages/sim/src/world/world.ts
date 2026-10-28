@@ -53,6 +53,9 @@ import { throwRelease as throwReleaseVerb } from './verbs/throw';
 import { WORLD_TUNING } from './worldTuning';
 import { ZoneBodies } from './zones';
 
+/** A bound on the entities one sole cast steps through (a loop guard, not a starting value; P38 named it). */
+const SOLE_CAST_MAX_HITS = 64;
+
 export interface WorldOptions {
   /** uint32; every RNG stream derives from it (§8.1). */
   seed: number;
@@ -429,7 +432,7 @@ export class World implements WorldPort {
     const sole = o?.soleM ?? 0;
     if (sole > 0) {
       const ex = [...exclude];
-      for (let k = 0; k < 64; k++) {
+      for (let k = 0; k < SOLE_CAST_MAX_HITS; k++) {
         const hit = this.queries.castShape({ kind: 'box', hx: sole, hy: RULER_BODY_TUNING.soleProbeHalfM, hz: sole }, { p: { x, y: top, z }, q: { x: 0, y: 0, z: 0, w: 1 } }, { x: 0, y: -1, z: 0 }, top - ground, {
           terrain: false,
           entities: 'all',

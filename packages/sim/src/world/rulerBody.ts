@@ -66,6 +66,8 @@ import type { Entity, FighterMover, ImpactCause, Owner, Pose3, Quat, RulerState,
 
 /** The sole cast's direction (P28, soleGround). */
 const SOLE_DOWN: V3 = Object.freeze({ x: 0, y: -1, z: 0 });
+/** A bound on the entities one sole cast steps through (a loop guard, not a starting value; P38 named it). */
+const SOLE_CAST_MAX_HITS = 64;
 import type { World } from './world';
 import { WORLD_TUNING } from './worldTuning';
 import { boneZoneDesc, boneZoneShape } from './zones';
@@ -664,8 +666,9 @@ export class RulerBodies {
         rb.body.setLinvel(lin, false);
         rb.body.setAngvel(ang, false);
         rb.dynamic = true;
-        if (boolFromRecord(rec.sleeping, `${at}.sleeping`)) rb.body.sleep();
-        else rb.body.wakeUp();
+        // P38: a body that slept is put back to sleep by the loader after its zero-length step (sleepAfterLoad).
+        boolFromRecord(rec.sleeping, `${at}.sleeping`);
+        rb.body.wakeUp();
       } else {
         rb.local = null;
         if (rb.dynamic) this.makeSensors(rb);
@@ -678,6 +681,16 @@ export class RulerBodies {
       }
       for (const k of rb.keys) this.world.physics.resetHistory(k);
     }
+  }
+
+  /**
+   * P38, the loader's last step (save/load.ts): a tripped ruler's body that slept when saved goes back to sleep after
+   * the load's zero-length step (asleep before it, the awake bodies the load made around it woke it there).
+   */
+  sleepAfterLoad(f: Fighter): void {
+    const rb = this.byId.get(f.id);
+    if (!rb?.dynamic) throw new Error(`RulerBodies.sleepAfterLoad: fighter ${f.id} has no tripped ruler body`);
+    rb.body.sleep();
   }
 
   // -------------------------------------------------------------------------
@@ -1051,7 +1064,7 @@ export class RulerBodies {
     if (!(top > terrain)) return best;
     const sole: Shape = { kind: 'box', hx: r, hy: T.soleProbeHalfM, hz: r };
     const ex: number[] = [];
-    for (let k = 0; k < 64; k++) {
+    for (let k = 0; k < SOLE_CAST_MAX_HITS; k++) {
       const hit = w.queries.castShape(sole, { p: { x, y: top, z }, q: { x: 0, y: 0, z: 0, w: 1 } }, SOLE_DOWN, top - terrain, { terrain: false, entities: 'all', exclude: { entities: ex } });
       if (!hit || hit.owner.kind !== 'entity') break;
       const id = hit.owner.id;

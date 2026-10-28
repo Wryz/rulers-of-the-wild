@@ -129,6 +129,8 @@ export class Terrain implements GroundQuery {
   readonly dug: Uint8Array[];
   /** Per tile, bumped on every edit. */
   readonly version: Uint32Array;
+  /** P38 (perf): bumped on every edit of any tile (the loads caches, world/loads.ts). Not saved. */
+  editEpoch = 0;
 
   private readonly physics: PhysicsWorld | null;
   private readonly colliders: (RAPIER.Collider | null)[];
@@ -483,6 +485,7 @@ export class Terrain implements GroundQuery {
 
   /** Rebuilds the listed tiles' colliders (setShape keeps each handle) and bumps their versions. */
   private refresh(tiles: readonly number[]): void {
+    if (tiles.length > 0) this.editEpoch++;
     for (const t of tiles) {
       this.version[t]++;
       const c = this.colliders[t];

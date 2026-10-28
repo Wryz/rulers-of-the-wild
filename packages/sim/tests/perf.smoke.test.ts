@@ -1,0 +1,88 @@
+// P38 perf smoke (docs/M1-DESIGN.md §13.1 P38, §9.3; SPEC:800 "Sim step: under 5 ms on average"): a 10-minute
+// headless soak of the Clearing (36,000 ticks, no commands: the player stands at the spawn while the apes and the giant
+// go about their minds), with no NaN anywhere and a sim step median under 5 ms.
+//
+// The step is timed as the CPU time (user + system) of the thread that steps the world (process.threadCpuUsage; the
+// whole process's where Node lacks it), so a loaded machine running other test files beside it doesn't count against
+// the sim, and neither do V8's concurrent compiler and GC helper threads. A thread's CPU clock is too coarse for one
+// 6 ms step (the full run read a 7.39 ms median against a 5.95 ms wall median and equal means), so it is read around
+// each second of steps (CHECK_EVERY ticks, nothing else inside), and the gate is the median of those seconds' mean
+// step. The per-tick wall-clock median is logged beside it. The NaN checks and the event-loop yields are outside.
+//
+// The gate is SPEC:800's 5 ms, not relaxed. If it fails, the log prints the median and the profile hint; the perf work
+// and the measured profile are in docs/work/ledger.md (P38 perf) and tools/profile-soak.mjs prints the phase table.
+import { afterAll, describe, expect, it } from 'vitest';
+import type { World } from '../src/world/world';
+import { createWorld } from '../src/world/world';
+import { yieldToVitest } from './support/yieldToVitest';
+
+/** SPEC:800: the sim step budget, ms (an acceptance parameter, not tuning). */
+const STEP_BUDGET_MS = 5;
+/** 10 minutes at 60 Hz (§13.1 P38). */
+const SOAK_TICKS = 36_000;
+/** How often every body is checked for NaN, ticks. */
+const CHECK_EVERY = 60;
+const SEED = 1;
+
+const finite = (...xs: number[]): boolean => xs.every((x) => Number.isFinite(x));
+const threadCpu = (): { user: number; system: number } => (process.threadCpuUsage ? process.threadCpuUsage() : process.cpuUsage());
+
+/** The first non-finite number in the world's bodies (entities' poses and velocities, fighters' roots and bones), or null. */
+function firstNaN(w: World): string | null {
+  for (const e of w.entities.all()) {
+    const { p, q } = e.pose;
+    if (!finite(p.x, p.y, p.z, q.x, q.y, q.z, q.w)) return `entity ${e.id} pose`;
+    if (!finite(e.vel.lin.x, e.vel.lin.y, e.vel.lin.z, e.vel.ang.x, e.vel.ang.y, e.vel.ang.z)) return `entity ${e.id} velocity`;
+  }
+  for (const f of w.combat.fighters) {
+    if (!finite(f.pos.x, f.pos.y, f.pos.z, f.yaw, f.hp)) return `fighter ${f.id} root`;
+    for (const [bone, b] of Object.entries(f.rig)) if (!finite(b.pos.x, b.pos.y, b.pos.z)) return `fighter ${f.id} ${bone}`;
+  }
+  return null;
+}
+
+describe('perf smoke: a 10-minute soak of the Clearing (P38, SPEC:800)', () => {
+  let w: World | null = null;
+  afterAll(() => w?.dispose());
+
+  it(
+    'runs 36,000 ticks with no NaN, and the sim step median is under 5 ms',
+    async () => {
+      w = await createWorld({ seed: SEED, scene: 'clearing', nav: 'full' });
+      const cpu = new Float64Array(SOAK_TICKS / CHECK_EVERY);
+      const wall = new Float64Array(SOAK_TICKS);
+      let nan: string | null = null;
+      let c0 = threadCpu();
+      for (let t = 0; t < SOAK_TICKS; t++) {
+        const t0 = performance.now();
+        w.step();
+        wall[t] = performance.now() - t0;
+        if ((t + 1) % CHECK_EVERY === 0) {
+          const c1 = threadCpu();
+          cpu[(t + 1) / CHECK_EVERY - 1] = (c1.user - c0.user + c1.system - c0.system) / 1000 / CHECK_EVERY;
+          nan = firstNaN(w);
+          if (nan) {
+            nan = `${nan} at tick ${w.tick}`;
+            break;
+          }
+        }
+        // Between seconds, outside their CPU readings: Vitest's worker RPC runs on this thread too.
+        if ((t + 1) % CHECK_EVERY === 0) {
+          await yieldToVitest();
+          c0 = threadCpu();
+        }
+      }
+      expect(nan).toBeNull();
+      const median = (xs: Float64Array): number => Float64Array.from(xs).sort()[Math.floor(xs.length / 2)];
+      const mean = (xs: Float64Array): number => xs.reduce((a, b) => a + b, 0) / xs.length;
+      const cpuMedian = median(cpu);
+      console.info(
+        `perf smoke (seed ${SEED}, ${SOAK_TICKS} ticks, ${w.entities.all().length} entities): step CPU median of ${cpu.length} one-second means ${cpuMedian.toFixed(2)} ms ` +
+          `(mean ${mean(cpu).toFixed(2)}), wall median ${median(wall).toFixed(2)} ms (mean ${mean(wall).toFixed(2)}); budget ${STEP_BUDGET_MS} ms` +
+          (cpuMedian < STEP_BUDGET_MS ? '' : ' — OVER BUDGET: see docs/work/ledger.md (P38 perf) and `npx vite-node tools/profile-soak.mjs`'),
+      );
+      expect(cpuMedian).toBeLessThan(STEP_BUDGET_MS);
+    },
+    1_800_000,
+  );
+});

@@ -3,6 +3,9 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "engines": {
+    "node": ">=22 <23"
+  },
   "workspaces": [
     "packages/*",
     "apps/*"
@@ -13,7 +16,7 @@
     "preview": "npm run preview -w apps/client",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "vitest run",
-    "test:accept": "vitest run packages/sim/tests/ac",
+    "test:accept": "vitest run --project sim tests/ac1.noTrapTypes tests/ac2.traps tests/ac3.soloHunt tests/ac4.rule5 tests/ac5.rulerTrip tests/ac6.bodies tests/ac7.determinism",
     "test:rehearsal": "ROTW_REHEARSAL=1 vitest run rehearsal"
   },
   "devDependencies": {

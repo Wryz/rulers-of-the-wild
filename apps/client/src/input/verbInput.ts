@@ -106,6 +106,7 @@ export const VERB_UI_TUNING = defineTuning(
     aimConvergeM: 30,
     arcMaxS: 4,
     leanSampleM: 0.05,
+    aimTerrainStepM: 0.1,
     ropeShellRadiusM: 0.045,
     groundRingM: 0.3,
     landingRingM: 0.33,
@@ -152,6 +153,7 @@ export const VERB_UI_TUNING = defineTuning(
     aimConvergeM: { unit: 'm', source: 'NEW (P35): a throw converges on the crosshair this far out when it rests on nothing', min: 2, max: 200, step: 1, label: 'aim converge' },
     arcMaxS: { unit: 's', source: 'NEW (P35): the throw arc is drawn for at most this long a flight', min: 0.5, max: 10, step: 0.1, label: 'arc length' },
     leanSampleM: { unit: 'm', source: 'NEW (P35): a sloped ghost looks for what it leans on with a downward ray this often along it', min: 0.01, max: 0.5, step: 0.01, label: 'lean sample' },
+    aimTerrainStepM: { unit: 'm', source: "NEW (P38, was a bare default): the aim ray's march step over the terrain before it bisects (input/targeting.ts rayTerrain)", min: 0.01, max: 1, step: 0.01, label: 'aim terrain step' },
     ropeShellRadiusM: { unit: 'm', source: 'NEW (P35): a highlighted rope is drawn this thick (ropes are thin; the outline must read at a few metres)', min: 0.01, max: 0.2, step: 0.005, label: 'rope outline' },
     groundRingM: { unit: 'm', source: 'NEW (P35): the ring marking a ground target (dig, place)', min: 0.05, max: 1, step: 0.01, label: 'ground ring' },
     landingRingM: { unit: 'm', source: 'NEW (P35): the ring where the throw arc lands', min: 0.05, max: 1, step: 0.01, label: 'landing ring' },
@@ -765,7 +767,7 @@ export class VerbInput implements VerbInputPort {
         entities: 'all',
         exclude: { entities: heldMembers(world, held) },
       });
-      p = hit ? new Vector3(hit.point.x, hit.point.y, hit.point.z) : rayTerrain(world, ray, VERB_UI_TUNING.aimRangeM);
+      p = hit ? new Vector3(hit.point.x, hit.point.y, hit.point.z) : rayTerrain(world, ray, VERB_UI_TUNING.aimRangeM, VERB_UI_TUNING.aimTerrainStepM);
     }
     const fwd = ray ? new Vector3(ray.dir.x, 0, ray.dir.z) : new Vector3(Math.sin(me.yaw), 0, Math.cos(me.yaw));
     if (!(fwd.lengthSq() > 1e-12)) fwd.set(Math.sin(me.yaw), 0, Math.cos(me.yaw));
