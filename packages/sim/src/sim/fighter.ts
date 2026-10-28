@@ -298,7 +298,7 @@ export class Fighter {
   readonly airStep = new Vector3();
   /** Weapon in hand (null = fists). */
   weapon: WeaponDef | null = null;
-  /** Lasting cuts (each keeps bleeding a little). */
+  /** Lasting cuts (each bleeds until it clots, then stays as a closed cut). */
   readonly wounds: Wound[] = [];
   /** Bones cut off (with everything below them). */
   readonly severed = new Set<BoneName>();
@@ -2128,7 +2128,7 @@ export type FighterRecord = {
   ammo: { weapon: WeaponRecord; count: number } | null;
   airStep: WorldV3;
   weapon: WeaponRecord | null;
-  wounds: { bone: BoneName; local: [number, number, number]; angle: number; length: number; bleed: number; floor: number; stump: BoneName | null }[];
+  wounds: { bone: BoneName; local: [number, number, number]; angle: number; length: number; bleed: number; floor: number; clot: number; stump: BoneName | null }[];
   severed: BoneName[];
   torn: string[];
   limbDamage: [BoneName, number][];
@@ -2261,7 +2261,7 @@ function brokenRecord(field: string, v: unknown, what: string): Error {
 }
 
 function woundRecord(w: Wound): FighterRecord['wounds'][number] {
-  return { bone: w.bone, local: [w.local[0], w.local[1], w.local[2]], angle: w.angle, length: w.length, bleed: w.bleed, floor: w.floor, stump: w.stump ?? null };
+  return { bone: w.bone, local: [w.local[0], w.local[1], w.local[2]], angle: w.angle, length: w.length, bleed: w.bleed, floor: w.floor, clot: w.clot, stump: w.stump ?? null };
 }
 
 function woundFromRecord(r: FighterRecord['wounds'][number]): Wound {
@@ -2273,6 +2273,7 @@ function woundFromRecord(r: FighterRecord['wounds'][number]): Wound {
     length: n(r.length, 'wound.length'),
     bleed: n(r.bleed, 'wound.bleed'),
     floor: n(r.floor, 'wound.floor'),
+    clot: n(r.clot, 'wound.clot'),
   };
   if (r.stump !== null) w.stump = enumFromRecord(r.stump, SKELETON, 'wound.stump');
   return w;

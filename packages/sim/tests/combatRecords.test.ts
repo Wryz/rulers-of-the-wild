@@ -136,7 +136,7 @@ function fighterState(sim: CombatSim, f: Fighter) {
     defense: f.defense ? `${f.defense.def.kind}|${f.defense.phase}|${f.defense.success}|${f.defense.threatSerial}|${f.defense.side}` : null,
     aim: f.aim?.id ?? null,
     strikeHeight: f.strikeHeight,
-    wounds: f.wounds.map((w) => [w.bone, ...w.local, w.angle, w.length, w.bleed, w.floor, w.stump ?? null]),
+    wounds: f.wounds.map((w) => [w.bone, ...w.local, w.angle, w.length, w.bleed, w.floor, w.clot, w.stump ?? null]),
     severed: [...f.severed],
     torn: [...f.torn],
     rig: BONES.map((b) => {

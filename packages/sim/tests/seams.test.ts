@@ -585,7 +585,7 @@ describe('knockouts: koFighter', () => {
     });
     enemy.weapon = WEAPONS.machete;
     enemy.hp = 0.001;
-    enemy.wounds.push({ bone: 'chest', local: [0, 0.1, 0.1], angle: 0, length: 0.1, bleed: 1, floor: 0.5 });
+    enemy.wounds.push({ bone: 'chest', local: [0, 0.1, 0.1], angle: 0, length: 0.1, bleed: 1, floor: 0.5, clot: 0 });
     const ev = sim.step();
     expect(ev.map((e) => e.type).filter((t) => t === 'ko' || t === 'drop' || t === 'bleedout')).toEqual(['ko', 'drop', 'bleedout']);
     const ko = kos(ev)[0];

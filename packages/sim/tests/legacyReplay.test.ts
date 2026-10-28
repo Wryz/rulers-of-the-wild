@@ -6,7 +6,11 @@
 // integration commit (ca53ce7). To re-record (only ever at a commit whose legacy behaviour is the reference):
 //   ROTW_RECORD_LEGACY=1 npx vitest run packages/sim/tests/legacyReplay.test.ts
 // (The sim's tsconfig has no Node types: the fixture is a JSON import, and recording reaches node:fs dynamically.)
-import { describe, expect, it } from 'vitest';
+//
+// Clotting (the owner's decision after P39: BLEED_TUNING, combat.ts bleedTick) postdates the recording: DungeonStyle's
+// cuts never closed. The fights replay with clotting off (BLEED_TUNING.clotSmallS = Infinity: a cut's seep stays its
+// floor, DS's rule bit for bit), and a wound's new `clot` key is left out of the event text.
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import recorded from './fixtures/legacy-fight.json';
 import { BONES } from '../src/body/skeleton';
 import { BRAWLER_PLAN, BrawlerAI, DEFAULT_AI } from '../src/sim/ai';
@@ -18,6 +22,7 @@ import { Rng } from '../src/sim/math';
 import { ENEMY_MOVES } from '../src/sim/moves';
 import { BRAWLER_STYLE, createPlayer } from '../src/sim/roster';
 import { WEAPONS } from '../src/sim/weapons';
+import { resetTuning, setTuningValue } from '../src/tuning/registry';
 import { ArenaWalkable } from '../src/world/collision';
 
 const CHECK_EVERY = 30;
@@ -160,6 +165,9 @@ function eventText(e: CombatEvent): string {
       return `${m.id}|${m.startup}|${m.active}|${m.recovery}`;
     }
     if (key === 'weapon' && value && typeof value === 'object') return (value as { id: string }).id;
+    // A wound's `clot` (clotting, after P39) postdates the recording: left out of the text. What clotting does shows in
+    // the state hash (a wound's bleed, the fighter's HP), which is compared as recorded.
+    if (key === 'clot' && this && typeof this === 'object' && 'floor' in this) return undefined;
     if (key === 'projectile' && value && typeof value === 'object') {
       const p = value as { id: number; serial: number };
       return `P${p.id}|${p.serial}`;
@@ -393,6 +401,10 @@ async function writeFixture(text: string) {
 }
 
 describe('the recorded legacy fights', () => {
+  // DungeonStyle's bleeding: cuts never clot (see the header).
+  beforeAll(() => setTuningValue('BLEED_TUNING', 'clotSmallS', Infinity));
+  afterAll(() => resetTuning('BLEED_TUNING'));
+
   it.runIf(recording)(
     'records the fixture',
     async () => {

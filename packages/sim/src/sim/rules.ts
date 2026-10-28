@@ -110,6 +110,50 @@ export const MOVE_TUNING = defineTuning(
   },
 );
 
+/**
+ * Clotting (folder "Damage rule › bleeding"): a cut's bleeding closes over time. Bleeding is rule 2's per-second
+ * exception (SPEC:286, DungeonStyle's BLEED_DPS × the wound's rate); DS's wounds eased toward a seep (`floor`, 0.25 ×
+ * the opening rate) that never closed, so any cut bled to death in the end (docs/work/ledger.md, P39). Owner's decision
+ * after P39: bleeds slowly close. A cut's seep tapers linearly to zero over its clot time,
+ * `clotSmallS × (floor / clotRefSeep) ^ clotSizeExp`, counted in ticks (combat.ts bleedTick, the wound's `clot` 0..1,
+ * saved); at 1 it stops bleeding. Only the rate stops: the HP lost, the wound itself (and its gash) stay. A ruler's
+ * wounds are RulerState records that never bleed (§4.6 step 5) and are untouched by this (rule 9).
+ *
+ * Starting values for the playtest to tune: clotSmallS 180 s is a small cut's clot time, the middle of the 2-7 min
+ * bleeding time of a small, shallow incision (the Ivy test); clotRefSeep 0.0375 is DS's smallest cut (opening rate
+ * 0.15 × 0.25); clotSizeExp 1 makes the clot time grow with the seep (a faster flow keeps washing a forming clot away),
+ * so DS's largest cut (rate 1, seep 0.25) bleeds 20 min, the order of an untreated deep laceration, and a stump (seep
+ * 0.3) 24 min; a stone-axe slash on an ape (4-10 HP: rate 0.18-0.42, seep 0.046-0.105) 3.7-8.4 min. Blood lost to the
+ * seep is then ½ × seep × 1.1 HP/s × the clot time: 3.7 HP for the smallest cut, 5.6-29 HP for those slashes, 165 HP for
+ * the largest cut.
+ */
+export const BLEED_TUNING = defineTuning(
+  'BLEED_TUNING',
+  'Damage rule › bleeding',
+  {
+    clotSmallS: 180,
+    clotRefSeep: 0.0375,
+    clotSizeExp: 1,
+  },
+  {
+    clotSmallS: {
+      unit: 's',
+      source: "NEW: owner's decision after P39 (bleeds close); starting value for the playtest: a small cut's 2-7 min bleeding time (Ivy)",
+      min: 1,
+    },
+    clotRefSeep: {
+      unit: 'bleed units',
+      source: "NEW: DS's smallest cut's seep (rate 0.15 × floor 0.25, combat.ts addWound); starting value for the playtest",
+      min: 1e-4,
+    },
+    clotSizeExp: {
+      unit: '—',
+      source: 'NEW: clot time ∝ seep^this (1: the largest DS cut 6.7 × the smallest, 20 min); starting value for the playtest',
+      min: 0,
+    },
+  },
+);
+
 /** HP from an impact energy E against toughness T (rule 2, SPEC:283): max(0, E − T) / K. */
 export function hpFromEnergy(E: number, T: number): number {
   return Math.max(0, E - T) / DAMAGE_TUNING.K;

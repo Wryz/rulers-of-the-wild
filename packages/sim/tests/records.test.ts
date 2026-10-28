@@ -724,8 +724,8 @@ function maximalFighter() {
   f.limbDamage.thighR = 3;
   f.torn.add('earL');
   f.severed.add('foreArmL');
-  f.wounds.push({ bone: 'upperArmL', local: [0, -0.28, 0], angle: 0.5, length: 0.1, bleed: 0.8, floor: 0.2, stump: 'foreArmL' });
-  f.wounds.push({ bone: 'chest', local: [0.05, 0.1, 0.12], angle: -0.3, length: 0.08, bleed: 0.4, floor: 0.1 });
+  f.wounds.push({ bone: 'upperArmL', local: [0, -0.28, 0], angle: 0.5, length: 0.1, bleed: 0.8, floor: 0.2, clot: 0.25, stump: 'foreArmL' });
+  f.wounds.push({ bone: 'chest', local: [0.05, 0.1, 0.12], angle: -0.3, length: 0.08, bleed: 0.4, floor: 0.1, clot: 0.6 });
   // What a fight sets (state 'pickup' cleared these as startWork began).
   const drop = sim.addDrop(WEAPONS.bat, 1, 1);
   f.pickupTarget = { pos: drop.pos, weapon: drop.weapon, grabAt: 9 };
@@ -1167,7 +1167,7 @@ describe("each record's keys are the checked list (MAP gap-7 §3.2-3.5's Save in
         name: `wounds[${i}]`,
         live: w,
         record: rec.wounds[i],
-        fields: { bone: true, local: true, angle: true, length: true, bleed: true, floor: true, stump: true } satisfies Keys<Wound>,
+        fields: { bone: true, local: true, angle: true, length: true, bleed: true, floor: true, clot: true, stump: true } satisfies Keys<Wound>,
       })),
       { name: 'lastKnock', live: f.lastKnock, record: rec.lastKnock, fields: { tick: true, cause: true, by: true } satisfies Keys<KnockRecord> },
       {
