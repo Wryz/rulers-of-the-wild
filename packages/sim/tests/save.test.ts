@@ -518,6 +518,7 @@ const INVENTORY: Record<string, Record<string, string>> = {
     nearDugSetback: 'not saved: TERRAIN_TUNING.spoilSetbackM',
     spoilLimit: 'not saved: derived from the heights and the dug mask (rebuilt on load, equal to the live field)',
     spoilKey: 'not saved: the tuning the spoil limit was built for',
+    editEpoch: 'not saved: P38, an edit counter for the loads memos (a loaded world starts with no memo)',
   },
   GroundCover: {
     world: 'not saved: a link',
@@ -529,6 +530,8 @@ const INVENTORY: Record<string, Record<string, string>> = {
     rt: 'not saved: per-entity runtime (EntityRuntime below)',
     sorted: 'saved: entities (id order)',
     snapshot: 'not saved: a cache of sorted',
+    dynamicSnapshot: 'not saved: P38, a cache of the dynamic entities in sorted',
+    epoch: 'not saved: P38, a change counter for the loads memos (a loaded world starts with no memo)',
     removedGen: 'saved: removed',
     queue: 'saved: impulses',
     forces: 'not saved: P28, the sustained code forces of this tick\'s phase 4d, queued and applied in the same 4d (EntityStore.queueForce), never pending between ticks',
@@ -592,7 +595,11 @@ const INVENTORY: Record<string, Record<string, string>> = {
     world: 'not saved: a link',
     pending: 'not saved: breaks found in phases 9c and 11 for phase 12 of the same tick, which empties it; empty at a tick end',
   },
-  Loads: { world: 'not saved: a link' },
+  Loads: {
+    world: 'not saved: a link',
+    awakeTick: 'not saved: P38, the memos\' sleep record (outcome-free: a memo only repeats what Rapier would answer)',
+    memos: 'not saved: P38, a cache of contact-derived answers (outcome-free; a loaded world starts with none)',
+  },
   Felling: {
     world: 'not saved: a link',
     moments: 'not saved: moments added in phases 4d and 9c for phase 13c of the same tick, which empties it; empty at a tick end',

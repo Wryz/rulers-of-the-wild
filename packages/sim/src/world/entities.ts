@@ -121,6 +121,14 @@ export class EntityStore {
   private readonly sorted: Entity[] = [];
   /** all()'s answer: a copy of `sorted`, made again after a change (so a caller may create or remove while iterating). */
   private snapshot: readonly Entity[] | null = null;
+  /** P38: dynamic()'s answer, made again after a change of any entity's state or body. */
+  private dynamicSnapshot: readonly Entity[] | null = null;
+  /**
+   * P38 (perf): bumped on every change that can move a body or collider by code or change which bodies exist or what
+   * kind they are (create, remove, a state change, a reshape, a code move, a grace filter, a body made or dropped). The
+   * loads system's caches of contact-derived data are valid only while it is unchanged (world/loads.ts). Not saved.
+   */
+  epoch = 0;
   /** Generated ids no longer present. */
   private readonly removedGen = new Set<number>();
   private queue: QueuedImpulse[] = [];
@@ -144,6 +152,22 @@ export class EntityStore {
   all(): readonly Entity[] {
     this.snapshot ??= Object.freeze(this.sorted.slice());
     return this.snapshot;
+  }
+
+  /**
+   * P38 (perf, the maintained list of dynamic entities): every entity whose body is dynamic and enabled (state 'free'),
+   * in id order; a snapshot like all(). The store keeps each body in step with its state (syncBody), so this is the
+   * entities a `body && body.isEnabled() && body.isDynamic()` test finds, without asking Rapier for each.
+   */
+  dynamic(): readonly Entity[] {
+    this.dynamicSnapshot ??= Object.freeze(this.sorted.filter((e) => e.body !== null && bodyKindOf(e.state) === 'dynamic'));
+    return this.dynamicSnapshot;
+  }
+
+  /** P38: a change the loads caches must see (see `epoch`); drops the dynamic() snapshot. */
+  private bump(): void {
+    this.epoch++;
+    this.dynamicSnapshot = null;
   }
 
   // -------------------------------------------------------------------------
@@ -335,6 +359,7 @@ export class EntityStore {
   reshape(e: Entity, shape: Shape, offset: V3 | null = null): void {
     this.own(e, 'reshape');
     checkShape(shape, `entity ${e.id}`);
+    this.bump();
     if (offset) {
       const d = rotate(e.pose.q, offset);
       e.pose = { p: { x: e.pose.p.x + d.x, y: e.pose.p.y + d.y, z: e.pose.p.z + d.z }, q: { ...e.pose.q } };
@@ -371,6 +396,7 @@ export class EntityStore {
    */
   setGrace(e: Entity, g: { from: Owner; minUntil: number; maxUntil: number } | null): void {
     this.own(e, 'setGrace');
+    this.bump();
     e.grace = g ? { from: copyOwner(g.from), minUntil: g.minUntil, maxUntil: g.maxUntil } : null;
     e.collider?.setCollisionGroups(entityCollisionGroups(e));
     e.touched = true;
@@ -385,6 +411,7 @@ export class EntityStore {
   setPose(e: Entity, pose: Pose3): void {
     this.own(e, 'setPose');
     if (!finiteV3(pose.p)) throw new Error(`EntityStore.setPose: a non-finite position for entity ${e.id}`);
+    this.bump();
     e.pose = { p: copyV3(pose.p), q: unitQuat(pose.q) };
     const b = e.body;
     if (b && b.isEnabled()) {
@@ -619,6 +646,7 @@ export class EntityStore {
       s.splice(lo, 0, e);
     }
     this.snapshot = null;
+    this.bump();
   }
 
   /** Drops the body and the record (no joint release, no event). */
@@ -629,6 +657,7 @@ export class EntityStore {
     const i = this.sorted.indexOf(e);
     if (i >= 0) this.sorted.splice(i, 1);
     this.snapshot = null;
+    this.bump();
     if (e.generated) this.removedGen.add(e.id);
   }
 
@@ -639,6 +668,7 @@ export class EntityStore {
   private transition(e: Entity, s: EntityState, force = false): void {
     const rt = this.rt.get(e.id)!;
     if (!force && e.state === s && e.shape === rt.shape) return;
+    this.bump();
     if (s !== 'anchored') e.anchor = null;
     // A new kind of body has not rested yet (an unanchored stake is no longer ground for World.supportAt).
     if (bodyKindOf(s) !== bodyKindOf(e.state)) e.restTicks = 0;
@@ -728,6 +758,7 @@ export class EntityStore {
       if (want === 'disabled') desc.setEnabled(false);
     } else rt.ccd = false;
     const body = this.world.physics.rapier.createRigidBody(desc);
+    this.bump();
     e.body = body;
     e.collider = this.makeCollider(e, body);
     this.refreshReach(e, body);
@@ -779,6 +810,7 @@ export class EntityStore {
   }
 
   private dropBody(e: Entity): void {
+    this.bump();
     if (e.collider) this.world.physics.unregister(e.collider);
     if (e.body) this.world.physics.rapier.removeRigidBody(e.body);
     e.body = null;

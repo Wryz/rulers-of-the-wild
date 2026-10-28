@@ -88,8 +88,47 @@ interface Foot {
   n: number;
 }
 
+/**
+ * P38 (perf): what one entity's supports and span tests were when last read from Rapier, kept while nothing they come
+ * from can have changed (see Loads's header comment below). Never saved: a loaded world starts with none.
+ */
+interface Memo {
+  /** Tick it was made (a dynamic entity's: asleep then). */
+  tick: number;
+  /** A fixed, anchored or held entity's memo (span tests only), or a dynamic one's. */
+  fixed: boolean;
+  entityEpoch: number;
+  terrainEpoch: number;
+  /** A dynamic entity's centre of mass when it was made (null for a fixed one). */
+  com: V3 | null;
+  /** The owners its supports came from, in key order (−1 the terrain), each with its point; null: not kept. */
+  supports: { key: number; point: V3 }[] | null;
+  /** The tick `supports` was read, with every dynamic entity in `partners` asleep. */
+  supportsTick: number;
+  /** Every entity it had a contact pair with (any normal) when `supports` was read, id order. */
+  partners: number[];
+  /** spans() answers at exact load points. */
+  spans: { x: number; y: number; z: number; spans: boolean }[];
+}
+
 export class Loads {
   readonly world: World;
+  /**
+   * P38 (perf, the WardedMMO plan in docs/work/warded-advice.md; outcome-identical): per entity, the tick it was last
+   * seen not asleep (a dynamic entity awake, or not dynamic), and its memo. Rapier's narrow phase updates a contact pair
+   * only when one of its colliders changed (moved, or was edited by code), and a body that ends a step asleep was not
+   * integrated in it; so while an entity and every dynamic entity it has a contact pair with stay asleep at every tick's
+   * end, with no code change to any entity (EntityStore.epoch: create, remove, state, reshape, code move, grace) and no
+   * terrain edit (Terrain.editEpoch), its contact manifolds — and so its supports, its centre of mass and its span
+   * tests — are what they were. A memo is used only then; everything that depends on live state (whether a support is
+   * dynamic and unanchored, a fresh piece's grace, the loads and their history, the capacity test) is still computed
+   * every tick, so rot and other capacity changes (rule 10, from M2) are tested every tick as before. A new pair with a
+   * contact wakes a sleeping body (Rapier's island traversal), which drops the memo. `verify`: also compute every
+   * memoised answer afresh and throw on any difference (tests and the perf proof only).
+   */
+  private readonly awakeTick = new Map<number, number>();
+  private readonly memos = new Map<number, Memo>();
+  static verify = false;
 
   constructor(world: World) {
     this.world = world;
@@ -97,14 +136,22 @@ export class Loads {
 
   /** Phase 11 (see the top of this file). */
   update(w: World): void {
+    const tick = w.tick;
+    // P38: which dynamic entities are asleep at this step's end (the memos' condition), in id order.
+    for (const e of w.entities.dynamic()) if (!e.body!.isSleeping()) this.awakeTick.set(e.id, tick);
+    if (Loads.verify) {
+      expectSame('dynamic entities', w.entities.dynamic().map((e) => e.id), w.entities.all().filter(dynamicBody).map((e) => e.id));
+    }
     const received = new Map<number, Share[]>();
     const supports = new Map<number, Support[]>();
     const supportsOf = (e: Entity): Support[] => {
       let s = supports.get(e.id);
-      if (!s) supports.set(e.id, (s = this.supportsOf(w, e)));
+      if (!s) supports.set(e.id, (s = this.supportsMemo(w, e)));
       return s;
     };
-    const deliver = (e: Entity, n: number, point: V3, loader: Owner | null, foot: Foot | null, depth: number, seen: ReadonlySet<number>): void => {
+    // P38: the coverings a load passed through on its way down, as a path pushed and popped (was a new Set per level).
+    const path: number[] = [];
+    const deliver = (e: Entity, n: number, point: V3, loader: Owner | null, foot: Foot | null, depth: number): void => {
       if (!(n > 0)) return;
       // A fresh piece ignores its breaker until clear (RF-7): it carries none of the breaker's load either, so the
       // pieces of a bearer a foot broke fall away instead of breaking again under the same foot every tick.
@@ -112,9 +159,10 @@ export class Loads {
       const covering = sup.some((s) => s.entity !== null);
       if (covering && depth < LOAD_TUNING.maxSpreadDepth) {
         const share = n / sup.length;
-        const next = new Set(seen).add(e.id);
+        path.push(e.id);
         foot?.via.add(e.id);
-        for (const s of sup) if (s.entity && !next.has(s.entity.id)) deliver(s.entity, share, s.point, loader, foot, depth + 1, next);
+        for (const s of sup) if (s.entity && !path.includes(s.entity.id)) deliver(s.entity, share, s.point, loader, foot, depth + 1);
+        path.pop();
         return;
       }
       let l = received.get(e.id);
@@ -139,14 +187,13 @@ export class Loads {
         if (!e) continue;
         const foot: Foot = { f, side, at, via: new Set(), n: share };
         feet.push(foot);
-        deliver(e, share, at, loader, foot, 0, new Set());
+        deliver(e, share, at, loader, foot, 0);
       }
     }
-    // Resting weights.
-    for (const e of w.entities.all()) {
-      if (!dynamicBody(e) || !resting(e)) continue;
-      const com = e.body!.worldCom();
-      deliver(e, e.mass * g, { x: com.x, y: com.y, z: com.z }, { kind: 'entity', id: e.id }, null, 0, new Set());
+    // Resting weights (P38: the maintained list of dynamic entities, EntityStore.dynamic, in id order).
+    for (const e of w.entities.dynamic()) {
+      if (!resting(e)) continue;
+      deliver(e, e.mass * g, this.comOf(w, e), { kind: 'entity', id: e.id }, null, 0);
     }
 
     // P28 (§4.11 "resting weights"): a ruler down on its dynamic body (tripped, or dead) is a weight on what it lies on, in
@@ -158,7 +205,7 @@ export class Loads {
       if (on.length === 0) continue;
       const share = (f.mass * g) / on.length;
       const loader: Owner = { kind: 'fighter', id: f.id, part: 'ruler' };
-      for (const s of on) if (s.entity && (dynamicBody(s.entity) || s.entity.state === 'anchored')) deliver(s.entity, share, s.point, loader, null, 0, new Set());
+      for (const s of on) if (s.entity && (dynamicBody(s.entity) || s.entity.state === 'anchored')) deliver(s.entity, share, s.point, loader, null, 0);
     }
 
     // P28 (§4.7 steps 7-8, the lost-support rule): each entity that carried a share of a ruler's planted foot joins its
@@ -183,10 +230,11 @@ export class Loads {
       let tested = 0;
       const points: Share[] = [];
       if (shares) {
-        for (const s of shares) {
-          if (!this.spans(w, e, s.point)) continue;
-          tested += s.n;
-          points.push(s);
+        const spans = this.spansMemo(w, e, shares);
+        for (let i = 0; i < shares.length; i++) {
+          if (!spans[i]) continue;
+          tested += shares[i].n;
+          points.push(shares[i]);
         }
       }
       const h = e.loadHist;
@@ -224,6 +272,146 @@ export class Loads {
   }
 
   // -------------------------------------------------------------------------
+  // P38 (perf): the memos (see the class comment)
+  // -------------------------------------------------------------------------
+
+  /** Whether `id` has been asleep at the end of every tick since `since` (only dynamic entities are ever awake). */
+  private sleptSince(id: number, since: number): boolean {
+    const t = this.awakeTick.get(id);
+    return t === undefined || t < since;
+  }
+
+  /** Whether `e` is a dynamic entity asleep at this tick's end. */
+  private asleep(w: World, e: Entity): boolean {
+    return e.body !== null && bodyKindIsDynamic(e) && this.awakeTick.get(e.id) !== w.tick && e.body.isSleeping();
+  }
+
+  /** Whether a memo made at `tick` was made under the epochs that hold now. */
+  private sameEpochs(w: World, m: Memo): boolean {
+    return m.entityEpoch === w.entities.epoch && m.terrainEpoch === w.terrain.editEpoch;
+  }
+
+  /**
+   * A dynamic entity's memo: the one it has if it still holds (the same epochs, and e asleep at every tick's end since it
+   * was made), else a fresh one when e is asleep now (its centre of mass read now), else null.
+   */
+  private dynamicMemo(w: World, e: Entity): Memo | null {
+    const m = this.memos.get(e.id);
+    if (m && !m.fixed && this.sameEpochs(w, m) && this.sleptSince(e.id, m.tick) && this.asleep(w, e)) return m;
+    if (m) this.memos.delete(e.id);
+    if (!this.asleep(w, e)) return null;
+    const com = e.body!.worldCom();
+    const fresh: Memo = {
+      tick: w.tick,
+      fixed: false,
+      entityEpoch: w.entities.epoch,
+      terrainEpoch: w.terrain.editEpoch,
+      com: { x: com.x, y: com.y, z: com.z },
+      supports: null,
+      supportsTick: 0,
+      partners: [],
+      spans: [],
+    };
+    this.memos.set(e.id, fresh);
+    return fresh;
+  }
+
+  /** A resting weight's point: its centre of mass (from the memo while it holds). */
+  private comOf(w: World, e: Entity): V3 {
+    const m = this.dynamicMemo(w, e);
+    const fresh = (): V3 => {
+      const c = e.body!.worldCom();
+      return { x: c.x, y: c.y, z: c.z };
+    };
+    if (!m?.com) return fresh();
+    if (Loads.verify) expectSame(`centre of mass of entity ${e.id}`, m.com, fresh());
+    return { ...m.com };
+  }
+
+  /**
+   * supportsOf through the memo: its support owners and points are kept while e and every dynamic entity it has a contact
+   * pair with have been asleep at every tick's end since they were read.
+   */
+  private supportsMemo(w: World, e: Entity): Support[] {
+    const m = this.dynamicMemo(w, e);
+    if (m?.supports && m.partners.every((id) => this.sleptSince(id, m.supportsTick))) {
+      const out = this.resolve(w, m.supports);
+      if (Loads.verify) expectSame(`supports of entity ${e.id}`, view(out), view(this.supportsOf(w, e)));
+      return out;
+    }
+    const read = this.readSupports(w, e);
+    if (m) {
+      // Kept only when every dynamic entity it touches is asleep now too.
+      const quiet = read.partners.every((id) => {
+        const p = w.entities.get(id);
+        return !p || !p.body || !bodyKindIsDynamic(p) || this.asleep(w, p);
+      });
+      m.supports = quiet ? read.raw : null;
+      m.supportsTick = w.tick;
+      m.partners = read.partners;
+    }
+    return this.resolve(w, read.raw);
+  }
+
+  /**
+   * spans() for each share, through the memo: an answer at the same exact load point as the last tick's is kept, for a
+   * dynamic entity while its memo holds, for a fixed or anchored one while the epochs hold (its body moves only by code).
+   * The memo keeps this tick's points only.
+   */
+  private spansMemo(w: World, e: Entity, shares: readonly Share[]): boolean[] {
+    if (!e.collider) return shares.map((s) => this.spans(w, e, s.point));
+    let m: Memo | null;
+    if (e.body && bodyKindIsDynamic(e)) m = this.dynamicMemo(w, e);
+    else {
+      m = this.memos.get(e.id) ?? null;
+      if (!m || !m.fixed || !this.sameEpochs(w, m)) {
+        m = {
+          tick: w.tick,
+          fixed: true,
+          entityEpoch: w.entities.epoch,
+          terrainEpoch: w.terrain.editEpoch,
+          com: null,
+          supports: null,
+          supportsTick: 0,
+          partners: [],
+          spans: [],
+        };
+        this.memos.set(e.id, m);
+      }
+    }
+    if (!m) return shares.map((s) => this.spans(w, e, s.point));
+    const prev = m.spans;
+    const next: Memo['spans'] = [];
+    const at = (list: Memo['spans'], p: V3): Memo['spans'][number] | undefined => list.find((s) => s.x === p.x && s.y === p.y && s.z === p.z);
+    const out = shares.map(({ point: p }) => {
+      const now = at(next, p);
+      if (now) return now.spans;
+      const kept = at(prev, p);
+      if (kept && Loads.verify) expectSame(`span test of entity ${e.id}`, kept.spans, this.spans(w, e, p));
+      const entry = kept ?? { x: p.x, y: p.y, z: p.z, spans: this.spans(w, e, p) };
+      next.push(entry);
+      return entry.spans;
+    });
+    m.spans = next;
+    return out;
+  }
+
+  /** Memoised support owners → supports, with whether each support entity is dynamic and unanchored read live. */
+  private resolve(w: World, raw: readonly { key: number; point: V3 }[]): Support[] {
+    const out: Support[] = [];
+    for (const r of raw) {
+      if (r.key < 0) {
+        out.push({ entity: null, point: { ...r.point } });
+        continue;
+      }
+      const s = w.entities.get(r.key);
+      if (!s) continue;
+      out.push({ entity: dynamicBody(s) && !w.entities.isAnchored(s) ? s : null, point: { ...r.point } });
+    }
+    return out;
+  }
+
+  // -------------------------------------------------------------------------
 
   /** The topmost entity a planted foot's disc overlaps, if it is dynamic or anchored (a fixed one is the ground). */
   private underFoot(w: World, f: Fighter, at: V3, loader: Owner): Entity | null {
@@ -249,8 +437,17 @@ export class Loads {
 
   /** What a dynamic entity rests on (contact manifolds whose normal up into it is steeper than supportNormalY). */
   private supportsOf(w: World, e: Entity): Support[] {
+    return this.resolve(w, this.readSupports(w, e).raw);
+  }
+
+  /**
+   * supportsOf's reading of Rapier: the owners e rests on in key order (−1 the terrain, else the entity id), each with its
+   * point (the mean of the solver contact points, or e's centre of mass without any), and every entity e has a contact
+   * pair with (P38: the memo's partners).
+   */
+  private readSupports(w: World, e: Entity): { raw: { key: number; point: V3 }[]; partners: number[] } {
     const c = e.collider;
-    if (!c) return [];
+    if (!c) return { raw: [], partners: [] };
     const rapier = w.physics.rapier;
     const others: { key: number; o: typeof c; owner: Owner }[] = [];
     rapier.contactPairsWith(c, (o) => {
@@ -261,7 +458,9 @@ export class Loads {
       others.push({ key: owner.kind === 'terrain' ? 0 : owner.id, o, owner });
     });
     others.sort((a, b) => a.key - b.key || a.o.handle - b.o.handle);
-    const byOwner = new Map<number, { entity: Entity | null; sum: V3; k: number }>();
+    const partners: number[] = [];
+    for (const { owner } of others) if (owner.kind === 'entity' && partners[partners.length - 1] !== owner.id) partners.push(owner.id);
+    const byOwner = new Map<number, { sum: V3; k: number }>();
     for (const { key, o, owner } of others) {
       let nUp = 0;
       let k = 0;
@@ -285,25 +484,20 @@ export class Loads {
         }
       });
       if (nUp === 0) continue;
-      let entity: Entity | null = null;
-      if (owner.kind === 'entity') {
-        const s = w.entities.get(owner.id);
-        if (!s) continue;
-        entity = dynamicBody(s) && !w.entities.isAnchored(s) ? s : null;
-      }
+      // An entity no longer in the store is left out when resolved (resolve), as it always was.
       const cur = byOwner.get(owner.kind === 'terrain' ? -1 : key);
       if (cur) {
         cur.sum = add(cur.sum, sum);
         cur.k += k;
-      } else byOwner.set(owner.kind === 'terrain' ? -1 : key, { entity, sum, k });
+      } else byOwner.set(owner.kind === 'terrain' ? -1 : key, { sum, k });
     }
-    const out: Support[] = [];
+    const raw: { key: number; point: V3 }[] = [];
     for (const key of [...byOwner.keys()].sort((a, b) => a - b)) {
       const s = byOwner.get(key)!;
       const com = e.body!.worldCom();
-      out.push({ entity: s.entity, point: s.k > 0 ? scale(s.sum, 1 / s.k) : { x: com.x, y: com.y, z: com.z } });
+      raw.push({ key, point: s.k > 0 ? scale(s.sum, 1 / s.k) : { x: com.x, y: com.y, z: com.z } });
     }
-    return out;
+    return { raw, partners };
   }
 
   /**
@@ -395,6 +589,26 @@ function standing(w: World, f: Fighter): boolean {
 }
 
 const dynamicBody = (e: Entity): boolean => !!e.body && e.body.isEnabled() && e.body.isDynamic();
+
+/** P38: the store's own answer to dynamicBody (EntityStore.dynamic): a body kept dynamic and enabled by its state. */
+const bodyKindIsDynamic = (e: Entity): boolean => e.state === 'free';
+
+/** P38: a support list as plain data (entity ids and points), for the memo's verify mode. */
+function view(s: readonly Support[]): { id: number | null; point: V3 }[] {
+  return s.map((x) => ({ id: x.entity ? x.entity.id : null, point: x.point }));
+}
+
+/** P38: the memo's verify mode: a memoised answer must equal the fresh one bit for bit. */
+function expectSame(what: string, memo: unknown, fresh: unknown): void {
+  const a = JSON.stringify(memo, bits);
+  const b = JSON.stringify(fresh, bits);
+  if (a !== b) throw new Error(`Loads memo (P38) differs from Rapier for the ${what}: memo ${a}, fresh ${b}`);
+}
+
+/** JSON replacer keeping every number's exact bits (−0 and NaN included). */
+function bits(_k: string, v: unknown): unknown {
+  return typeof v === 'number' ? (Object.is(v, -0) ? '-0' : String(v)) : v;
+}
 
 /** A fresh piece in its grace ignores its breaker (RF-7): the same entity, or the same fighter by any of its parts. */
 function ignores(e: Entity, loader: Owner | null): boolean {
